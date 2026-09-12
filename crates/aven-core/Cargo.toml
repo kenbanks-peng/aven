@@ -24,13 +24,19 @@ oxipng.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlx.workspace = true
 tempfile.workspace = true
 tar.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 url.workspace = true
 zstd.workspace = true
+
+# Both devices and simulators use Apple's SQLite; other targets retain the bundle.
+[target.'cfg(target_os = "ios")'.dependencies]
+sqlx = { workspace = true, features = ["sqlite-unbundled"] }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+sqlx = { workspace = true, features = ["sqlite"] }
 
 [dev-dependencies]
 tempfile.workspace = true

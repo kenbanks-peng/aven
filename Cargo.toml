@@ -14,7 +14,7 @@ oxipng = { version = "10.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate"] }
 tar = "0.4"
 tempfile = "3.14"
 tokio = { version = "1.45", features = ["macros", "sync", "time"] }
@@ -78,8 +78,13 @@ notify-rust = "4"
 [dev-dependencies]
 aven-core = { path = "crates/aven-core", version = "=0.1.30", features = ["test-support"] }
 oxipng.workspace = true
-sqlx.workspace = true
 zstd.workspace = true
+
+[target.'cfg(target_os = "ios")'.dev-dependencies]
+sqlx = { workspace = true, features = ["sqlite-unbundled"] }
+
+[target.'cfg(not(target_os = "ios"))'.dev-dependencies]
+sqlx = { workspace = true, features = ["sqlite"] }
 
 [patch.crates-io]
 crossterm = { git = "https://github.com/raine/crossterm", rev = "f99eeae405e28fa8cb353a6c6e36c493e72891bd" }

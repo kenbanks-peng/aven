@@ -6,6 +6,23 @@ The workspace contains only `aven` and `aven-core`. Consumer API names with an
 `Ios` prefix are retained compatibility contracts, not Apple build dependencies.
 Mobile adapters and app build tooling are maintained outside this workspace.
 
+SQLite backend selection lives in the target-specific SQLx dependencies in
+`crates/aven-core/Cargo.toml` and the root package's test dependencies. The shared
+workspace dependency supplies runtime, macros, and migrations only. iOS device
+and simulator targets (`target_os = "ios"`) select `sqlite-unbundled`; other
+platforms retain the `sqlite` umbrella and its bundled engine. Consumer features
+are additive: enabling `sqlite` elsewhere defeats the iOS system-link contract.
+SQLx's unbundled macro route also requires host build-time bindings, so Apple
+consumers must isolate host and target SDK/header/linker inputs in their tooling.
+
+The iOS selection omits extension loading, deserialize, and unlock-notify.
+Without unlock-notify, SQLx returns shared-cache lock errors instead of waiting
+for unlock notifications; SQLite's busy timeout still handles ordinary busy
+locks. Core file pools use WAL and five connections, and in-memory pools retain
+one connection. Explicit shared-cache connection URLs need separate contention
+validation. System-engine runtime compatibility and minimum-OS support require
+Apple-side validation, not just bundled host tests.
+
 ## System map
 
 | Layer | Owns | Start here | Rules |
