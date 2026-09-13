@@ -78,15 +78,16 @@ impl Default for TuiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TaskTableConfig {
-    #[serde(default = "default_table_column_order")]
-    pub column_order: Vec<TableColumn>,
+    #[serde(default = "default_table_columns")]
+    pub columns: Vec<TableColumn>,
 }
 
 impl Default for TaskTableConfig {
     fn default() -> Self {
         Self {
-            column_order: default_table_column_order(),
+            columns: default_table_columns(),
         }
     }
 }
@@ -130,7 +131,7 @@ impl TableColumn {
     }
 }
 
-fn default_table_column_order() -> Vec<TableColumn> {
+fn default_table_columns() -> Vec<TableColumn> {
     TableColumn::ALL.to_vec()
 }
 
@@ -616,25 +617,17 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         use std::collections::BTreeSet;
 
+        if self.tui.table.columns.is_empty() {
+            bail!("tui.table.columns must include at least one column");
+        }
         let mut table_columns = BTreeSet::new();
-        for column in &self.tui.table.column_order {
+        for column in &self.tui.table.columns {
             if !table_columns.insert(*column) {
                 bail!(
-                    "tui.table.column_order contains duplicate column {}",
+                    "tui.table.columns contains duplicate column {}",
                     column.name()
                 );
             }
-        }
-        let missing = TableColumn::ALL
-            .into_iter()
-            .filter(|column| !table_columns.contains(column))
-            .map(TableColumn::name)
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            bail!(
-                "tui.table.column_order missing columns: {}",
-                missing.join(", ")
-            );
         }
 
         let mut sidebar_views = BTreeSet::new();
@@ -1129,46 +1122,55 @@ mod tests {
     }
 
     #[test]
-    fn table_column_order_defaults_and_round_trips() {
+    fn table_columns_default_and_round_trip() {
         for yaml in ["{}", "tui: {}", "tui:\n  table: {}"] {
             assert_eq!(
-                load_config(yaml).unwrap().tui.table.column_order,
+                load_config(yaml).unwrap().tui.table.columns,
                 TableColumn::ALL
             );
         }
-        let config = load_config("tui:\n  table:\n    column_order: [status, priority, ref, title, labels, metadata, project, time]").unwrap();
-        assert_eq!(config.tui.table.column_order[0], TableColumn::Status);
+        let config = load_config("tui:\n  table:\n    columns: [status, priority, ref]").unwrap();
+        assert_eq!(
+            config.tui.table.columns,
+            [TableColumn::Status, TableColumn::Priority, TableColumn::Ref]
+        );
         let text = serde_yaml::to_string(&config).unwrap();
         assert_eq!(
-            load_config(&text).unwrap().tui.table.column_order,
-            config.tui.table.column_order
+            load_config(&text).unwrap().tui.table.columns,
+            config.tui.table.columns
         );
         assert_eq!(config.tui.columns, default_task_columns());
     }
 
     #[test]
-    fn table_column_order_rejects_incomplete_duplicate_and_unknown_columns() {
-        for (order, expected) in [
+    fn table_columns_reject_empty_duplicate_and_unknown_columns() {
+        for (columns, expected) in [
+            ("[]", "tui.table.columns must include at least one column"),
             (
-                "[ref, title, labels, project, status, priority, time]",
-                "missing columns: metadata",
-            ),
-            (
-                "[]",
-                "missing columns: ref, title, labels, metadata, project, status, priority, time",
-            ),
-            (
-                "[ref, title, labels, metadata, project, status, priority, time, ref]",
-                "duplicate column ref",
+                "[ref, title, labels, metadata, project, status, priority, ref]",
+                "tui.table.columns contains duplicate column ref",
             ),
             ("[robot]", "unknown variant `robot`"),
         ] {
             let error =
-                load_config(&format!("tui:\n  table:\n    column_order: {order}")).unwrap_err();
+                load_config(&format!("tui:\n  table:\n    columns: {columns}")).unwrap_err();
             let message = format!("{error:#}");
             assert!(message.contains(expected), "{message}");
-            assert!(message.contains("tui.table.column_order"), "{message}");
         }
+    }
+
+    #[test]
+    fn table_columns_reject_legacy_column_order_instead_of_ignoring_it() {
+        let error = load_config(
+            "tui:\n  table:\n    column_order: [ref, title, labels, metadata, project, status, priority, time]",
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("unknown field `column_order`"),
+            "{message}"
+        );
+        assert!(message.contains("columns"), "{message}");
     }
 
     #[test]

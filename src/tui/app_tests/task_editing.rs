@@ -237,6 +237,26 @@ async fn edit_title_shortcut_prefills_and_updates_title() {
 }
 
 #[tokio::test]
+async fn hidden_title_uses_visible_text_editor() {
+    let mut app = test_app().await;
+    create_and_select_task(&mut app, test_task_draft("Hidden title")).await;
+    let mut config = app.store.config().clone();
+    config.tui.table.columns = vec![
+        crate::config::TableColumn::Ref,
+        crate::config::TableColumn::Status,
+    ];
+    app.store.set_config(config);
+
+    app.begin_edit_title();
+    assert!(matches!(
+        &app.overlay,
+        Some(OverlayState::TextInput(state))
+            if state.title == EDIT_TITLE_TITLE && state.input.as_str() == "Hidden title"
+    ));
+    assert!(render_app_text(&mut app, 80, 24).contains(EDIT_TITLE_TITLE));
+}
+
+#[tokio::test]
 async fn one_mark_edits_the_marked_title_and_preserves_cursor_selection() {
     let mut app = test_app().await;
     let marked = create_and_select_task(&mut app, test_task_draft("Marked title")).await;

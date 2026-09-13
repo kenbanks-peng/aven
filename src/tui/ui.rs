@@ -266,7 +266,7 @@ fn render_surface(
     let footer = footer_area(inner);
 
     render_header(frame, store, view.update_badge.as_ref(), header);
-    let inline_title_editor = inline_title_editor(view);
+    let inline_title_editor = inline_title_editor(view, store);
     let inline_detail_title_editor = inline_detail_title_editor(view);
     if body.width < 100 {
         render_main_surface(
@@ -560,8 +560,18 @@ fn edit_title_view<'a>(view: &'a ViewState<'a>) -> Option<&'a TextInputView> {
     }
 }
 
-fn inline_title_editor<'a>(view: &'a ViewState<'a>) -> Option<&'a TextInputView> {
+fn inline_title_editor<'a>(view: &'a ViewState<'a>, store: &TuiStore) -> Option<&'a TextInputView> {
     if view.focus != Focus::Tasks || view.detail_underlay {
+        return None;
+    }
+    if !store.view_state.is_columns()
+        && !store
+            .config()
+            .tui
+            .table
+            .columns
+            .contains(&crate::config::TableColumn::Title)
+    {
         return None;
     }
     edit_title_view(view)

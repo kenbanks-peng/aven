@@ -93,7 +93,7 @@ async fn reordered_status_right_click_targets_clicked_task() {
         create_and_select_task(&mut app, test_task_draft("task one")).await;
         create_and_select_task(&mut app, test_task_draft("task two")).await;
         let mut config = app.store.config().clone();
-        config.tui.table.column_order.rotate_left(5);
+        config.tui.table.columns.rotate_left(5);
         app.store.set_config(config);
         app.list.select_task(Some(1));
         let click = status_right_click_event(&app, size, 0);
@@ -194,6 +194,34 @@ async fn status_right_click_ignores_non_status_columns() {
 
     assert_eq!(app.list.selected_task(), Some(1));
     assert!(app.overlay.is_none());
+}
+
+#[tokio::test]
+async fn hidden_status_has_no_mouse_target_but_keyboard_picker_remains_available() {
+    let mut app = test_app().await;
+    create_and_select_task(&mut app, test_task_draft("hidden status")).await;
+    let mut config = app.store.config().clone();
+    config.tui.table.columns = vec![
+        crate::config::TableColumn::Ref,
+        crate::config::TableColumn::Title,
+    ];
+    app.store.set_config(config);
+    let area = task_list_area((100, 24));
+    let table = app.list.table_state();
+    for row in area.y..area.bottom() {
+        for column in area.x..area.right() {
+            assert!(
+                crate::tui::ui::task_status_at_position(&app.store, table, area, column, row)
+                    .is_none()
+            );
+        }
+    }
+
+    app.begin_status_picker();
+    assert_eq!(
+        app.footer_choice.as_ref().map(|choice| choice.mode),
+        Some(FooterChoiceMode::Status)
+    );
 }
 
 #[tokio::test]

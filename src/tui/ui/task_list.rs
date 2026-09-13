@@ -72,11 +72,17 @@ struct TaskTimeContext {
     due_order: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct TaskRowState {
     selected: bool,
     focused: bool,
     marked: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TaskListCellLayout<'a> {
+    widths: &'a [usize; 8],
+    state_column: Option<TableColumn>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -106,6 +112,7 @@ impl<'a> EpicSelectionContext<'a> {
 struct TaskListTaskRow {
     style: Style,
     cells: Vec<Line<'static>>,
+    state: TaskRowState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,7 +201,7 @@ fn task_list_status_area(
     );
     TableLayout::resolve(
         &columns,
-        &store.config().tui.table.column_order,
+        &store.config().tui.table.columns,
         table_area.width,
     )
     .cell(TableColumn::Status, row_area)
@@ -329,7 +336,7 @@ fn build_task_list_render_model(
         return TaskListRenderModel {
             layout: TableLayout::resolve(
                 &task_list_columns(store, area.width < 90),
-                &store.config().tui.table.column_order,
+                &store.config().tui.table.columns,
                 area.width,
             ),
             row_areas: row_areas.to_vec(),
@@ -359,7 +366,9 @@ fn build_task_list_render_model(
     let due_order = store.view_state.sort() == TaskSort::DueOn;
     let has_deferred_rows = projection.view.render_mode == TaskListRenderMode::Flat
         && visible_tasks.iter().any(|item| is_deferred(item, now));
-    let layout = TableLayout::resolve(&columns, &store.config().tui.table.column_order, area.width);
+    let configured_columns = &store.config().tui.table.columns;
+    let layout = TableLayout::resolve(&columns, configured_columns, area.width);
+    let state_column = layout.state_column();
     let column_widths = layout.widths();
     let mut rows = Vec::new();
     for (_, row) in visible_rows {
@@ -370,6 +379,7 @@ fn build_task_list_render_model(
                     rows.push(TaskListRenderRow::Task(TaskListTaskRow {
                         style: row_style(false, focus == Focus::Tasks, false, false, false),
                         cells: blank_task_row_cells(),
+                        state: TaskRowState::default(),
                     }));
                     continue;
                 };
@@ -386,7 +396,7 @@ fn build_task_list_render_model(
                 let cells = if projection.view.render_mode == TaskListRenderMode::Epics
                     && item.task.is_epic
                 {
-                    build_epic_parent_row_cells(
+                    build_epic_parent_row_cells_for_columns(
                         item,
                         TaskTimeContext {
                             now_seconds: now,
@@ -395,7 +405,10 @@ fn build_task_list_render_model(
                         },
                         store,
                         inline_title_editor.filter(|_| selected),
-                        &column_widths,
+                        TaskListCellLayout {
+                            widths: &column_widths,
+                            state_column,
+                        },
                         TaskRowState {
                             selected,
                             focused: focus == Focus::Tasks,
@@ -404,7 +417,7 @@ fn build_task_list_render_model(
                         epic_selection,
                     )
                 } else {
-                    build_task_row_cells(
+                    build_task_row_cells_for_columns(
                         item,
                         TaskTimeContext {
                             now_seconds: now,
@@ -412,7 +425,10 @@ fn build_task_list_render_model(
                             due_order,
                         },
                         inline_title_editor.filter(|_| selected),
-                        &column_widths,
+                        TaskListCellLayout {
+                            widths: &column_widths,
+                            state_column,
+                        },
                         TaskRowState {
                             selected,
                             focused: focus == Focus::Tasks,
@@ -421,7 +437,15 @@ fn build_task_list_render_model(
                         epic_selection,
                     )
                 };
-                rows.push(TaskListRenderRow::Task(TaskListTaskRow { style, cells }));
+                rows.push(TaskListRenderRow::Task(TaskListTaskRow {
+                    style,
+                    cells,
+                    state: TaskRowState {
+                        selected,
+                        focused: focus == Focus::Tasks,
+                        marked,
+                    },
+                }));
             }
             TaskListRow::EpicChild {
                 parent_index: _,
@@ -432,6 +456,7 @@ fn build_task_list_render_model(
                     rows.push(TaskListRenderRow::Task(TaskListTaskRow {
                         style: row_style(false, focus == Focus::Tasks, false, false, false),
                         cells: blank_task_row_cells(),
+                        state: TaskRowState::default(),
                     }));
                     continue;
                 };
@@ -445,7 +470,7 @@ fn build_task_list_render_model(
                         false,
                         item.unresolved_blocker_count > 0,
                     ),
-                    cells: build_epic_child_row_cells(
+                    cells: build_epic_child_row_cells_for_columns(
                         item,
                         *last,
                         inline_title_editor.filter(|_| selected),
@@ -454,7 +479,10 @@ fn build_task_list_render_model(
                             render_mode: TaskListRenderMode::Epics,
                             due_order,
                         },
-                        &column_widths,
+                        TaskListCellLayout {
+                            widths: &column_widths,
+                            state_column,
+                        },
                         TaskRowState {
                             selected,
                             focused: focus == Focus::Tasks,
@@ -462,6 +490,11 @@ fn build_task_list_render_model(
                         },
                         epic_selection,
                     ),
+                    state: TaskRowState {
+                        selected,
+                        focused: focus == Focus::Tasks,
+                        marked,
+                    },
                 }));
             }
         }
@@ -754,7 +787,7 @@ fn render_task_row_from_model(
     layout: &TableLayout,
     row: &TaskListTaskRow,
 ) {
-    render_task_row_cells(frame, area, row.style, layout, &row.cells);
+    render_task_row_cells(frame, area, row.style, layout, &row.cells, row.state);
 }
 
 fn render_task_row_cells(
@@ -763,14 +796,28 @@ fn render_task_row_cells(
     style: Style,
     layout: &TableLayout,
     values: &[Line<'static>],
+    state: TaskRowState,
 ) {
     frame.render_widget(Block::new().style(style), area);
+    let state_area = layout.state_gutter(area);
+    if state_area.width > 0 {
+        frame.render_widget(
+            Paragraph::new(Line::from(task_state_prefix(
+                state.selected,
+                state.focused,
+                state.marked,
+            )))
+            .style(style),
+            state_area,
+        );
+    }
     for (column, value) in TableColumn::ALL.into_iter().zip(values) {
         let area = layout.cell(column, area);
         frame.render_widget(Paragraph::new(value.clone()).style(style), area);
     }
 }
 
+#[cfg(test)]
 fn build_task_row_cells(
     item: &TaskListItem,
     time_context: TaskTimeContext,
@@ -779,39 +826,78 @@ fn build_task_row_cells(
     state: TaskRowState,
     epic_selection: EpicSelectionContext<'_>,
 ) -> Vec<Line<'static>> {
+    build_task_row_cells_for_columns(
+        item,
+        time_context,
+        inline_title_editor,
+        TaskListCellLayout {
+            widths: column_widths,
+            state_column: Some(TableColumn::Ref),
+        },
+        state,
+        epic_selection,
+    )
+}
+
+fn build_task_row_cells_for_columns(
+    item: &TaskListItem,
+    time_context: TaskTimeContext,
+    inline_title_editor: Option<&TextInputView>,
+    cell_layout: TaskListCellLayout<'_>,
+    state: TaskRowState,
+    epic_selection: EpicSelectionContext<'_>,
+) -> Vec<Line<'static>> {
+    let column_widths = cell_layout.widths;
+    let state_column = cell_layout.state_column;
     let time = task_time_cell(
         item,
         time_context.now_seconds,
         time_context.render_mode,
         time_context.due_order,
     );
+    let state_prefix_width = if state_column == Some(TableColumn::Title) {
+        spans_width(&task_state_prefix(
+            state.selected,
+            state.focused,
+            state.marked,
+        ))
+    } else {
+        0
+    };
+    let title_width = column_widths[TableColumn::Title as usize].saturating_sub(state_prefix_width);
     let title = inline_title_editor
-        .map(|editor| inline_title_edit_cell(editor, column_widths[TableColumn::Title as usize]))
-        .unwrap_or_else(|| title_cell(item, column_widths[TableColumn::Title as usize]));
+        .map(|editor| inline_title_edit_cell(editor, title_width))
+        .unwrap_or_else(|| title_cell(item, title_width));
     let labels = label_cell(&item.labels, column_widths[TableColumn::Labels as usize]);
     TableColumn::ALL
         .into_iter()
-        .map(|column| match column {
-            TableColumn::Ref => {
-                task_ref_cell(item, column_widths[TableColumn::Ref as usize], state)
-            }
-            TableColumn::Title => title.clone(),
-            TableColumn::Labels => labels.clone(),
-            TableColumn::Metadata => metadata_cell(
-                item,
-                epic_selection,
-                time_context.render_mode == TaskListRenderMode::Flat
-                    && is_deferred(item, time_context.now_seconds),
-            ),
-            TableColumn::Project => {
-                project_cell(item, column_widths[TableColumn::Project as usize])
-            }
-            TableColumn::Status => status_chip(item.task.status.as_str()),
-            TableColumn::Priority => Line::from(Span::styled(
-                priority_icon(item.task.priority.as_str()),
-                theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
-            )),
-            TableColumn::Time => time.clone(),
+        .map(|column| {
+            let cell = match column {
+                TableColumn::Ref if state_column == Some(TableColumn::Ref) => {
+                    task_ref_cell(item, column_widths[TableColumn::Ref as usize], state)
+                }
+                TableColumn::Ref => {
+                    task_ref_content_cell(item, column_widths[TableColumn::Ref as usize])
+                }
+                TableColumn::Title => title.clone(),
+                TableColumn::Labels => labels.clone(),
+                TableColumn::Metadata => metadata_cell(
+                    item,
+                    epic_selection,
+                    time_context.render_mode == TaskListRenderMode::Flat
+                        && is_deferred(item, time_context.now_seconds),
+                ),
+                TableColumn::Project => {
+                    project_cell(item, column_widths[TableColumn::Project as usize])
+                }
+                TableColumn::Status => status_chip(item.task.status.as_str()),
+                TableColumn::Priority => Line::from(Span::styled(
+                    priority_icon(item.task.priority.as_str()),
+                    theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
+                )),
+                TableColumn::Time => time.clone(),
+            };
+            state_prefixed_cell(column, state_column, cell, state)
         })
         .collect()
 }
@@ -987,20 +1073,36 @@ fn epic_activity_cell(item: &TaskListItem, now_seconds: i64, due_order: bool) ->
     ))
 }
 
-fn build_epic_parent_row_cells(
+fn build_epic_parent_row_cells_for_columns(
     item: &TaskListItem,
     time: TaskTimeContext,
     store: &TuiStore,
     inline_title_editor: Option<&TextInputView>,
-    column_widths: &[usize; 8],
+    cell_layout: TaskListCellLayout<'_>,
     state: TaskRowState,
     epic_selection: EpicSelectionContext<'_>,
 ) -> Vec<Line<'static>> {
+    let column_widths = cell_layout.widths;
+    let state_column = cell_layout.state_column;
+    let state_prefix_width = if state_column == Some(TableColumn::Title) {
+        spans_width(&task_state_prefix(
+            state.selected,
+            state.focused,
+            state.marked,
+        ))
+    } else {
+        0
+    };
+    let title_width = column_widths[TableColumn::Title as usize].saturating_sub(state_prefix_width);
     let title = inline_title_editor
-        .map(|editor| inline_title_edit_cell(editor, column_widths[TableColumn::Title as usize]))
-        .unwrap_or_else(|| title_cell(item, column_widths[TableColumn::Title as usize]));
+        .map(|editor| inline_title_edit_cell(editor, title_width))
+        .unwrap_or_else(|| title_cell(item, title_width));
     let expanded = store.view_state.expanded_epic_ids.contains(&item.task.id);
-    let mut ref_spans = task_state_prefix(state.selected, state.focused, state.marked);
+    let mut ref_spans = if state_column == Some(TableColumn::Ref) {
+        task_state_prefix(state.selected, state.focused, state.marked)
+    } else {
+        Vec::new()
+    };
     ref_spans.extend([
         Span::styled(if expanded { "▾" } else { "▸" }, Style::new().fg(ACCENT)),
         Span::raw(" "),
@@ -1018,24 +1120,28 @@ fn build_epic_parent_row_cells(
         .unwrap_or_default();
     TableColumn::ALL
         .into_iter()
-        .map(|column| match column {
-            TableColumn::Ref => Line::from(ref_spans.clone()),
-            TableColumn::Title => title.clone(),
-            TableColumn::Labels => summary.clone(),
-            TableColumn::Metadata => metadata_cell(item, epic_selection, false),
-            TableColumn::Project => {
-                project_cell(item, column_widths[TableColumn::Project as usize])
-            }
-            TableColumn::Status => status_chip(item.task.status.as_str()),
-            TableColumn::Priority => Line::from(Span::styled(
-                priority_icon(item.task.priority.as_str()),
-                theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
-            )),
-            TableColumn::Time => epic_activity_cell(item, time.now_seconds, time.due_order),
+        .map(|column| {
+            let cell = match column {
+                TableColumn::Ref => Line::from(ref_spans.clone()),
+                TableColumn::Title => title.clone(),
+                TableColumn::Labels => summary.clone(),
+                TableColumn::Metadata => metadata_cell(item, epic_selection, false),
+                TableColumn::Project => {
+                    project_cell(item, column_widths[TableColumn::Project as usize])
+                }
+                TableColumn::Status => status_chip(item.task.status.as_str()),
+                TableColumn::Priority => Line::from(Span::styled(
+                    priority_icon(item.task.priority.as_str()),
+                    theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
+                )),
+                TableColumn::Time => epic_activity_cell(item, time.now_seconds, time.due_order),
+            };
+            state_prefixed_cell(column, state_column, cell, state)
         })
         .collect()
 }
 
+#[cfg(test)]
 fn build_epic_child_row_cells(
     item: &TaskListItem,
     last: bool,
@@ -1045,8 +1151,47 @@ fn build_epic_child_row_cells(
     state: TaskRowState,
     epic_selection: EpicSelectionContext<'_>,
 ) -> Vec<Line<'static>> {
+    build_epic_child_row_cells_for_columns(
+        item,
+        last,
+        inline_title_editor,
+        time,
+        TaskListCellLayout {
+            widths: column_widths,
+            state_column: Some(TableColumn::Ref),
+        },
+        state,
+        epic_selection,
+    )
+}
+
+fn build_epic_child_row_cells_for_columns(
+    item: &TaskListItem,
+    last: bool,
+    inline_title_editor: Option<&TextInputView>,
+    time: TaskTimeContext,
+    cell_layout: TaskListCellLayout<'_>,
+    state: TaskRowState,
+    epic_selection: EpicSelectionContext<'_>,
+) -> Vec<Line<'static>> {
+    let column_widths = cell_layout.widths;
+    let state_column = cell_layout.state_column;
+    let state_prefix_width = if state_column == Some(TableColumn::Title) {
+        spans_width(&task_state_prefix(
+            state.selected,
+            state.focused,
+            state.marked,
+        ))
+    } else {
+        0
+    };
+    let title_width = column_widths[TableColumn::Title as usize].saturating_sub(state_prefix_width);
     let branch = if last { "└─" } else { "├─" };
-    let mut ref_spans = task_state_prefix(state.selected, state.focused, state.marked);
+    let mut ref_spans = if state_column == Some(TableColumn::Ref) {
+        task_state_prefix(state.selected, state.focused, state.marked)
+    } else {
+        Vec::new()
+    };
     ref_spans.extend([
         Span::styled(branch, Style::new().fg(FG_DIM)),
         Span::raw(" "),
@@ -1063,35 +1208,36 @@ fn build_epic_child_row_cells(
     let ref_line = Line::from(ref_spans);
     TableColumn::ALL
         .into_iter()
-        .map(|column| match column {
-            TableColumn::Ref => ref_line.clone(),
-            TableColumn::Title => inline_title_editor
-                .map(|editor| {
-                    inline_title_edit_cell(editor, column_widths[TableColumn::Title as usize])
-                })
-                .unwrap_or_else(|| title_cell(item, column_widths[TableColumn::Title as usize])),
-            TableColumn::Labels => Line::default(),
-            TableColumn::Metadata => metadata_cell(item, epic_selection, false),
-            TableColumn::Project => {
-                project_cell(item, column_widths[TableColumn::Project as usize])
-            }
-            TableColumn::Status => status_chip(item.task.status.as_str()),
-            TableColumn::Priority => Line::from(Span::styled(
-                priority_icon(item.task.priority.as_str()),
-                theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
-            )),
-            TableColumn::Time => {
-                if time.due_order {
-                    task_time_cell(item, time.now_seconds, time.render_mode, true)
-                } else {
-                    Line::from(Span::styled(
-                        task_seconds_since(&item.task.updated_at, time.now_seconds)
-                            .map(compact_age)
-                            .unwrap_or_default(),
-                        age_style(&item.task.updated_at, time.now_seconds),
-                    ))
+        .map(|column| {
+            let cell = match column {
+                TableColumn::Ref => ref_line.clone(),
+                TableColumn::Title => inline_title_editor
+                    .map(|editor| inline_title_edit_cell(editor, title_width))
+                    .unwrap_or_else(|| title_cell(item, title_width)),
+                TableColumn::Labels => Line::default(),
+                TableColumn::Metadata => metadata_cell(item, epic_selection, false),
+                TableColumn::Project => {
+                    project_cell(item, column_widths[TableColumn::Project as usize])
                 }
-            }
+                TableColumn::Status => status_chip(item.task.status.as_str()),
+                TableColumn::Priority => Line::from(Span::styled(
+                    priority_icon(item.task.priority.as_str()),
+                    theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
+                )),
+                TableColumn::Time => {
+                    if time.due_order {
+                        task_time_cell(item, time.now_seconds, time.render_mode, true)
+                    } else {
+                        Line::from(Span::styled(
+                            task_seconds_since(&item.task.updated_at, time.now_seconds)
+                                .map(compact_age)
+                                .unwrap_or_default(),
+                            age_style(&item.task.updated_at, time.now_seconds),
+                        ))
+                    }
+                }
+            };
+            state_prefixed_cell(column, state_column, cell, state)
         })
         .collect()
 }
@@ -1235,6 +1381,11 @@ fn task_ref_spans(item: &TaskListItem, display_ref: String) -> Vec<Span<'static>
     }
 }
 
+fn task_ref_content_cell(item: &TaskListItem, max_width: usize) -> Line<'static> {
+    let display_ref = truncate_width(&item.display_ref, max_width);
+    Line::from(task_ref_spans(item, display_ref))
+}
+
 fn task_ref_cell(item: &TaskListItem, max_width: usize, state: TaskRowState) -> Line<'static> {
     let mut spans = task_state_prefix(state.selected, state.focused, state.marked);
     let display_ref = truncate_width(
@@ -1242,6 +1393,20 @@ fn task_ref_cell(item: &TaskListItem, max_width: usize, state: TaskRowState) -> 
         max_width.saturating_sub(spans_width(&spans)),
     );
     spans.extend(task_ref_spans(item, display_ref));
+    Line::from(spans)
+}
+
+fn state_prefixed_cell(
+    column: TableColumn,
+    state_column: Option<TableColumn>,
+    cell: Line<'static>,
+    state: TaskRowState,
+) -> Line<'static> {
+    if state_column != Some(column) || column == TableColumn::Ref {
+        return cell;
+    }
+    let mut spans = task_state_prefix(state.selected, state.focused, state.marked);
+    spans.extend(cell.spans);
     Line::from(spans)
 }
 
@@ -1672,7 +1837,18 @@ mod tests {
                     },
                     EpicSelectionContext::default(),
                 );
-                render_task_row_cells(frame, frame.area(), style, &layout, &cells);
+                render_task_row_cells(
+                    frame,
+                    frame.area(),
+                    style,
+                    &layout,
+                    &cells,
+                    TaskRowState {
+                        selected: true,
+                        focused: true,
+                        marked: false,
+                    },
+                );
             })
             .unwrap();
         terminal.backend().buffer().clone()
@@ -1687,9 +1863,24 @@ mod tests {
         width: u16,
         height: u16,
     ) -> ratatui::buffer::Buffer {
+        render_task_list_buffer_with_selection(store, width, height, false)
+    }
+
+    fn render_task_list_buffer_with_selection(
+        store: &TuiStore,
+        width: u16,
+        height: u16,
+        marked: bool,
+    ) -> ratatui::buffer::Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut table_state = TableState::default();
+        table_state.select(Some(0));
+        let marked_task_ids = if marked {
+            BTreeSet::from([store.tasks[0].task.id.clone()])
+        } else {
+            BTreeSet::new()
+        };
         terminal
             .draw(|frame| {
                 render_task_list(
@@ -1699,7 +1890,7 @@ mod tests {
                     Focus::Tasks,
                     frame.area(),
                     None,
-                    &BTreeSet::new(),
+                    &marked_task_ids,
                 );
             })
             .unwrap();
@@ -1822,9 +2013,9 @@ mod tests {
             store.view_state.query = TaskQuery::All;
             for rotation in 0..8 {
                 let mut config = store.config().clone();
-                config.tui.table.column_order = TableColumn::ALL.to_vec();
-                config.tui.table.column_order.rotate_left(rotation);
-                let order = config.tui.table.column_order.clone();
+                config.tui.table.columns = TableColumn::ALL.to_vec();
+                config.tui.table.columns.rotate_left(rotation);
+                let order = config.tui.table.columns.clone();
                 store.set_config(config);
                 let area = Rect::new(5, 2, width, 5);
                 let mut state = TableState::default();
@@ -1839,6 +2030,9 @@ mod tests {
                 let mut previous_right = area.x;
                 for column in order {
                     let cell = model.layout.cell(column, area);
+                    if cell.width == 0 {
+                        continue;
+                    }
                     assert!(
                         cell.x >= previous_right,
                         "{column:?} at rotation {rotation}"
@@ -1864,7 +2058,10 @@ mod tests {
                     let header = header.chars().take(cell.width as usize).collect::<String>();
                     assert!(text_in_cell(&buffer, cell).contains(&header), "{column:?}");
                     let cell = Rect { y: 1, ..cell };
-                    assert!(text_in_cell(&buffer, cell).contains(content), "{column:?}");
+                    assert!(
+                        text_in_cell(&buffer, cell).contains(content),
+                        "{column:?} at rotation {rotation} width {width}"
+                    );
                 }
                 let row = Rect::new(area.x, area.y + 1, width, 1);
                 let status = model.layout.cell(TableColumn::Status, row);
@@ -1880,12 +2077,351 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configured_subset_hides_columns_and_keeps_status_geometry() {
+        let mut item = task_list_item("Visible title");
+        item.labels = vec!["ios".to_string()];
+        item.has_notes = true;
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Status, TableColumn::Time];
+        store.set_config(config);
+
+        let area = Rect::new(0, 0, 120, 5);
+        let mut state = TableState::default();
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            area,
+            None,
+            &BTreeSet::new(),
+        );
+        let title = model.layout.cell(TableColumn::Title, area);
+        let status = model.layout.cell(TableColumn::Status, area);
+        let time = model.layout.cell(TableColumn::Time, area);
+        assert_eq!(status.x, title.right() + 1);
+        assert_eq!(time.x, status.right() + 1);
+        for column in [
+            TableColumn::Ref,
+            TableColumn::Labels,
+            TableColumn::Metadata,
+            TableColumn::Project,
+            TableColumn::Priority,
+        ] {
+            assert_eq!(model.layout.cell(column, area).width, 0);
+        }
+
+        let rendered = buffer_text(&render_task_list_buffer(&store, 120, 5));
+        assert!(rendered.contains("TITLE"));
+        assert!(rendered.contains("STATUS"));
+        assert!(rendered.contains("Visible title"));
+        assert!(!rendered.contains("REF"));
+        assert!(!rendered.contains("LABELS"));
+        assert!(!rendered.contains("PROJECT"));
+        assert!(!rendered.contains("P"));
+    }
+
+    #[tokio::test]
+    async fn fallback_state_gutter_preserves_single_column_content() {
+        let mut item = task_list_item("Fallback title");
+        item.labels = vec!["ios".to_string(), "ux".to_string()];
+        item.has_notes = true;
+        item.task.priority = TaskPriority::High;
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+
+        for (column, expected) in [
+            (TableColumn::Status, "todo"),
+            (TableColumn::Priority, priority_icon("high")),
+            (TableColumn::Labels, "ios"),
+            (TableColumn::Metadata, "✎"),
+            (TableColumn::Project, "app"),
+        ] {
+            let mut config = store.config().clone();
+            config.tui.table.columns = vec![column];
+            store.set_config(config);
+            let area = Rect::new(0, 0, 120, 4);
+            let mut state = TableState::default();
+            state.select(Some(0));
+            let model = build_task_list_render_model(
+                &store,
+                &mut state,
+                Focus::Tasks,
+                area,
+                None,
+                &BTreeSet::from([store.tasks[0].task.id.clone()]),
+            );
+            assert_eq!(model.layout.state_column(), None);
+            assert_eq!(model.layout.state_gutter(area).width, 3);
+            let buffer = render_task_list_buffer_with_selection(&store, 120, 4, true);
+            let state_area = model.layout.state_gutter(Rect::new(0, 1, 120, 1));
+            assert_eq!(text_in_cell(&buffer, state_area), "›● ");
+            let content_area = model.layout.cell(column, Rect::new(0, 1, 120, 1));
+            let content = text_in_cell(&buffer, content_area);
+            assert!(!content.trim().is_empty(), "{column:?} lost all content");
+            assert!(content.contains(expected), "{column:?}: {content:?}");
+            if column == TableColumn::Status {
+                for x in 0..120 {
+                    let hit = task_status_at_position(&store, &state, area, x, 1);
+                    assert_eq!(
+                        hit.is_some(),
+                        x >= content_area.x && x < content_area.right(),
+                        "status hit at {x}"
+                    );
+                }
+            }
+        }
+
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Time];
+        store.set_config(config);
+        let buffer = render_task_list_buffer_with_selection(&store, 120, 4, true);
+        let mut state = TableState::default();
+        state.select(Some(0));
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            Rect::new(0, 0, 120, 4),
+            None,
+            &BTreeSet::from([store.tasks[0].task.id.clone()]),
+        );
+        let time = text_in_cell(
+            &buffer,
+            model
+                .layout
+                .cell(TableColumn::Time, Rect::new(0, 1, 120, 1)),
+        );
+        assert!(!time.trim().is_empty(), "time content was clipped");
+    }
+
+    #[tokio::test]
+    async fn fallback_state_gutter_keeps_singletons_usable_at_narrow_widths() {
+        let mut item = task_list_item("Narrow fallback");
+        item.task.priority = TaskPriority::High;
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+
+        for column in [
+            TableColumn::Status,
+            TableColumn::Priority,
+            TableColumn::Time,
+        ] {
+            let mut config = store.config().clone();
+            config.tui.table.columns = vec![column];
+            store.set_config(config);
+            let area = Rect::new(0, 0, 16, 4);
+            let mut state = TableState::default();
+            state.select(Some(0));
+            let model = build_task_list_render_model(
+                &store,
+                &mut state,
+                Focus::Tasks,
+                area,
+                None,
+                &BTreeSet::from([store.tasks[0].task.id.clone()]),
+            );
+            let content_area = model.layout.cell(column, Rect::new(0, 1, 16, 1));
+            assert!(content_area.width > 0, "{column:?}");
+            let buffer = render_task_list_buffer_with_selection(&store, 16, 4, true);
+            let content = text_in_cell(&buffer, content_area);
+            assert!(!content.trim().is_empty(), "{column:?}: {content:?}");
+            assert_eq!(
+                text_in_cell(&buffer, model.layout.state_gutter(Rect::new(0, 1, 16, 1))),
+                "›● ",
+                "{column:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_content_singletons_keep_a_visible_state_target() {
+        let mut item = task_list_item("Fallback target");
+        item.labels = vec!["ios".to_string()];
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        for column in [
+            TableColumn::Metadata,
+            TableColumn::Priority,
+            TableColumn::Labels,
+        ] {
+            let mut config = store.config().clone();
+            config.tui.table.columns = vec![column];
+            store.set_config(config);
+            let width = if column == TableColumn::Labels {
+                24
+            } else {
+                40
+            };
+            let area = Rect::new(0, 0, width, 4);
+            let mut state = TableState::default();
+            state.select(Some(0));
+            let model = build_task_list_render_model(
+                &store,
+                &mut state,
+                Focus::Tasks,
+                area,
+                None,
+                &BTreeSet::from([store.tasks[0].task.id.clone()]),
+            );
+            assert_eq!(model.layout.state_column(), None);
+            assert!(model.layout.state_gutter(area).width > 0, "{column:?}");
+            if column != TableColumn::Labels || width < 90 {
+                assert_eq!(model.layout.cell(column, area).width, 0, "{column:?}");
+            }
+            let buffer = render_task_list_buffer_with_selection(&store, width, 4, true);
+            assert_eq!(
+                text_in_cell(
+                    &buffer,
+                    model.layout.state_gutter(Rect::new(0, 1, width, 1))
+                ),
+                "›● ",
+                "{column:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hidden_ref_keeps_selection_and_marks_on_title() {
+        let item = task_list_item("Visible title");
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Status];
+        store.set_config(config);
+        let area = Rect::new(0, 0, 80, 5);
+        let columns = task_list_columns(&store, false);
+        let layout = TableLayout::resolve(&columns, &store.config().tui.table.columns, area.width);
+        let cells = build_task_row_cells_for_columns(
+            &store.tasks[0],
+            TaskTimeContext {
+                now_seconds: 0,
+                render_mode: TaskListRenderMode::Flat,
+                due_order: false,
+            },
+            None,
+            TaskListCellLayout {
+                widths: &layout.widths(),
+                state_column: layout.state_column(),
+            },
+            TaskRowState {
+                selected: true,
+                focused: true,
+                marked: true,
+            },
+            EpicSelectionContext::default(),
+        );
+        assert_eq!(layout.state_column(), Some(TableColumn::Title));
+        assert!(
+            cells[TableColumn::Title as usize]
+                .to_string()
+                .starts_with("›● ")
+        );
+        assert!(
+            cells[TableColumn::Title as usize]
+                .to_string()
+                .contains("Visible title")
+        );
+
+        let mut state = TableState::default();
+        state.select(Some(0));
+        assert!(task_at_position(&store, &state, area, area.x + 1, area.y + 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn hidden_status_has_no_mouse_target_but_rows_remain_selectable() {
+        let item = task_list_item("No status target");
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Ref, TableColumn::Title, TableColumn::Time];
+        store.set_config(config);
+        let area = Rect::new(3, 2, 80, 5);
+        let mut state = TableState::default();
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            area,
+            None,
+            &BTreeSet::new(),
+        );
+        assert_eq!(model.layout.cell(TableColumn::Status, area).width, 0);
+        for row in area.y..area.bottom() {
+            for column in area.x..area.right() {
+                assert!(task_status_at_position(&store, &state, area, column, row).is_none());
+            }
+        }
+        assert!(task_at_position(&store, &state, area, area.x + 1, area.y + 1).is_some());
+    }
+
+    #[tokio::test]
+    async fn hidden_ref_and_status_keep_epic_rollups_and_child_rows() {
+        let mut store = epic_test_store(true).await;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![
+            TableColumn::Title,
+            TableColumn::Labels,
+            TableColumn::Metadata,
+            TableColumn::Project,
+            TableColumn::Priority,
+            TableColumn::Time,
+        ];
+        store.set_config(config);
+
+        let rendered = buffer_text(&render_task_list_buffer(&store, 120, 5));
+        assert!(rendered.contains("SUMMARY"));
+        assert!(rendered.contains("1/5"));
+        assert!(rendered.contains("Verify recovery email"));
+        assert!(!rendered.contains("STATUS"));
+        assert!(!rendered.contains("APP-EPIC"));
+        assert!(!rendered.contains("APP-CHLD"));
+    }
+
+    #[tokio::test]
+    async fn hidden_columns_fit_a_narrow_table_without_phantom_gaps() {
+        let item = task_list_item("A narrow title");
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Status, TableColumn::Time];
+        store.set_config(config);
+        let area = Rect::new(0, 0, 24, 4);
+        let mut state = TableState::default();
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            area,
+            None,
+            &BTreeSet::new(),
+        );
+        let title = model.layout.cell(TableColumn::Title, area);
+        let status = model.layout.cell(TableColumn::Status, area);
+        let time = model.layout.cell(TableColumn::Time, area);
+        assert!(title.width > 0);
+        assert!(status.width > 0);
+        assert!(time.width > 0);
+        assert_eq!(status.x, title.right() + 1);
+        assert_eq!(time.x, status.right() + 1);
+        assert!(buffer_text(&render_task_list_buffer(&store, 24, 4)).contains("STATUS"));
+    }
+
+    #[tokio::test]
     async fn reordered_epics_keep_summary_and_inline_editing_in_semantic_cells() {
         for width in [64, 120] {
             for selected in [0, 1] {
                 let mut store = epic_test_store(true).await;
                 let mut config = store.config().clone();
-                config.tui.table.column_order = vec![
+                config.tui.table.columns = vec![
                     TableColumn::Status,
                     TableColumn::Time,
                     TableColumn::Labels,
@@ -1976,7 +2512,7 @@ mod tests {
                 store.view_state.order = crate::tui::store::TaskOrder::DueOn;
             }
             let mut config = store.config().clone();
-            config.tui.table.column_order.rotate_right(1);
+            config.tui.table.columns.rotate_right(1);
             store.set_config(config);
             let buffer = render_task_list_buffer(&store, 120, 8);
             assert!(text_in_cell(&buffer, Rect::new(0, 0, 4, 1)).contains(heading));
@@ -2008,7 +2544,7 @@ mod tests {
         for width in [40, 64, 120] {
             let default = render_task_list_buffer(&store, width, 5);
             let mut config = store.config().clone();
-            config.tui.table.column_order = TableColumn::ALL.to_vec();
+            config.tui.table.columns = TableColumn::ALL.to_vec();
             store.set_config(config);
             assert_eq!(default, render_task_list_buffer(&store, width, 5));
         }

@@ -266,21 +266,23 @@ Selecting a hidden view keeps it hidden in the sidebar.
 Aven rejects unknown or duplicate names. Remove `sidebar` or `views` to restore
 the default 17-view order shown in the full config example.
 
-## TUI table column order
+## TUI table columns
 
-`tui.table.column_order` changes the order of the existing task-list table
-columns. Edit the local config file and restart the TUI to apply changes.
-The default order is:
+`tui.table.columns` controls the ordered, visible subset of the existing
+task-list table columns. Edit the local config file and restart the TUI to apply
+changes. The default order is:
 
 ```yaml
 tui:
   table:
-    column_order: [ref, title, labels, metadata, project, status, priority, time]
+    columns: [ref, title, labels, metadata, project, status, priority, time]
 ```
 
-The setting must contain every name below exactly once. Unknown, duplicate, and
-missing names are rejected. Reorder the names to customize the table, or omit
-this setting to keep the default order.
+List each column you want to show once, in the order it should appear. Unknown
+and duplicate names are rejected. An empty list is rejected because a task
+list needs at least one visible column. Omit `columns` to keep all columns in
+the default order. When both `ref` and `title` are hidden, a separate
+three-character row-state gutter keeps selection and mark indicators visible.
 
 | Name | Content |
 | --- | --- |
@@ -293,10 +295,16 @@ this setting to keep the default order.
 | `priority` | Priority indicator, headed `P` |
 | `time` | Context-sensitive time: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE` |
 
-This setting changes order only. The title still expands into remaining space,
-and existing automatic sizing and narrow-screen visibility rules still apply.
-It does not change board lanes (`tui.columns`), group ordering, the selected-task
-preview, or the separate Recurring and Recent Actions tables.
+The title still expands into remaining space when shown, and existing automatic
+sizing and narrow-screen visibility rules still apply. When `ref` is hidden and
+`title` is shown, selection and mark indicators move to `title`. Otherwise, a
+separate three-character row-state gutter keeps them visible. Editing a hidden
+title opens the regular visible text editor instead of an inline editor.
+Hidden `status` has no mouse status target, but keyboard status editing remains
+available.
+
+This setting does not change board lanes (`tui.columns`), group ordering, the
+selected-task preview, or the separate Recurring and Recent Actions tables.
 
 ## TUI columns
 
