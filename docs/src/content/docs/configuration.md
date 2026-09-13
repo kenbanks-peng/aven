@@ -270,16 +270,17 @@ the default 17-view order shown in the full config example.
 
 `tui.table.column_order` changes the order of the existing task-list table
 columns. Edit the local config file and restart the TUI to apply changes.
-For example, to put status and priority first:
+The default order is:
 
 ```yaml
 tui:
   table:
-    column_order: [status, priority, ref, title, labels, metadata, project, time]
+    column_order: [ref, title, labels, metadata, project, status, priority, time]
 ```
 
 The setting must contain every name below exactly once. Unknown, duplicate, and
-missing names are rejected. Omitting it keeps the default order shown here:
+missing names are rejected. Reorder the names to customize the table, or omit
+this setting to keep the default order.
 
 | Name | Content |
 | --- | --- |
