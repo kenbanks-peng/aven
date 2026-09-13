@@ -87,6 +87,27 @@ async fn status_right_click_opens_status_menu_for_clicked_task() {
 }
 
 #[tokio::test]
+async fn reordered_status_right_click_targets_clicked_task() {
+    for size in [(90, 24), (140, 24)] {
+        let mut app = test_app().await;
+        create_and_select_task(&mut app, test_task_draft("task one")).await;
+        create_and_select_task(&mut app, test_task_draft("task two")).await;
+        let mut config = app.store.config().clone();
+        config.tui.table.column_order.rotate_left(5);
+        app.store.set_config(config);
+        app.list.select_task(Some(1));
+        let click = status_right_click_event(&app, size, 0);
+        assert_eq!(click.column, task_list_area(size).x);
+        app.dispatch_mouse(click, size.into()).await.unwrap();
+        assert_eq!(app.list.selected_task(), Some(0));
+        assert_eq!(
+            app.footer_choice.as_ref().map(|choice| choice.mode),
+            Some(FooterChoiceMode::Status)
+        );
+    }
+}
+
+#[tokio::test]
 async fn recurrence_context_menu_matches_lifecycle() {
     let mut app = test_app().await;
     let (task_id, series_id) = add_recurring_series(&mut app, "Context series").await;

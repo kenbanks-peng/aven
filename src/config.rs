@@ -57,6 +57,8 @@ fn default_automatic_update_checks() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     #[serde(default)]
+    pub table: TaskTableConfig,
+    #[serde(default)]
     pub sidebar: SidebarConfig,
     #[serde(default = "default_task_columns")]
     pub columns: Vec<TaskColumnConfig>,
@@ -67,11 +69,69 @@ pub struct TuiConfig {
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
+            table: TaskTableConfig::default(),
             sidebar: SidebarConfig::default(),
             columns: default_task_columns(),
             commands: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskTableConfig {
+    #[serde(default = "default_table_column_order")]
+    pub column_order: Vec<TableColumn>,
+}
+
+impl Default for TaskTableConfig {
+    fn default() -> Self {
+        Self {
+            column_order: default_table_column_order(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TableColumn {
+    Ref,
+    Title,
+    Labels,
+    Metadata,
+    Project,
+    Status,
+    Priority,
+    Time,
+}
+
+impl TableColumn {
+    pub const ALL: [Self; 8] = [
+        Self::Ref,
+        Self::Title,
+        Self::Labels,
+        Self::Metadata,
+        Self::Project,
+        Self::Status,
+        Self::Priority,
+        Self::Time,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::Title => "title",
+            Self::Labels => "labels",
+            Self::Metadata => "metadata",
+            Self::Project => "project",
+            Self::Status => "status",
+            Self::Priority => "priority",
+            Self::Time => "time",
+        }
+    }
+}
+
+fn default_table_column_order() -> Vec<TableColumn> {
+    TableColumn::ALL.to_vec()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,6 +615,27 @@ impl AppConfig {
 
     pub fn validate(&self) -> Result<()> {
         use std::collections::BTreeSet;
+
+        let mut table_columns = BTreeSet::new();
+        for column in &self.tui.table.column_order {
+            if !table_columns.insert(*column) {
+                bail!(
+                    "tui.table.column_order contains duplicate column {}",
+                    column.name()
+                );
+            }
+        }
+        let missing = TableColumn::ALL
+            .into_iter()
+            .filter(|column| !table_columns.contains(column))
+            .map(TableColumn::name)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "tui.table.column_order missing columns: {}",
+                missing.join(", ")
+            );
+        }
 
         let mut sidebar_views = BTreeSet::new();
         for view in &self.tui.sidebar.views {
@@ -1045,6 +1126,49 @@ mod tests {
         let error = load_config("tui:\n  sidebar:\n    views: [queue, someday]\n").unwrap_err();
 
         assert!(format!("{error:#}").contains("unknown variant `someday`"));
+    }
+
+    #[test]
+    fn table_column_order_defaults_and_round_trips() {
+        for yaml in ["{}", "tui: {}", "tui:\n  table: {}"] {
+            assert_eq!(
+                load_config(yaml).unwrap().tui.table.column_order,
+                TableColumn::ALL
+            );
+        }
+        let config = load_config("tui:\n  table:\n    column_order: [status, priority, ref, title, labels, metadata, project, time]").unwrap();
+        assert_eq!(config.tui.table.column_order[0], TableColumn::Status);
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            load_config(&text).unwrap().tui.table.column_order,
+            config.tui.table.column_order
+        );
+        assert_eq!(config.tui.columns, default_task_columns());
+    }
+
+    #[test]
+    fn table_column_order_rejects_incomplete_duplicate_and_unknown_columns() {
+        for (order, expected) in [
+            (
+                "[ref, title, labels, project, status, priority, time]",
+                "missing columns: metadata",
+            ),
+            (
+                "[]",
+                "missing columns: ref, title, labels, metadata, project, status, priority, time",
+            ),
+            (
+                "[ref, title, labels, metadata, project, status, priority, time, ref]",
+                "duplicate column ref",
+            ),
+            ("[robot]", "unknown variant `robot`"),
+        ] {
+            let error =
+                load_config(&format!("tui:\n  table:\n    column_order: {order}")).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(expected), "{message}");
+            assert!(message.contains("tui.table.column_order"), "{message}");
+        }
     }
 
     #[test]

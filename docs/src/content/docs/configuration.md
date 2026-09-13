@@ -266,6 +266,37 @@ Selecting a hidden view keeps it hidden in the sidebar.
 Aven rejects unknown or duplicate names. Remove `sidebar` or `views` to restore
 the default 17-view order shown in the full config example.
 
+## TUI table column order
+
+`tui.table.column_order` changes the order of the existing task-list table
+columns. Edit the local config file and restart the TUI to apply changes.
+For example, to put status and priority first:
+
+```yaml
+tui:
+  table:
+    column_order: [status, priority, ref, title, labels, metadata, project, time]
+```
+
+The setting must contain every name below exactly once. Unknown, duplicate, and
+missing names are rejected. Omitting it keeps the default order shown here:
+
+| Name | Content |
+| --- | --- |
+| `ref` | Task reference, selection and mark indicators, and epic tree markers |
+| `title` | Task title, including inline title editing |
+| `labels` | Label summary, or child rollup summary in the Epics view |
+| `metadata` | The blank-headed indicator column: notes, dependencies, epic relationships, overdue, deleted and deferred markers |
+| `project` | Project key |
+| `status` | Existing status icon and text |
+| `priority` | Priority indicator, headed `P` |
+| `time` | Context-sensitive time: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE` |
+
+This setting changes order only. The title still expands into remaining space,
+and existing automatic sizing and narrow-screen visibility rules still apply.
+It does not change board lanes (`tui.columns`), group ordering, the selected-task
+preview, or the separate Recurring and Recent Actions tables.
+
 ## TUI columns
 
 The columns layout groups Aven's semantic statuses into named lanes. Names and order are presentation settings. Task status values remain `inbox`, `backlog`, `todo`, `active`, `done`, and `canceled` across the CLI, sync, queue, dependencies, and agent workflows.
