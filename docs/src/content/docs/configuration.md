@@ -81,6 +81,8 @@ update:
   automatic_checks: true
 
 tui:
+  table:
+    columns: [ref, title, labels, metadata, project, status, priority, time]
   sidebar:
     views:
       - queue
@@ -268,9 +270,9 @@ the default 17-view order shown in the full config example.
 
 ## TUI table columns
 
-`tui.table.columns` controls the ordered, visible subset of the existing
-task-list table columns. Edit the local config file and restart the TUI to apply
-changes. The default order is:
+`tui.table.columns` sets which task-list columns appear and their order.
+Edit the local config file and restart the TUI to apply changes. The default
+order is:
 
 ```yaml
 tui:
@@ -278,11 +280,9 @@ tui:
     columns: [ref, title, labels, metadata, project, status, priority, time]
 ```
 
-List each column you want to show once, in the order it should appear. Unknown
-and duplicate names are rejected. An empty list is rejected because a task
-list needs at least one visible column. Omit `columns` to keep all columns in
-the default order. When both `ref` and `title` are hidden, a separate
-three-character row-state gutter keeps selection and mark indicators visible.
+List the columns in the order you want them to appear. Remove a name to hide
+that column. Aven rejects empty lists, unknown names, and duplicates. Omit
+`columns` to use all columns in the default order.
 
 | Name | Content |
 | --- | --- |
@@ -291,17 +291,20 @@ three-character row-state gutter keeps selection and mark indicators visible.
 | `labels` | Label summary, or child rollup summary in the Epics view |
 | `metadata` | The blank-headed indicator column: notes, dependencies, epic relationships, overdue, deleted and deferred markers |
 | `project` | Project key |
-| `status` | Existing status icon and text |
+| `status` | Status icon and text |
 | `priority` | Priority indicator, headed `P` |
-| `time` | Context-sensitive time: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE` |
+| `time` | Time value with a context-dependent heading: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE` |
 
-The title still expands into remaining space when shown, and existing automatic
-sizing and narrow-screen visibility rules still apply. When `ref` is hidden and
-`title` is shown, selection and mark indicators move to `title`. Otherwise, a
-separate three-character row-state gutter keeps them visible. Editing a hidden
-title opens the regular visible text editor instead of an inline editor.
-Hidden `status` has no mouse status target, but keyboard status editing remains
-available.
+The title expands into remaining space when shown. Columns size automatically
+and may collapse when empty, even when listed in the configuration. Narrow
+tables hide labels; in Epics, the summary stays visible and project is hidden
+instead.
+
+Selection and mark indicators appear in `ref`, or in `title` if `ref` is hidden
+or too narrow. If neither column has room, the indicators appear in a separate
+three-character area at the left of the table. Editing a hidden title opens a
+text editor dialog. You can still edit a hidden status with the keyboard, but
+there is no status cell to click.
 
 This setting does not change board lanes (`tui.columns`), group ordering, the
 selected-task preview, or the separate Recurring and Recent Actions tables.
