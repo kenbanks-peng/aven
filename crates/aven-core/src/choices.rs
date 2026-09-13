@@ -53,6 +53,7 @@ pub enum TaskSource {
     Cli,
     Tui,
     Api,
+    Ios,
     #[default]
     Unknown,
 }
@@ -63,6 +64,7 @@ impl TaskSource {
             Self::Cli => "cli",
             Self::Tui => "tui",
             Self::Api => "api",
+            Self::Ios => "ios",
             Self::Unknown => "unknown",
         }
     }
@@ -72,6 +74,7 @@ impl TaskSource {
             "cli" => Ok(Self::Cli),
             "tui" => Ok(Self::Tui),
             "api" => Ok(Self::Api),
+            "ios" => Ok(Self::Ios),
             "unknown" => Ok(Self::Unknown),
             _ => Err(InvalidTaskSource(value.to_string())),
         }
@@ -96,6 +99,7 @@ pub const TASK_SOURCES: &[&str] = &[
     TaskSource::Cli.as_str(),
     TaskSource::Tui.as_str(),
     TaskSource::Api.as_str(),
+    TaskSource::Ios.as_str(),
     TaskSource::Unknown.as_str(),
 ];
 
@@ -244,10 +248,12 @@ mod tests {
     fn status_and_priority_parse_display_and_reject_invalid_values() {
         assert_eq!(TaskSource::parse("tui").unwrap(), TaskSource::Tui);
         assert_eq!(TaskSource::Api.as_str(), "api");
+        assert_eq!(TaskSource::parse("ios").unwrap(), TaskSource::Ios);
+        assert_eq!(TaskSource::Ios.to_string(), "ios");
         assert_eq!(TaskSource::Unknown.to_string(), "unknown");
         assert_eq!(
             TaskSource::parse("agent").unwrap_err().to_string(),
-            "error invalid-task-source input=agent choices=cli,tui,api,unknown"
+            "error invalid-task-source input=agent choices=cli,tui,api,ios,unknown"
         );
 
         assert_eq!(TaskStatus::parse("active").unwrap(), TaskStatus::Active);

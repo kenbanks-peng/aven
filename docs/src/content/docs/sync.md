@@ -213,3 +213,18 @@ aven doctor --json
 ```
 
 For sync specifically, doctor reports the configured server, sync cursor, pending changes, conflicts, daemon wake validity, and integrity status when requested. A missing current recurring task is repairable by running `aven recur list`. Other recurring-task integrity failures require preserving the database and recovering from a known-good backup.
+
+## Task source compatibility
+
+Task origins are stored as `cli`, `tui`, `api`, `ios`, or `unknown`. New iOS queue
+captures use `ios`; generic API creation uses `api`. Existing `api` tasks stay
+unchanged because their original client cannot be reliably inferred. Missing
+source values in older sync records and exports default to `unknown`.
+
+Sync protocol 17 requires an upgraded server and all participating clients.
+Older protocol versions are rejected before changes are exchanged. Upgrade
+clients before opening an upgraded database or importing an export containing
+`ios`; older clients cannot read that source value. Keep a backup before upgrading
+if you need to return to an older release. Source is immutable, not an editable
+field or a dedicated list filter. Metadata named `source` is independent of task
+origin.

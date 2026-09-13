@@ -505,7 +505,7 @@ async fn exchange_bounded(client_path: &Path, server: &Database, pull_limit: u32
 }
 
 #[tokio::test]
-async fn consumer_api_creation_and_sync_preserve_api_source() {
+async fn consumer_api_creation_sync_and_export_preserve_task_sources() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("source-first.sqlite");
     let second_path = directory.path().join("source-second.sqlite");
@@ -530,12 +530,83 @@ async fn consumer_api_creation_and_sync_preserve_api_source() {
         )
         .await
         .unwrap();
+    let captured = first
+        .capture_ios_queue_task(
+            &workspace.id,
+            IosTaskCapture {
+                title: "iOS source".to_string(),
+                description: String::new(),
+                project: Some("Core".to_string()),
+                priority: TaskPriority::None,
+                due_on: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
     drop(first);
 
+    assert_eq!(task_source(&first_path, &captured.task_id).await, "ios");
     assert_eq!(task_source(&first_path, &created.id).await, "api");
     exchange(&first_path, &server).await;
     exchange(&second_path, &server).await;
     assert_eq!(task_source(&second_path, &created.id).await, "api");
+    assert_eq!(task_source(&second_path, &captured.task_id).await, "ios");
+
+    for (path, title) in [(&first_path, "first title"), (&second_path, "second title")] {
+        Store::open(path)
+            .await
+            .unwrap()
+            .update_task(
+                &workspace.id,
+                &captured.task_id,
+                UpdateTask {
+                    title: Some(title.to_string()),
+                    ..UpdateTask::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+    let second = Store::open(&second_path).await.unwrap();
+    let conflicts = second
+        .inspect_conflicts(&workspace.id, &captured.task_id)
+        .await
+        .unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(task_source(&second_path, &captured.task_id).await, "ios");
+    second
+        .resolve_conflict(
+            &workspace.id,
+            &captured.task_id,
+            ConflictField::Title,
+            conflicts[0].variant_a.clone(),
+            conflicts[0].variant_b.clone(),
+            ConflictResolution::Remote,
+        )
+        .await
+        .unwrap();
+    drop(second);
+    exchange(&second_path, &server).await;
+    exchange(&first_path, &server).await;
+    assert_eq!(task_source(&first_path, &captured.task_id).await, "ios");
+    assert_eq!(task_source(&second_path, &captured.task_id).await, "ios");
+
+    let replica = Database::open(&second_path).await.unwrap();
+    let export = replica
+        .export_data("2026-09-13T00:00:00Z".to_string())
+        .await
+        .unwrap();
+    let export = serde_json::from_slice(&serde_json::to_vec(&export).unwrap()).unwrap();
+    let imported_path = directory.path().join("source-imported.sqlite");
+    let imported = Database::open(&imported_path).await.unwrap();
+    imported.validate_import_data(&export).await.unwrap();
+    imported.import_data(&export).await.unwrap();
+    drop(imported);
+    assert_eq!(task_source(&imported_path, &created.id).await, "api");
+    assert_eq!(task_source(&imported_path, &captured.task_id).await, "ios");
 }
 
 #[tokio::test]

@@ -420,7 +420,7 @@ impl Store {
                     project: Some(project),
                     status: TaskStatus::Inbox.as_str().to_string(),
                     priority: input.priority.as_str().to_string(),
-                    source: TaskSource::Api,
+                    source: TaskSource::Ios,
                     labels: input.labels,
                     metadata: Vec::new(),
                     available_at: None,
