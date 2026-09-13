@@ -6,6 +6,7 @@ description: Release notes for aven.
 ## Unreleased
 
 - Choose which [TUI task-list columns](https://aven.raine.dev/configuration/#tui-table-columns) appear and their order with `tui.table.columns`.
+- Render the [TUI status column](https://aven.raine.dev/configuration/#compact-status-column) as icons only with `tui.table.compact_status`. Off by default.
 
 ## v0.1.39 (2026-09-10)
 
