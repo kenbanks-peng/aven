@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for aven.
 ---
 
+## Unreleased
+
+- Choose which [TUI task-list columns](https://aven.raine.dev/configuration/#tui-table-columns) appear and their order with `tui.table.columns`.
+
 ## v0.1.39 (2026-09-10)
 
 - Press `!` to choose a task's priority directly from TUI task lists or task details.
