@@ -206,23 +206,34 @@ fn dispatch_update_mouse(
     else {
         return OverlayMouseOutcome::Retained(OverlayState::Update(state));
     };
-    let UpdateOverlayState::Available {
-        plan,
-        notes,
-        scroll,
-        cached,
-        ..
-    } = state
-    else {
-        return OverlayMouseOutcome::Retained(OverlayState::Update(state));
+    let state = match state {
+        UpdateOverlayState::Available {
+            plan,
+            notes,
+            scroll,
+            cached,
+            ..
+        } => UpdateOverlayState::Available {
+            plan,
+            notes,
+            scroll,
+            focus: action,
+            cached,
+        },
+        UpdateOverlayState::CompatibilityWarning {
+            plan,
+            result,
+            server_origin,
+            ..
+        } => UpdateOverlayState::CompatibilityWarning {
+            plan,
+            result,
+            server_origin,
+            focus: action,
+        },
+        state => return OverlayMouseOutcome::Retained(OverlayState::Update(state)),
     };
-    OverlayMouseOutcome::UpdateAction(UpdateOverlayState::Available {
-        plan,
-        notes,
-        scroll,
-        focus: action,
-        cached,
-    })
+    OverlayMouseOutcome::UpdateAction(state)
 }
 
 fn dispatch_recurrence_history_mouse(

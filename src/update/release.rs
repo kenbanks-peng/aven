@@ -88,13 +88,27 @@ fn parse_release(release: GithubRelease) -> Result<Release> {
     validate_asset_url(&archive_url)?;
     validate_asset_url(&checksum_url)?;
 
+    let sync_protocol = sync_protocol_marker(&release.assets);
+
     Ok(Release {
         version,
         tag: release.tag_name,
         archive_name,
         archive_url,
         checksum_url,
+        sync_protocol,
     })
+}
+
+fn sync_protocol_marker(assets: &[GithubAsset]) -> Option<u32> {
+    let markers = assets
+        .iter()
+        .filter_map(|asset| asset.name.strip_prefix("sync-protocol-"))
+        .collect::<Vec<_>>();
+    let [value] = markers.as_slice() else {
+        return None;
+    };
+    value.parse::<u32>().ok().filter(|version| *version > 0)
 }
 
 fn unique_asset_url(assets: &[GithubAsset], name: &str) -> Result<String> {
@@ -158,6 +172,18 @@ mod tests {
         assert_eq!(parsed.version, Version::new(1, 2, 3));
         assert_eq!(parsed.tag, "v1.2.3");
         assert_eq!(parsed.archive_name, archive);
+        assert_eq!(parsed.sync_protocol, None);
+    }
+
+    #[test]
+    fn reads_exactly_one_valid_sync_protocol_marker() {
+        assert_eq!(sync_protocol_marker(&[asset("sync-protocol-19")]), Some(19));
+        assert_eq!(sync_protocol_marker(&[]), None);
+        assert_eq!(sync_protocol_marker(&[asset("sync-protocol-nope")]), None);
+        assert_eq!(
+            sync_protocol_marker(&[asset("sync-protocol-18"), asset("sync-protocol-19")]),
+            None
+        );
     }
 
     #[test]

@@ -1150,6 +1150,12 @@ pub(crate) struct TaskEditArgs {
 pub(crate) struct SelfUpdateArgs {
     #[arg(long, help = "Install an available direct update")]
     pub(crate) yes: bool,
+    #[arg(
+        long,
+        requires = "yes",
+        help = "Install even when sync compatibility cannot be confirmed"
+    )]
+    pub(crate) allow_sync_incompatibility: bool,
 }
 
 #[derive(Args)]
@@ -2024,13 +2030,27 @@ mod tests {
         let update = Cli::try_parse_from(["aven", "update"]).unwrap();
         assert!(matches!(
             update.command,
-            Some(Commands::Update(SelfUpdateArgs { yes: false }))
+            Some(Commands::Update(SelfUpdateArgs {
+                yes: false,
+                allow_sync_incompatibility: false,
+            }))
         ));
 
         let edit = Cli::try_parse_from(["aven", "edit", "APP-1234", "--status", "active"]).unwrap();
         assert!(matches!(edit.command, Some(Commands::Edit(_))));
         assert!(Cli::try_parse_from(["aven", "edit"]).is_err());
         assert!(Cli::try_parse_from(["aven", "update", "APP-1234"]).is_err());
+        assert!(Cli::try_parse_from(["aven", "update", "--allow-sync-incompatibility"]).is_err());
+        let override_update =
+            Cli::try_parse_from(["aven", "update", "--yes", "--allow-sync-incompatibility"])
+                .unwrap();
+        assert!(matches!(
+            override_update.command,
+            Some(Commands::Update(SelfUpdateArgs {
+                yes: true,
+                allow_sync_incompatibility: true,
+            }))
+        ));
     }
 
     #[test]

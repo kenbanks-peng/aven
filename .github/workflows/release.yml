@@ -76,9 +76,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
+      - name: Add sync protocol marker
+        run: |
+          protocol=$(sed -n 's/^pub const SYNC_PROTOCOL_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' crates/aven-core/src/sync/wire.rs)
+          test -n "$protocol"
+          touch "sync-protocol-$protocol"
       - uses: softprops/action-gh-release@v3
         with:
           token: ${{ github.token }}
@@ -86,6 +92,7 @@ jobs:
           files: |
             *.tar.gz
             *.sha256
+            sync-protocol-*
 
   update-tap:
     needs: release

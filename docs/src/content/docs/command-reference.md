@@ -1125,14 +1125,19 @@ aven doctor --json --fail-on-error
 Check GitHub releases for a newer aven version.
 
 ```sh
-aven update [--yes]
+aven update [--yes] [--allow-sync-incompatibility]
 ```
 
-Package-manager installations receive manager-specific update instructions. Direct installations report an available release without changing the executable unless `--yes` is supplied. A direct update downloads the platform archive, verifies it, replaces the current executable, and asks you to restart running aven processes. Cached release information is used when a fresh check fails and a valid cache entry exists.
+Package-manager installations receive manager-specific update instructions. Direct installations report an available release without changing the executable unless `--yes` is supplied.
+
+Before installing a release with a different sync protocol, Aven sends an empty request to the configured sync server to check compatibility. The request contains no tasks and does not advance sync state. If the server is incompatible or cannot be checked, Aven recommends updating the server first and does not install. Use `--yes --allow-sync-incompatibility` to proceed despite that warning. The override does not skip archive, checksum, or executable validation.
+
+A direct update downloads the platform archive, verifies it, replaces the current executable, and asks you to restart running aven processes. Cached release information is used when a fresh check fails and a valid cache entry exists.
 
 ```sh
 aven update
 aven update --yes
+aven update --yes --allow-sync-incompatibility
 ```
 
 ## Data safety commands
