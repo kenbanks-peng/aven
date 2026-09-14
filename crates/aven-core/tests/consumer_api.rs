@@ -167,6 +167,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
                 description: String::new(),
                 title: "Requires a selected project".to_string(),
                 project: None,
+                status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
                 due_on: None,
                 labels: Vec::new(),
@@ -187,6 +188,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
                 description: "    code block\n\n- item\n".to_string(),
                 title: "  Captured offline  ".to_string(),
                 project: Some("ios".to_string()),
+                status: TaskStatus::Inbox,
                 priority: TaskPriority::High,
                 due_on: Some(due_on.clone()),
                 labels: vec!["capture".to_string()],
@@ -228,6 +230,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
             description: String::new(),
             title: "   ".to_string(),
             project: None,
+            status: TaskStatus::Inbox,
             priority: TaskPriority::None,
             due_on: None,
             labels: Vec::new(),
@@ -236,6 +239,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
             description: String::new(),
             title: "Stale project".to_string(),
             project: Some("missing".to_string()),
+            status: TaskStatus::Inbox,
             priority: TaskPriority::None,
             due_on: None,
             labels: Vec::new(),
@@ -244,6 +248,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
             description: String::new(),
             title: "Stale label".to_string(),
             project: Some("ios".to_string()),
+            status: TaskStatus::Inbox,
             priority: TaskPriority::None,
             due_on: None,
             labels: vec!["missing".to_string()],
@@ -276,6 +281,74 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ios-capture-status.sqlite");
+    let store = Store::open(&path).await.unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let database = Database::open(&path).await.unwrap();
+    database
+        .resolve_or_create_project(&workspace.id, "Capture")
+        .await
+        .unwrap();
+    let mut connection = SqliteConnection::connect_with(
+        &SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false),
+    )
+    .await
+    .unwrap();
+
+    for status in TaskStatus::OPEN.into_iter().chain(TaskStatus::TERMINAL) {
+        let captured = store
+            .capture_ios_queue_task(
+                &workspace.id,
+                IosTaskCapture {
+                    title: format!("Capture {status}"),
+                    description: String::new(),
+                    project: Some("capture".to_string()),
+                    status,
+                    priority: TaskPriority::None,
+                    due_on: None,
+                    labels: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let detail = store
+            .ios_task_detail(&workspace.id, &captured.task_id)
+            .await
+            .unwrap();
+        assert_eq!(detail.status, status);
+        let (change_count, payload_status): (i64, Option<String>) = sqlx::query_as(
+            "SELECT count(*), json_extract(max(payload), '$.status')
+             FROM changes WHERE entity_type = 'task' AND entity_id = ?",
+        )
+        .bind(&captured.task_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(change_count, 1);
+        assert_eq!(payload_status.as_deref(), Some(status.as_str()));
+
+        let state = store
+            .undo_ios_queue_capture(&captured.undo_token)
+            .await
+            .unwrap();
+        assert!(state.is_some());
+        let (persisted_status, deleted): (String, i64) =
+            sqlx::query_as("SELECT status, deleted FROM tasks WHERE workspace_id = ? AND id = ?")
+                .bind(&workspace.id)
+                .bind(&captured.task_id)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(persisted_status, status.as_str());
+        assert_eq!(deleted, 1);
+    }
 }
 
 #[tokio::test]
@@ -537,6 +610,7 @@ async fn consumer_api_creation_sync_and_export_preserve_task_sources() {
                 title: "iOS source".to_string(),
                 description: String::new(),
                 project: Some("Core".to_string()),
+                status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
                 due_on: None,
                 labels: Vec::new(),
@@ -1893,6 +1967,7 @@ async fn ios_task_detail_is_exact_bounded_and_attachment_aware() {
                 description: String::new(),
                 title: "Detailed task".to_string(),
                 project: Some("api".to_string()),
+                status: TaskStatus::Inbox,
                 priority: TaskPriority::High,
                 due_on: Some("2026-09-03".to_string()),
                 labels: vec!["security".to_string()],
@@ -2031,6 +2106,7 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
         title: "State-checked capture".to_string(),
         description: String::new(),
         project: Some("capture".to_string()),
+        status: TaskStatus::Inbox,
         priority: TaskPriority::None,
         due_on: None,
         labels: Vec::new(),
@@ -2129,6 +2205,7 @@ async fn ios_attachment_bytes_are_scoped_bounded_and_leased() {
                 title: "Images".into(),
                 description: String::new(),
                 project: Some("images".into()),
+                status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
                 due_on: None,
                 labels: vec![],

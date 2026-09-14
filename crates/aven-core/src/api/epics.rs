@@ -128,7 +128,7 @@ impl Store {
                     title: input.title.trim().to_string(),
                     description: input.description,
                     project: Some(project),
-                    status: TaskStatus::Inbox.as_str().into(),
+                    status: input.status.as_str().into(),
                     priority: input.priority.as_str().into(),
                     source: TaskSource::Api,
                     labels: input.labels,
