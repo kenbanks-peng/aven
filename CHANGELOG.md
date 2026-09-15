@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: Undoing a newly created task preserves notes and relationships added afterward.
 - The website highlights Aven's local-first task management for people and coding agents.
 - The TUI marked-task footer shows `Esc` as the preferred shortcut for clearing marks.
 - Fix: `aven demo` stays local-only and no longer shows its sample data as waiting to sync.
