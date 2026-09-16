@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- The TUI shows note timestamps without a redundant author label.
 - Fix: The website hero headline stays on two lines on desktop without reducing its text size.
 - Fix: Undoing a newly created task preserves notes and relationships added afterward.
 - The website highlights Aven's local-first task management for people and coding agents.

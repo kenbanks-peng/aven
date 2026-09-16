@@ -1793,13 +1793,10 @@ fn extend_detail_note_section(
     } else {
         for note in &item.notes {
             lines.push(Line::from(""));
-            let mut rendered = vec![Line::from(vec![
-                Span::styled(
-                    local_timestamp_display(&note.created_at),
-                    Style::new().fg(FG_DIM),
-                ),
-                Span::styled("  you", Style::new().fg(ACCENT)),
-            ])];
+            let mut rendered = vec![Line::from(Span::styled(
+                local_timestamp_display(&note.created_at),
+                Style::new().fg(FG_DIM),
+            ))];
             let note_lines = quoted_block_lines(&note.body, width, Style::new().fg(FG));
             let unquoted_note_lines =
                 render_markdown_without_link_urls(&note.body, width.saturating_sub(3).max(1));
