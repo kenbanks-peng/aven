@@ -58,7 +58,7 @@ code { font-family: var(--mono); }
 .hero-eyebrow { display: block; font-size: 14px; letter-spacing: .08em; color: #a68bff; }
 .hero-eyebrow span { white-space: nowrap; }
 .status-dot { display: inline-block; flex: 0 0 auto; width: 6px; height: 6px; background: currentColor; border-radius: 50%; }
-.hero-intro { display: grid; grid-template-columns: 1.5fr 1fr; gap: 64px; align-items: start; margin-top: 24px; }
+.hero-intro { display: grid; grid-template-columns: 1.8fr 1fr; gap: 40px; align-items: start; margin-top: 24px; }
 h1 { font-size: clamp(48px, 6.7vw, 86px); font-weight: 500; line-height: 1.01; letter-spacing: -5px; }
 h1 > span { color: #a49c95; }
 .hero-description { padding-bottom: 5px; }

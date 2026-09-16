@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: The website hero headline stays on two lines on desktop without reducing its text size.
 - Fix: Undoing a newly created task preserves notes and relationships added afterward.
 - The website highlights Aven's local-first task management for people and coding agents.
 - The TUI marked-task footer shows `Esc` as the preferred shortcut for clearing marks.
