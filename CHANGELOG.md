@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- The privacy policy explains Aven's App Store Data Not Collected position and optional manual crash-report support.
 - The website hero features a faded Aven backdrop that keeps the text readable.
 - The TUI shows note timestamps without a redundant author label.
 - Fix: The website hero headline stays on two lines on desktop without reducing its text size.
