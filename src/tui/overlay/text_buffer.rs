@@ -98,13 +98,15 @@ pub(crate) fn edit_text_buffer(state: &mut TextBuffer, key: KeyEvent) {
             state.row = row + 1;
             state.column = 0;
         }
-        KeyCode::Backspace if column == 0 && row > 0 => {
+        KeyCode::Backspace
+            if column == 0 && row > 0 && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
             let line = state.lines.remove(row);
             state.row = row - 1;
             state.column = state.lines[state.row].len();
             state.lines[state.row].push_str(&line);
         }
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+        _ if super::text_input::is_backward_word_delete_key(key) => {
             kill_multiline_word_before_cursor(state);
         }
         KeyCode::Delete if column == state.lines[row].len() && row + 1 < state.lines.len() => {

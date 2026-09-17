@@ -151,12 +151,18 @@ mod tests {
     }
 
     #[test]
-    fn multiline_ctrl_w_merges_previous_line_at_line_start() {
-        let mut state = state_with_lines(vec!["one ".to_string(), "two three".to_string()], 1, 0);
-        edit_multiline_input(&mut state, ctrl(KeyCode::Char('w')));
-        assert_eq!(state.buffer.lines, vec!["two three".to_string()]);
-        assert_eq!(state.buffer.row, 0);
-        assert_eq!(state.buffer.column, 0);
+    fn multiline_word_deletion_merges_previous_line_at_line_start() {
+        for key in [
+            ctrl(KeyCode::Char('w')),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+        ] {
+            let mut state =
+                state_with_lines(vec!["one ".to_string(), "two three".to_string()], 1, 0);
+            edit_multiline_input(&mut state, key);
+            assert_eq!(state.buffer.lines, vec!["two three".to_string()]);
+            assert_eq!(state.buffer.row, 0);
+            assert_eq!(state.buffer.column, 0);
+        }
     }
 
     #[test]

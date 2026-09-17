@@ -102,7 +102,7 @@ Press `a` to open the task composer. Project, status, priority, labels, availabi
 
 <p class="media-caption">Set task metadata, scheduling, title, and description in the same form.</p>
 
-`Enter` opens the focused metadata control, creates from the title, and inserts a newline in the description. `Ctrl-Enter` creates from any field in terminals that report modified Enter keys. `Ctrl-s` is the portable create shortcut.
+`Enter` opens the focused metadata control, creates from the title, and inserts a newline in the description. `Ctrl-Enter` creates from any field in terminals that report modified Enter keys. `Ctrl-s` is the portable create shortcut. In text fields, use `Ctrl-Left` or `Alt-Left` and their right-arrow equivalents to move by word, and `Alt-Backspace` to delete the previous word. `Alt-B` and `Alt-F` are aliases for terminals that encode Option as an escape prefix.
 
 Press `Ctrl-g` to create the task and immediately start another. The next draft retains the project, status choice, priority, and labels, while clearing task-specific content such as the title, description, schedule, and attachments. This shortcut applies to standalone, non-repeating tasks.
 

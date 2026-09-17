@@ -51,6 +51,25 @@ pub(crate) fn previous_word_start(input: &str, index: usize) -> usize {
     index
 }
 
+pub(crate) fn next_word_start(input: &str, index: usize) -> usize {
+    let mut index = char_boundary_at_or_before(input, index);
+    while index < input.len() {
+        let next = next_char_boundary(input, index);
+        if input[index..next].chars().all(char::is_whitespace) {
+            break;
+        }
+        index = next;
+    }
+    while index < input.len() {
+        let next = next_char_boundary(input, index);
+        if !input[index..next].chars().all(char::is_whitespace) {
+            break;
+        }
+        index = next;
+    }
+    index
+}
+
 pub(crate) fn next_char_is_whitespace(input: &str, index: usize) -> bool {
     input[index..]
         .chars()
@@ -169,6 +188,23 @@ mod tests {
     #[test]
     fn previous_word_start_skips_trailing_whitespace() {
         assert_eq!(previous_word_start("one two  ", 9), 4);
+    }
+
+    #[test]
+    fn next_word_start_skips_current_word_and_whitespace() {
+        assert_eq!(next_word_start("one two  ", 0), 4);
+        assert_eq!(next_word_start("one two  ", 4), 9);
+        assert_eq!(next_word_start("one two  ", 9), 9);
+    }
+
+    #[test]
+    fn word_starts_preserve_unicode_boundaries() {
+        let input = "中 e\u{301} 文";
+        assert_eq!(
+            previous_word_start(input, input.len()),
+            "中 e\u{301} ".len()
+        );
+        assert_eq!(next_word_start(input, 0), "中 ".len());
     }
 
     #[test]

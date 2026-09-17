@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::tui::text::{
-    char_boundary_at_or_before, next_char_boundary, next_char_is_whitespace,
+    char_boundary_at_or_before, next_char_boundary, next_char_is_whitespace, next_word_start,
     normalize_pasted_newlines, previous_char_boundary, previous_word_start,
 };
 
@@ -41,11 +41,23 @@ impl LineEdit {
 pub(super) fn edit_line(text: &mut String, byte_cursor: &mut usize, key: KeyEvent) {
     let cursor = char_boundary_at_or_before(text, *byte_cursor);
     match key.code {
+        KeyCode::Left if has_word_modifier(key) => {
+            *byte_cursor = previous_word_start(text, cursor);
+        }
         KeyCode::Left => *byte_cursor = previous_char_boundary(text, cursor),
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+            *byte_cursor = previous_word_start(text, cursor);
+        }
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             *byte_cursor = previous_char_boundary(text, cursor);
         }
+        KeyCode::Right if has_word_modifier(key) => {
+            *byte_cursor = next_word_start(text, cursor);
+        }
         KeyCode::Right => *byte_cursor = next_char_boundary(text, cursor),
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            *byte_cursor = next_word_start(text, cursor);
+        }
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             *byte_cursor = next_char_boundary(text, cursor);
         }
@@ -57,6 +69,7 @@ pub(super) fn edit_line(text: &mut String, byte_cursor: &mut usize, key: KeyEven
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             *byte_cursor = text.len();
         }
+        _ if is_backward_word_delete_key(key) => delete_previous_word(text, byte_cursor),
         KeyCode::Backspace if cursor > 0 => {
             let previous = previous_char_boundary(text, cursor);
             text.drain(previous..cursor);
@@ -87,26 +100,38 @@ pub(super) fn edit_line(text: &mut String, byte_cursor: &mut usize, key: KeyEven
             text.drain(..cursor);
             *byte_cursor = 0;
         }
-        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            let previous = previous_word_start(text, cursor);
-            text.drain(previous..cursor);
-            if previous > 0 && next_char_is_whitespace(text, previous) {
-                let before = previous_char_boundary(text, previous);
-                if text[before..previous].chars().all(char::is_whitespace) {
-                    text.drain(before..previous);
-                    *byte_cursor = before;
-                } else {
-                    *byte_cursor = previous;
-                }
-            } else {
-                *byte_cursor = previous;
-            }
-        }
         KeyCode::Char(ch) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
             text.insert(cursor, ch);
             *byte_cursor = cursor + ch.len_utf8();
         }
         _ => *byte_cursor = cursor,
+    }
+}
+
+fn has_word_modifier(key: KeyEvent) -> bool {
+    key.modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+pub(super) fn is_backward_word_delete_key(key: KeyEvent) -> bool {
+    (key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (key.code == KeyCode::Backspace && key.modifiers.contains(KeyModifiers::ALT))
+}
+
+fn delete_previous_word(text: &mut String, byte_cursor: &mut usize) {
+    let cursor = char_boundary_at_or_before(text, *byte_cursor);
+    let previous = previous_word_start(text, cursor);
+    text.drain(previous..cursor);
+    if previous > 0 && next_char_is_whitespace(text, previous) {
+        let before = previous_char_boundary(text, previous);
+        if text[before..previous].chars().all(char::is_whitespace) {
+            text.drain(before..previous);
+            *byte_cursor = before;
+        } else {
+            *byte_cursor = previous;
+        }
+    } else {
+        *byte_cursor = previous;
     }
 }
 
@@ -120,6 +145,10 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
     }
 
     fn line_edit(input: &str, cursor: usize) -> LineEdit {
@@ -177,6 +206,47 @@ mod tests {
         state.handle_key(ctrl(KeyCode::Char('u')));
         assert_eq!(state.text, "");
         assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn text_input_supports_word_navigation_and_terminal_aliases() {
+        let mut state = line_edit("one two three", 0);
+        state.handle_key(ctrl(KeyCode::Right));
+        assert_eq!(state.cursor, 4);
+        state.handle_key(alt(KeyCode::Right));
+        assert_eq!(state.cursor, 8);
+        state.handle_key(alt(KeyCode::Char('b')));
+        assert_eq!(state.cursor, 4);
+        state.handle_key(alt(KeyCode::Char('f')));
+        assert_eq!(state.cursor, 8);
+        state.handle_key(alt(KeyCode::Left));
+        assert_eq!(state.cursor, 4);
+        state.handle_key(ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 0);
+        state.handle_key(ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 0);
+        state.handle_key(ctrl(KeyCode::Right));
+        state.handle_key(ctrl(KeyCode::Right));
+        state.handle_key(ctrl(KeyCode::Right));
+        state.handle_key(ctrl(KeyCode::Right));
+        assert_eq!(state.cursor, state.text.len());
+    }
+
+    #[test]
+    fn text_input_supports_alt_backspace_word_deletion() {
+        let mut state = line_edit("one two three", 7);
+        state.handle_key(alt(KeyCode::Backspace));
+        assert_eq!(state.text, "one three");
+        assert_eq!(state.cursor, 3);
+    }
+
+    #[test]
+    fn text_input_word_navigation_preserves_unicode_boundaries() {
+        let mut state = line_edit("中 e\u{301} 文", "中 e\u{301} 文".len());
+        state.handle_key(alt(KeyCode::Left));
+        assert_eq!(state.cursor, "中 e\u{301} ".len());
+        state.handle_key(ctrl(KeyCode::Right));
+        assert_eq!(state.cursor, "中 e\u{301} 文".len());
     }
 
     #[test]

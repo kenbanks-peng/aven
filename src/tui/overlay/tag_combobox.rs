@@ -57,7 +57,7 @@ pub(crate) fn handle_tag_combobox_key(
             toggle_highlighted_label(&mut state, false);
             OverlayOutcome::None(OverlayState::TagCombobox(state))
         }
-        KeyCode::Backspace if state.input.as_str().is_empty() => {
+        KeyCode::Backspace if state.input.as_str().is_empty() && key.modifiers.is_empty() => {
             state.selected.pop();
             OverlayOutcome::None(OverlayState::TagCombobox(state))
         }
@@ -281,6 +281,21 @@ mod tests {
                 ..
             }) if values == vec!["feature".to_string()]
         ));
+    }
+
+    #[test]
+    fn alt_backspace_at_empty_input_does_not_remove_selected_label() {
+        let mut state = tag_combobox_state();
+        state.selected.push("feature".to_string());
+
+        let OverlayOutcome::None(OverlayState::TagCombobox(state)) =
+            handle_tag_combobox_key(state, KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT))
+        else {
+            panic!("expected label combobox state");
+        };
+
+        assert_eq!(state.selected, vec!["feature".to_string()]);
+        assert!(state.input.as_str().is_empty());
     }
 
     #[test]
