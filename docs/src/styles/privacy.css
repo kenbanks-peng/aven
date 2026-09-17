@@ -10,6 +10,7 @@
 .privacy-content strong { color: var(--ink); font-weight: 600; }
 .privacy-content a { color: var(--violet); text-decoration: underline; text-underline-offset: 4px; }
 .privacy-content a:hover { color: #d8b8ff; }
+.privacy-content .privacy-support-link { margin-top: 24px; font-weight: 600; }
 
 @media (max-width: 650px) {
   .privacy-page { padding-block: 48px 64px; }

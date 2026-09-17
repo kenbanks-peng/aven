@@ -1,0 +1,116 @@
+---
+import logo from '../assets/aven-logo-grape-violet.svg';
+import AvenLettering from '../components/AvenLettering.astro';
+import GitHubIcon from '../components/GitHubIcon.astro';
+import ExternalLinkIcon from '../components/ExternalLinkIcon.astro';
+import ArrowRightIcon from '../components/ArrowRightIcon.astro';
+import '../styles/landing.css';
+import '../styles/support.css';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#121110" />
+    <title>Support | aven</title>
+    <meta name="description" content="Get help with Aven, find setup and recovery guides, report a public issue, or contact support privately." />
+    <link rel="canonical" href="https://aventasks.dev/support/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preload" href="/fonts/space-grotesk-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Support | aven" />
+    <meta property="og:description" content="Guides and contact options for Aven support." />
+    <meta property="og:url" content="https://aventasks.dev/support/" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="container">
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="aven home">
+          <img src={logo.src} alt="" width="34" height="34" />
+          <AvenLettering />
+        </a>
+        <nav aria-label="Main navigation">
+          <a class="features-link" href="/#features">Features</a>
+          <a href="/getting-started/">Docs</a>
+          <a href="https://github.com/raine/aven"><GitHubIcon /> GitHub</a>
+        </nav>
+      </header>
+
+      <main id="main" class="support-page">
+        <header class="support-heading">
+          <p class="eyebrow">Help with Aven</p>
+          <h1>Support</h1>
+          <p class="support-intro">Find setup and recovery guidance, report a problem, or contact us privately.</p>
+        </header>
+
+        <section class="support-options" aria-label="Contact options">
+          <article class="support-card">
+            <p class="support-card-label">Public</p>
+            <h2>Report an issue</h2>
+            <p>Use GitHub Issues for bugs, feature requests, and questions that can be discussed in public.</p>
+            <a class="support-action" href="https://github.com/raine/aven/issues">
+              Open GitHub Issues
+              <ExternalLinkIcon />
+            </a>
+          </article>
+
+          <article class="support-card">
+            <p class="support-card-label">Private</p>
+            <h2>Email support</h2>
+            <p>Use email when your request or the details you need to share should not be public.</p>
+            <a class="support-action" href="mailto:raine@zendit.fi">
+              raine@zendit.fi
+              <ArrowRightIcon />
+            </a>
+          </article>
+        </section>
+
+        <section class="support-section" aria-labelledby="guides-heading">
+          <div class="support-section-heading">
+            <p class="eyebrow">Start here</p>
+            <h2 id="guides-heading">Guides for common needs</h2>
+          </div>
+          <div class="support-guides">
+            <a href="/getting-started/">
+              <span><strong>Getting started</strong><small>Install Aven and create your first task.</small></span>
+              <ArrowRightIcon />
+            </a>
+            <a href="/sync/">
+              <span><strong>Sync across devices</strong><small>Configure and troubleshoot your own sync server.</small></span>
+              <ArrowRightIcon />
+            </a>
+            <a href="/backups/">
+              <span><strong>Back up and restore</strong><small>Protect your data and recover from a backup.</small></span>
+              <ArrowRightIcon />
+            </a>
+          </div>
+        </section>
+
+        <section class="support-section support-notes" aria-labelledby="contact-heading">
+          <div>
+            <p class="eyebrow">Before you contact us</p>
+            <h2 id="contact-heading">Help us understand the problem</h2>
+          </div>
+          <div class="support-note-copy">
+            <p>Include the Aven version, your operating system or device, what you expected, what happened, and steps that reproduce the problem. Exact error text is useful when it does not contain private data.</p>
+            <p>Do not send pairing invitations, authentication tokens, or unnecessary task content. GitHub Issues are public.</p>
+          </div>
+        </section>
+
+        <aside class="server-note" aria-labelledby="server-heading">
+          <h2 id="server-heading">Your sync server remains under your control</h2>
+          <p>Aven does not operate a hosted sync service. For server access, logs, retention, backups, or credential revocation, manage your server or contact its operator.</p>
+          <a href="/sync/">Read the sync guide <ArrowRightIcon /></a>
+        </aside>
+      </main>
+
+      <footer class="site-footer">
+        <div><a class="brand" href="/" aria-label="aven home"><img src={logo.src} alt="" width="25" height="25" /><AvenLettering /></a></div>
+        <nav aria-label="Footer navigation"><a href="/getting-started/">Docs</a><a href="/changelog/">Changelog</a><a href="/support/" aria-current="page">Support</a><a href="/privacy/">Privacy</a><a href="https://github.com/raine/aven">Source <ExternalLinkIcon /></a></nav>
+      </footer>
+    </div>
+  </body>
+</html>

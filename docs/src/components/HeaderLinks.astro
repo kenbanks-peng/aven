@@ -2,12 +2,13 @@
 import Default from '@astrojs/starlight/components/SocialIcons.astro';
 ---
 
-<a class="llm-docs" href="https://aventasks.dev/llms.txt">LLMs</a>
+<a class="header-link" href="/support/">Support</a>
+<a class="header-link" href="https://aventasks.dev/llms.txt">LLMs</a>
 <Default><slot /></Default>
 
 <style>
   @layer starlight.core {
-    .llm-docs {
+    .header-link {
       color: var(--sl-color-text-accent);
       font-size: var(--sl-text-sm);
       font-weight: 600;
@@ -15,7 +16,7 @@ import Default from '@astrojs/starlight/components/SocialIcons.astro';
       white-space: nowrap;
     }
 
-    .llm-docs:hover {
+    .header-link:hover {
       color: var(--sl-color-white);
     }
   }
