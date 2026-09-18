@@ -6,7 +6,7 @@ description: Release notes for aven.
 ## Unreleased
 
 - TUI text fields support word-wise cursor movement with Ctrl/Alt arrows and deletion with Alt-Backspace.
-- The privacy policy explains Aven's App Store Data Not Collected position and optional manual crash-report support.
+- The privacy policy clearly explains Aven's local-first data handling and optional manual crash-report support.
 - The website hero features a faded Aven backdrop that keeps the text readable.
 - The TUI shows note timestamps without a redundant author label.
 - Fix: The website hero headline stays on two lines on desktop without reducing its text size.
