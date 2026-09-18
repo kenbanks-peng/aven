@@ -3,17 +3,15 @@ title: Changelog
 description: Release notes for aven.
 ---
 
-## Unreleased
+## v0.1.40 (2026-09-19)
 
-- The documentation shares the website's typography and warm color palette, and opens in dark mode by default.
+- New landing page: https://aventasks.dev/
 - TUI text fields support word-wise cursor movement with Ctrl/Alt arrows and deletion with Alt-Backspace.
 - The TUI shows note timestamps without a redundant author label.
 - Fix: Undoing a newly created task preserves notes and relationships added afterward.
 - Fix: Multiline text pasted into TUI editors keeps its line breaks in terminals using CSI-u keyboard encoding.
 - Setting medium, high, or urgent priority moves inbox tasks to todo, including when creating tasks.
 - Fix: Pressing `!` for marked tasks uses the same `n`, `l`, `m`, `h`, and `u` priority shortcuts as a single task.
-- Fix: `aven demo` stays local-only and no longer shows its sample data as waiting to sync.
-- `aven sync` shows a concise summary with readable attachment sizes and remaining work; use `--json` for exact structured results.
 - Choose which [TUI task-list columns](https://aven.raine.dev/configuration/#tui-table-columns) appear and their order with `tui.table.columns`.
 - Render the [TUI status column](https://aven.raine.dev/configuration/#compact-status-column) as icons only with `tui.table.compact_status`. Off by default.
 
