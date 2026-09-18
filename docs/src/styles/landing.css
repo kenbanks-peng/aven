@@ -1,30 +1,17 @@
-@font-face {
-  font-family: 'Space Grotesk';
-  src: url('/fonts/space-grotesk-latin.woff2') format('woff2');
-  font-style: normal;
-  font-weight: 400 700;
-  font-display: swap;
-}
-
-@font-face {
-  font-family: 'IBM Plex Mono';
-  src: url('/fonts/ibm-plex-mono-latin.woff2') format('woff2');
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-}
+@import './fonts.css';
+@import './tokens.css';
 
 :root {
   color-scheme: dark;
-  --page: #121110;
-  --panel: #191816;
-  --ink: #eeece6;
-  --muted: #a5a09a;
-  --faint: #8f8780;
-  --line: #302d2a;
-  --violet: #b68af5;
-  --mono: 'IBM Plex Mono', monospace;
-  font-family: 'Space Grotesk', sans-serif;
+  --page: var(--aven-page);
+  --panel: var(--aven-panel);
+  --ink: var(--aven-ink);
+  --muted: var(--aven-muted);
+  --faint: var(--aven-faint);
+  --line: var(--aven-line);
+  --violet: var(--aven-violet);
+  --mono: var(--aven-font-mono), monospace;
+  font-family: var(--aven-font), sans-serif;
   color: var(--ink);
   background: var(--page);
   font-synthesis: none;

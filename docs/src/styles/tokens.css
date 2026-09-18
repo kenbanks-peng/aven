@@ -1,0 +1,34 @@
+/* Brand tokens shared by the landing pages and the documentation site. Surface
+   stylesheets map these onto their own variables rather than repeating hexes. */
+:root {
+  --aven-font: 'Space Grotesk';
+  --aven-font-mono: 'IBM Plex Mono';
+
+  --aven-page: #121110;
+  --aven-panel: #191816;
+  --aven-ink: #eeece6;
+  --aven-body: #bfbcb4;
+  --aven-muted: #a5a09a;
+  --aven-faint: #8f8780;
+  --aven-line: #302d2a;
+
+  --aven-violet: #b68af5;
+  --aven-violet-bright: #d8b8ff;
+  --aven-violet-tint: #dac4f3;
+  --aven-violet-panel: #241c2c;
+  --aven-violet-line: #624a7b;
+  --aven-selection: #5a387a;
+
+  /* Terminal and code surfaces, shared with the landing page .terminal block. */
+  --aven-code-bg: #171620;
+  --aven-code-line: #4b3a66;
+
+  /* Warm paper equivalents for light surfaces. */
+  --aven-paper: #fbfaf7;
+  --aven-paper-panel: #efece6;
+  --aven-paper-ink: #1a1816;
+  --aven-paper-body: #3f3b37;
+  --aven-paper-line: #e4dfd7;
+  --aven-paper-violet: #6b3fc4;
+  --aven-paper-code-bg: #f7f5f1;
+}

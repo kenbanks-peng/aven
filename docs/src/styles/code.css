@@ -1,80 +1,12 @@
-:root {
-  --sl-color-accent-low: #30194d;
-  --sl-color-accent: #963fff;
-  --sl-color-accent-high: #eadbff;
-  --sl-color-text-accent: #ded0ff;
-}
-
-:root[data-theme='dark'] {
-  --sl-color-bg: #15151d;
-  --sl-color-bg-nav: #20232c;
-  --sl-color-bg-sidebar: #20232c;
-  --sl-color-hairline: #31313d;
-  --sl-color-hairline-light: #393746;
-  --sl-color-text: #f4f1f8;
-  --sl-color-text-accent: #ded0ff;
-  --sl-color-text-invert: #ffffff;
-}
-
-:root[data-theme='dark'] .sidebar [aria-current='page'] {
-  color: #ffffff;
-  background: linear-gradient(90deg, #8728fa 0%, #963fff 58%, #b06cff 100%);
-}
-
-:root[data-theme='dark'] .site-title {
-  color: #ded0ff;
-}
-
-:root[data-theme='dark'] .site-title span {
-  color: transparent;
-  background: linear-gradient(90deg, #cdb6e8 0%, #ff77ff 45%, #8728fa 100%);
-  background-clip: text;
-  -webkit-background-clip: text;
-}
-
-:root[data-theme='light'] {
-  --sl-color-accent-high: hsl(258, 65%, 44%);
-  --sl-color-accent: rgb(166, 139, 255);
-  --sl-color-accent-low: hsl(258, 100%, 94%);
-  --sl-color-text-accent: var(--sl-color-accent-high);
-}
-
-:root[data-theme='light'] .sidebar [aria-current='page'] {
-  color: var(--sl-color-text-invert);
-  background-color: hsl(258, 72%, 55%);
-}
-
-.expressive-code {
-  --ec-brdRad: 0.6rem;
-  --ec-codeFontSize: 0.9rem;
-  --ec-codeLineHt: 1.6;
-  --ec-codePadBlk: 0.8rem;
-  --ec-codePadInl: 0.95rem;
-  --ec-frm-frameBoxShdCssVal: none;
-  margin-block: 1rem;
-}
-
-.expressive-code .frame {
-  border-radius: var(--ec-brdRad) !important;
-  box-shadow: none !important;
-}
-
-:root[data-theme='light'] .expressive-code .frame pre {
-  border: 1px solid color-mix(in srgb, var(--sl-color-gray-5) 72%, transparent) !important;
-  border-radius: var(--ec-brdRad) !important;
-  background: color-mix(in srgb, var(--sl-color-gray-7) 88%, var(--sl-color-bg)) !important;
-}
-
+/* Terminal frames drop their title bar, so the code block itself has to draw
+   the top edge that Expressive Code otherwise delegates to the header. */
 .expressive-code .frame.is-terminal .header {
-  display: none !important;
+  display: none;
 }
 
-:root[data-theme='dark'] .expressive-code .frame pre {
-  border: 1px solid #4b3a66 !important;
-  border-radius: var(--ec-brdRad) !important;
-  background: #171620 !important;
-  overflow-x: auto !important;
-  scrollbar-width: none;
+.expressive-code .frame.is-terminal pre {
+  border-top: var(--ec-brdWd) solid var(--ec-brdCol);
+  border-radius: var(--ec-brdRad);
 }
 
 .expressive-code .frame.is-terminal pre::-webkit-scrollbar {
@@ -82,50 +14,22 @@
 }
 
 .expressive-code .frame.is-terminal pre code {
-  border-radius: inherit !important;
+  border-radius: inherit;
 }
 
 .expressive-code .ec-line .code {
-  white-space: pre !important;
-  overflow-wrap: normal !important;
+  white-space: pre;
+  overflow-wrap: normal;
   padding-inline-start: calc(var(--ecIndent, 0ch) + var(--ec-codePadInl) - var(--ecGtrBrdWd));
 }
 
 .expressive-code .copy {
-  inset-block-start: 0.45rem !important;
-  inset-inline-end: 0.45rem !important;
+  inset-block-start: 0.45rem;
+  inset-inline-end: 0.45rem;
 }
 
 .expressive-code .copy button {
-  border-radius: 0.4rem !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#82AAFF"] {
-  --0: #a78bfa !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#7FDBCA"] {
-  --0: #c7b7ff !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#ECC48D"] {
-  --0: #f2c879 !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#D9F5DD"] {
-  --0: #f1edf8 !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#D6DEEB"] {
-  --0: #beb8cd !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#FF5874"] {
-  --0: #ff6d9d !important;
-}
-
-:root[data-theme='dark'] .expressive-code span[style*="#F78C6C"] {
-  --0: #ff9a76 !important;
+  border-radius: 0.4rem;
 }
 
 .video-player {
@@ -262,16 +166,8 @@
 .image-zoom-trigger img {
   display: block;
   margin: 0;
+  border: 1px solid var(--sl-color-hairline);
   border-radius: inherit;
-  transition:
-    transform 150ms ease,
-    box-shadow 150ms ease;
-}
-
-.image-zoom-trigger:hover img,
-.image-zoom-trigger:focus-visible img {
-  transform: translateY(-4px);
-  box-shadow: 0 1rem 2.5rem color-mix(in srgb, var(--sl-color-black) 24%, transparent);
 }
 
 .image-zoom-trigger:focus-visible {

@@ -1,0 +1,12 @@
+---
+import Default from '@astrojs/starlight/components/ThemeProvider.astro';
+---
+
+{/* The brand surface is dark, so dark is the default. Only an explicit stored
+    choice selects light on first paint. */}
+<script is:inline>
+  if (!localStorage.getItem('starlight-theme')) {
+    localStorage.setItem('starlight-theme', 'dark');
+  }
+</script>
+<Default><slot /></Default>

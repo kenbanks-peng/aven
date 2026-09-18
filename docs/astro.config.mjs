@@ -20,7 +20,54 @@ export default defineConfig({
         replacesTitle: true,
       },
       favicon: '/favicon.svg',
+      expressiveCode: {
+        themes: ['vesper', 'github-light'],
+        useStarlightUiThemeColors: true,
+        styleOverrides: {
+          codeFontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+          uiFontFamily: "'Space Grotesk', system-ui, sans-serif",
+          codeFontSize: '0.9rem',
+          codeLineHeight: '1.6',
+          codePaddingBlock: '0.8rem',
+          codePaddingInline: '0.95rem',
+          borderRadius: '10px',
+          borderWidth: '1px',
+          borderColor: ({ theme }) => (theme.type === 'dark' ? '#4b3a66' : '#e4dfd7'),
+          frames: {
+            editorBackground: ({ theme }) => (theme.type === 'dark' ? '#171620' : '#f7f5f1'),
+            terminalBackground: ({ theme }) => (theme.type === 'dark' ? '#171620' : '#f7f5f1'),
+            frameBoxShadowCssValue: 'none',
+          },
+        },
+      },
       head: [
+        {
+          tag: 'meta',
+          attrs: {
+            name: 'theme-color',
+            content: '#121110',
+          },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'preload',
+            href: '/fonts/space-grotesk-latin.woff2',
+            as: 'font',
+            type: 'font/woff2',
+            crossorigin: true,
+          },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'preload',
+            href: '/fonts/ibm-plex-mono-latin.woff2',
+            as: 'font',
+            type: 'font/woff2',
+            crossorigin: true,
+          },
+        },
         {
           tag: 'script',
           attrs: {
@@ -41,8 +88,14 @@ export default defineConfig({
       ],
       components: {
         SocialIcons: './src/components/HeaderLinks.astro',
+        ThemeProvider: './src/components/ThemeProvider.astro',
       },
-      customCss: ['./src/styles/code.css'],
+      customCss: [
+        './src/styles/fonts.css',
+        './src/styles/tokens.css',
+        './src/styles/docs.css',
+        './src/styles/code.css',
+      ],
       sidebar: [
         {
           label: 'Start here',

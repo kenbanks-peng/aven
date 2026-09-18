@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- The documentation shares the website's typography and warm color palette, and opens in dark mode by default.
 - TUI text fields support word-wise cursor movement with Ctrl/Alt arrows and deletion with Alt-Backspace.
 - The privacy policy clearly explains Aven's local-first data handling and optional manual crash-report support.
 - The website hero features a faded Aven backdrop that keeps the text readable.
