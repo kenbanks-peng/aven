@@ -45,6 +45,8 @@ pub(super) const EPIC_MARKER: &str = "\u{f04ce}";
 const EPIC_CHILD_MARKER: &str = "↳";
 const DEFERRED_MARKER: &str = "\u{f017}";
 const TASK_CURSOR_GLYPH: &str = "›";
+/// Compact due labels are at most five columns wide; the sixth is the cell gutter.
+const DUE_COLUMN_WIDTH: u16 = 6;
 
 #[derive(Debug)]
 struct TaskListRenderModel {
@@ -71,6 +73,7 @@ struct TaskTimeContext {
     now_seconds: i64,
     render_mode: TaskListRenderMode,
     due_order: bool,
+    show_due: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -82,7 +85,7 @@ struct TaskRowState {
 
 #[derive(Debug, Clone, Copy)]
 struct TaskListCellLayout<'a> {
-    widths: &'a [usize; 8],
+    widths: &'a [usize; 9],
     state_column: Option<TableColumn>,
     compact_status: bool,
 }
@@ -350,7 +353,8 @@ fn build_task_list_render_model(
             top_scroll: 0,
             render_mode: store.view_state.render_mode(),
             has_deferred_rows: false,
-            due_order: store.view_state.sort() == TaskSort::DueOn,
+            due_order: store.view_state.sort() == TaskSort::DueOn
+                && !store.config().tui.table.columns.contains(&TableColumn::Due),
         };
     }
 
@@ -370,6 +374,7 @@ fn build_task_list_render_model(
     let has_deferred_rows = projection.view.render_mode == TaskListRenderMode::Flat
         && visible_tasks.iter().any(|item| is_deferred(item, now));
     let configured_columns = &store.config().tui.table.columns;
+    let show_due_in_time = !configured_columns.contains(&TableColumn::Due);
     let compact_status = store.config().tui.table.compact_status;
     let layout = TableLayout::resolve(&columns, configured_columns, area.width);
     let state_column = layout.state_column();
@@ -406,6 +411,7 @@ fn build_task_list_render_model(
                             now_seconds: now,
                             render_mode: TaskListRenderMode::Epics,
                             due_order,
+                            show_due: show_due_in_time,
                         },
                         store,
                         inline_title_editor.filter(|_| selected),
@@ -428,6 +434,7 @@ fn build_task_list_render_model(
                             now_seconds: now,
                             render_mode: projection.view.render_mode,
                             due_order,
+                            show_due: show_due_in_time,
                         },
                         inline_title_editor.filter(|_| selected),
                         TaskListCellLayout {
@@ -484,6 +491,7 @@ fn build_task_list_render_model(
                             now_seconds: now,
                             render_mode: TaskListRenderMode::Epics,
                             due_order,
+                            show_due: show_due_in_time,
                         },
                         TaskListCellLayout {
                             widths: &column_widths,
@@ -517,11 +525,11 @@ fn build_task_list_render_model(
         top_scroll: projection.top_scroll(),
         render_mode: projection.view.render_mode,
         has_deferred_rows,
-        due_order,
+        due_order: due_order && show_due_in_time,
     }
 }
 
-fn task_list_columns(store: &TuiStore, narrow: bool) -> [Constraint; 8] {
+fn task_list_columns(store: &TuiStore, narrow: bool) -> [Constraint; 9] {
     task_list_columns_for_tasks(
         store,
         narrow,
@@ -535,7 +543,7 @@ fn task_list_columns_for_tasks(
     narrow: bool,
     label_tasks: &[&TaskListItem],
     epic_selection: EpicSelectionContext<'_>,
-) -> [Constraint; 8] {
+) -> [Constraint; 9] {
     let epics = store.view_state.render_mode() == TaskListRenderMode::Epics;
     let project_width = if epics && narrow {
         0
@@ -563,6 +571,7 @@ fn task_list_columns_for_tasks(
         TableColumn::Status => Constraint::Length(status_column_width(store)),
         TableColumn::Priority => Constraint::Length(priority_width),
         TableColumn::Time => Constraint::Length(5),
+        TableColumn::Due => Constraint::Length(DUE_COLUMN_WIDTH),
     })
 }
 
@@ -744,6 +753,7 @@ fn render_task_header(
             TableColumn::Status => status_header(compact_status),
             TableColumn::Priority => "P",
             TableColumn::Time => time_header,
+            TableColumn::Due => "DUE",
         };
         let area = layout.cell(column, area);
         let label = if column == TableColumn::Labels && render_mode != TaskListRenderMode::Epics {
@@ -843,7 +853,7 @@ fn build_task_row_cells(
     item: &TaskListItem,
     time_context: TaskTimeContext,
     inline_title_editor: Option<&TextInputView>,
-    column_widths: &[usize; 8],
+    column_widths: &[usize; 9],
     state: TaskRowState,
     epic_selection: EpicSelectionContext<'_>,
 ) -> Vec<Line<'static>> {
@@ -884,6 +894,7 @@ fn build_task_row_cells_for_columns(
         time_context.now_seconds,
         time_context.render_mode,
         time_context.due_order,
+        time_context.show_due,
     );
     let state_prefix_width = if state_column == Some(TableColumn::Title) {
         spans_width(&task_state_prefix(
@@ -928,10 +939,35 @@ fn build_task_row_cells_for_columns(
                     theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
                 )),
                 TableColumn::Time => time.clone(),
+                TableColumn::Due => due_cell(item, time_context.now_seconds),
             };
             state_prefixed_cell(column, state_column, cell, state)
         })
         .collect()
+}
+
+/// The task's own deadline, independent of view, ordering, and the contextual time column.
+fn due_cell(item: &TaskListItem, now_seconds: i64) -> Line<'static> {
+    let due_on = item.task.due_on.as_deref().unwrap_or("");
+    let Some(label) = crate::tui::time::compact_due_label(due_on, now_seconds) else {
+        return Line::default();
+    };
+    let due_state = crate::tui::time::due_state_at(due_on, now_seconds);
+    Line::from(Span::styled(label, due_label_style(item, due_state)))
+}
+
+fn due_label_style(item: &TaskListItem, due_state: crate::due::DueState) -> Style {
+    let color = if !item.task.status.is_open() {
+        FG_DIM
+    } else {
+        match due_state {
+            crate::due::DueState::Overdue(_) => RED,
+            crate::due::DueState::Today => YELLOW,
+            crate::due::DueState::Future(_) => ACCENT,
+            crate::due::DueState::None => FG_DIM,
+        }
+    };
+    Style::new().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn is_deferred(item: &TaskListItem, now_seconds: i64) -> bool {
@@ -947,30 +983,19 @@ fn task_time_cell(
     now_seconds: i64,
     render_mode: TaskListRenderMode,
     due_order: bool,
+    show_due: bool,
 ) -> Line<'static> {
     let due_state =
         crate::tui::time::due_state_at(item.task.due_on.as_deref().unwrap_or(""), now_seconds);
-    if render_mode != TaskListRenderMode::Upcoming
+    if show_due
+        && render_mode != TaskListRenderMode::Upcoming
         && (due_order || item.task.status.is_open() && due_state.needs_action())
         && let Some(label) = crate::tui::time::compact_due_label(
             item.task.due_on.as_deref().unwrap_or(""),
             now_seconds,
         )
     {
-        let color = if !item.task.status.is_open() {
-            FG_DIM
-        } else {
-            match due_state {
-                crate::due::DueState::Overdue(_) => RED,
-                crate::due::DueState::Today => YELLOW,
-                crate::due::DueState::Future(_) => ACCENT,
-                crate::due::DueState::None => FG_DIM,
-            }
-        };
-        return Line::from(Span::styled(
-            label,
-            Style::new().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        return Line::from(Span::styled(label, due_label_style(item, due_state)));
     }
     match render_mode {
         TaskListRenderMode::Upcoming => Line::from(Span::styled(
@@ -1090,7 +1115,7 @@ fn epic_summary_cell(rollup: &crate::query::EpicRollup, max_width: usize) -> Lin
 
 fn epic_activity_cell(item: &TaskListItem, now_seconds: i64, due_order: bool) -> Line<'static> {
     if due_order {
-        return task_time_cell(item, now_seconds, TaskListRenderMode::Epics, true);
+        return task_time_cell(item, now_seconds, TaskListRenderMode::Epics, true, true);
     }
     let activity_at = item
         .epic_rollup
@@ -1168,7 +1193,10 @@ fn build_epic_parent_row_cells_for_columns(
                     priority_icon(item.task.priority.as_str()),
                     theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
                 )),
-                TableColumn::Time => epic_activity_cell(item, time.now_seconds, time.due_order),
+                TableColumn::Time => {
+                    epic_activity_cell(item, time.now_seconds, time.due_order && time.show_due)
+                }
+                TableColumn::Due => due_cell(item, time.now_seconds),
             };
             state_prefixed_cell(column, state_column, cell, state)
         })
@@ -1181,7 +1209,7 @@ fn build_epic_child_row_cells(
     last: bool,
     inline_title_editor: Option<&TextInputView>,
     time: TaskTimeContext,
-    column_widths: &[usize; 8],
+    column_widths: &[usize; 9],
     state: TaskRowState,
     epic_selection: EpicSelectionContext<'_>,
 ) -> Vec<Line<'static>> {
@@ -1262,8 +1290,8 @@ fn build_epic_child_row_cells_for_columns(
                     theme::priority_style(item.task.priority.as_str()).add_modifier(Modifier::BOLD),
                 )),
                 TableColumn::Time => {
-                    if time.due_order {
-                        task_time_cell(item, time.now_seconds, time.render_mode, true)
+                    if time.due_order && time.show_due {
+                        task_time_cell(item, time.now_seconds, time.render_mode, true, true)
                     } else {
                         Line::from(Span::styled(
                             task_seconds_since(&item.task.updated_at, time.now_seconds)
@@ -1273,6 +1301,7 @@ fn build_epic_child_row_cells_for_columns(
                         ))
                     }
                 }
+                TableColumn::Due => due_cell(item, time.now_seconds),
             };
             state_prefixed_cell(column, state_column, cell, state)
         })
@@ -1280,16 +1309,7 @@ fn build_epic_child_row_cells_for_columns(
 }
 
 fn blank_task_row_cells() -> Vec<Line<'static>> {
-    vec![
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-        Line::from(""),
-    ]
+    TableColumn::ALL.map(|_| Line::from("")).to_vec()
 }
 
 fn metadata_cell(
@@ -1823,7 +1843,9 @@ mod tests {
     use crate::choices::TaskPriority;
     use crate::operations::TaskDraft;
     use crate::tui::overlay::TextInputKind;
-    use crate::tui::store::{ClosedTaskVisibility, TaskProjectionOrigin, TaskQuery, TaskScope};
+    use crate::tui::store::{
+        ClosedTaskVisibility, TaskOrder, TaskProjectionOrigin, TaskQuery, TaskScope,
+    };
     use crate::tui::test_support::task_list_item;
     use chrono::TimeZone;
     use ratatui::Terminal;
@@ -1852,6 +1874,7 @@ mod tests {
             Constraint::Length(10),
             Constraint::Length(3),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         terminal
             .draw(|frame| {
@@ -1864,6 +1887,7 @@ mod tests {
                         now_seconds: 0,
                         render_mode,
                         due_order: false,
+                        show_due: true,
                     },
                     inline_title_editor,
                     &column_widths,
@@ -2045,10 +2069,11 @@ mod tests {
             item.labels = vec!["ios".to_string()];
             item.has_notes = true;
             item.task.priority = TaskPriority::High;
+            item.task.due_on = Some("2999-01-01".to_string());
             let mut store = test_store_with_tasks(vec![item.clone()]).await;
             store.tasks = vec![item].into();
             store.view_state.query = TaskQuery::All;
-            for rotation in 0..8 {
+            for rotation in 0..9 {
                 let mut config = store.config().clone();
                 config.tui.table.columns = TableColumn::ALL.to_vec();
                 config.tui.table.columns.rotate_left(rotation);
@@ -2086,6 +2111,7 @@ mod tests {
                     (TableColumn::Status, "STATUS", "todo"),
                     (TableColumn::Priority, "P", priority_icon("high")),
                     (TableColumn::Time, "AGE", ""),
+                    (TableColumn::Due, "DUE", "Jan1"),
                 ] {
                     let cell = model.layout.cell(column, Rect::new(0, 0, width, 1));
                     if column == TableColumn::Labels && width < 90 {
@@ -2341,6 +2367,7 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             None,
             TaskListCellLayout {
@@ -2582,7 +2609,7 @@ mod tests {
         for width in [40, 64, 120] {
             let default = render_task_list_buffer(&store, width, 5);
             let mut config = store.config().clone();
-            config.tui.table.columns = TableColumn::ALL.to_vec();
+            config.tui.table.columns = TableColumn::DEFAULT.to_vec();
             store.set_config(config);
             assert_eq!(default, render_task_list_buffer(&store, width, 5));
         }
@@ -2702,6 +2729,7 @@ mod tests {
                 &[&store.tasks[0]],
                 EpicSelectionContext::default(),
             );
+            let columns = TableColumn::DEFAULT.map(|column| columns[column as usize]);
             let header_cells = Layout::horizontal(columns).areas::<8>(Rect::new(0, 0, width, 1));
             let row_cells = Layout::horizontal(columns).areas::<8>(Rect::new(0, 1, width, 1));
 
@@ -3066,9 +3094,10 @@ mod tests {
                 now_seconds: 10 * 86_400,
                 render_mode: TaskListRenderMode::Queue,
                 due_order: false,
+                show_due: true,
             },
             None,
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -3091,9 +3120,10 @@ mod tests {
                 now_seconds: 100,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             None,
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -3120,13 +3150,14 @@ mod tests {
             Constraint::Length(10),
             Constraint::Length(3),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         terminal
             .draw(|frame| {
                 render_task_header(
                     frame,
                     frame.area(),
-                    TableLayout::resolve(&columns, &TableColumn::ALL, frame.area().width),
+                    TableLayout::resolve(&columns, &TableColumn::DEFAULT, frame.area().width),
                     TaskListRenderMode::Flat,
                     false,
                     false,
@@ -3153,13 +3184,14 @@ mod tests {
             Constraint::Length(10),
             Constraint::Length(3),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         terminal
             .draw(|frame| {
                 render_task_header(
                     frame,
                     frame.area(),
-                    TableLayout::resolve(&columns, &TableColumn::ALL, frame.area().width),
+                    TableLayout::resolve(&columns, &TableColumn::DEFAULT, frame.area().width),
                     TaskListRenderMode::Flat,
                     true,
                     false,
@@ -3186,13 +3218,14 @@ mod tests {
             Constraint::Length(10),
             Constraint::Length(3),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         terminal
             .draw(|frame| {
                 render_task_header(
                     frame,
                     frame.area(),
-                    TableLayout::resolve(&columns, &TableColumn::ALL, frame.area().width),
+                    TableLayout::resolve(&columns, &TableColumn::DEFAULT, frame.area().width),
                     TaskListRenderMode::Flat,
                     false,
                     true,
@@ -3204,7 +3237,7 @@ mod tests {
 
         let mut item = task_list_item("future deadline");
         item.task.due_on = Some("2999-01-01".to_string());
-        let cell = task_time_cell(&item, 0, TaskListRenderMode::Flat, true);
+        let cell = task_time_cell(&item, 0, TaskListRenderMode::Flat, true, true);
         assert_eq!(cell.to_string(), "Jan1");
         assert_eq!(cell.spans[0].style.fg, Some(ACCENT));
     }
@@ -3222,12 +3255,181 @@ mod tests {
         assert_eq!(epic_activity_cell(&parent, now, false).to_string(), "1d");
         assert_eq!(
             epic_activity_cell(&parent, now, true).to_string(),
-            task_time_cell(&parent, now, TaskListRenderMode::Epics, true).to_string()
+            task_time_cell(&parent, now, TaskListRenderMode::Epics, true, true).to_string()
         );
         let child_activity = task_seconds_since(&child.task.updated_at, now)
             .map(compact_age)
             .unwrap();
         assert_eq!(child_activity, "1d");
+    }
+
+    #[tokio::test]
+    async fn due_column_shows_every_row_deadline_across_views_and_ordering() {
+        let mut store = epic_test_store(true).await;
+        store.tasks[0].task.due_on = Some("2999-01-01".to_string());
+        store.tasks[1].task.due_on = Some("2999-02-02".to_string());
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Ref, TableColumn::Title, TableColumn::Due];
+        store.set_config(config);
+
+        for (query, order) in [
+            (TaskQuery::Epics, TaskOrder::Updated),
+            (TaskQuery::Epics, TaskOrder::DueOn),
+            (TaskQuery::All, TaskOrder::Created),
+            (TaskQuery::All, TaskOrder::DueOn),
+        ] {
+            store.view_state.query = query;
+            store.view_state.order = order;
+            let mut state = TableState::default();
+            let area = Rect::new(0, 0, 80, 5);
+            let model = build_task_list_render_model(
+                &store,
+                &mut state,
+                Focus::Tasks,
+                area,
+                None,
+                &BTreeSet::new(),
+            );
+            let buffer = render_task_list_buffer(&store, area.width, area.height);
+            let due = model.layout.cell(TableColumn::Due, area);
+            assert_eq!(
+                text_in_cell(&buffer, due).trim(),
+                "DUE",
+                "{query:?} {order:?}"
+            );
+            let rows = model
+                .rows
+                .iter()
+                .filter(|row| matches!(row, TaskListRenderRow::Task(_)))
+                .count();
+            assert_eq!(rows, 2, "{query:?} {order:?}");
+            for (index, expected) in ["Jan1", "Feb2"].into_iter().enumerate() {
+                let cell = Rect {
+                    y: index as u16 + 1,
+                    ..due
+                };
+                assert_eq!(
+                    text_in_cell(&buffer, cell).trim(),
+                    expected,
+                    "{query:?} {order:?} row {index}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn due_column_leaves_undated_tasks_blank() {
+        let item = task_list_item("no deadline");
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Due];
+        store.set_config(config);
+
+        let area = Rect::new(0, 0, 80, 4);
+        let mut state = TableState::default();
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            area,
+            None,
+            &BTreeSet::new(),
+        );
+        let buffer = render_task_list_buffer(&store, area.width, area.height);
+        let due = model.layout.cell(TableColumn::Due, area);
+        assert_eq!(text_in_cell(&buffer, due).trim(), "DUE");
+        assert!(
+            text_in_cell(&buffer, Rect { y: 1, ..due })
+                .trim()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_due_column_keeps_time_contextual() {
+        let mut item = task_list_item("overdue deadline");
+        item.task.due_on = Some("2000-01-01".to_string());
+        let mut store = test_store_with_tasks(vec![item.clone()]).await;
+        store.tasks = vec![item].into();
+        store.view_state.query = TaskQuery::All;
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Due, TableColumn::Time];
+        store.set_config(config);
+
+        let area = Rect::new(0, 0, 80, 4);
+        for order in [TaskOrder::Created, TaskOrder::DueOn] {
+            store.view_state.order = order;
+            let mut state = TableState::default();
+            let model = build_task_list_render_model(
+                &store,
+                &mut state,
+                Focus::Tasks,
+                area,
+                None,
+                &BTreeSet::new(),
+            );
+            let buffer = render_task_list_buffer(&store, area.width, area.height);
+            let due = model.layout.cell(TableColumn::Due, area);
+            let time = model.layout.cell(TableColumn::Time, area);
+            assert_eq!(text_in_cell(&buffer, due).trim(), "DUE", "{order:?}");
+            assert_eq!(text_in_cell(&buffer, time).trim(), "AGE", "{order:?}");
+            let TaskListRenderRow::Task(row) = &model.rows[0] else {
+                panic!("expected task row");
+            };
+            assert_eq!(row.cells[TableColumn::Due as usize].to_string(), "late!");
+            assert_ne!(row.cells[TableColumn::Time as usize].to_string(), "late!");
+        }
+
+        let mut config = store.config().clone();
+        config.tui.table.columns = vec![TableColumn::Title, TableColumn::Time];
+        store.set_config(config);
+        store.view_state.order = TaskOrder::DueOn;
+        let mut state = TableState::default();
+        let model = build_task_list_render_model(
+            &store,
+            &mut state,
+            Focus::Tasks,
+            area,
+            None,
+            &BTreeSet::new(),
+        );
+        let buffer = render_task_list_buffer(&store, area.width, area.height);
+        let time = model.layout.cell(TableColumn::Time, area);
+        assert_eq!(text_in_cell(&buffer, time).trim(), "DUE");
+        let TaskListRenderRow::Task(row) = &model.rows[0] else {
+            panic!("expected task row");
+        };
+        assert_eq!(row.cells[TableColumn::Time as usize].to_string(), "late!");
+    }
+
+    #[test]
+    fn due_cell_colors_deadlines_by_urgency_and_dims_closed_tasks() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 7, 16, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let mut item = task_list_item("deadline");
+        for (due_on, label, color) in [
+            ("2026-07-13", "3d!", RED),
+            ("2026-07-16", "today", YELLOW),
+            ("2026-07-24", "Jul24", ACCENT),
+        ] {
+            item.task.due_on = Some(due_on.to_string());
+            let cell = due_cell(&item, now);
+            assert_eq!(cell.to_string(), label);
+            assert_eq!(cell.spans[0].style.fg, Some(color), "{due_on}");
+        }
+
+        item.task.status = crate::choices::TaskStatus::Done;
+        let cell = due_cell(&item, now);
+        assert_eq!(cell.to_string(), "Jul24");
+        assert_eq!(cell.spans[0].style.fg, Some(FG_DIM));
+
+        item.task.due_on = None;
+        assert_eq!(due_cell(&item, now).to_string(), "");
     }
 
     #[test]
@@ -3241,6 +3443,7 @@ mod tests {
             Constraint::Length(10),
             Constraint::Length(3),
             Constraint::Length(5),
+            Constraint::Length(6),
         ];
         for (due_order, expected, absent) in [(false, "ACT", "DUE"), (true, "DUE", "ACT")] {
             let backend = TestBackend::new(120, 1);
@@ -3250,7 +3453,7 @@ mod tests {
                     render_task_header(
                         frame,
                         frame.area(),
-                        TableLayout::resolve(&columns, &TableColumn::ALL, frame.area().width),
+                        TableLayout::resolve(&columns, &TableColumn::DEFAULT, frame.area().width),
                         TaskListRenderMode::Epics,
                         false,
                         due_order,
@@ -3406,7 +3609,7 @@ mod tests {
     #[test]
     fn compact_status_column_applies_to_epic_child_rows() {
         let item = task_list_item("child");
-        let widths = [14, 40, 1, 6, 9, 2, 3, 5];
+        let widths = [14, 40, 1, 6, 9, 2, 3, 5, 6];
 
         let cells = build_epic_child_row_cells_for_columns(
             &item,
@@ -3416,6 +3619,7 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Epics,
                 due_order: false,
+                show_due: true,
             },
             TaskListCellLayout {
                 widths: &widths,
@@ -3665,9 +3869,10 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             None,
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -3942,9 +4147,10 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             None,
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -3953,7 +4159,7 @@ mod tests {
             EpicSelectionContext::default(),
         );
 
-        assert_eq!(cells.len(), 8);
+        assert_eq!(cells.len(), TableColumn::ALL.len());
         assert_eq!(cells[3].to_string(), "←1 →1 ✎");
         assert_eq!(cells[4].to_string(), "app ");
 
@@ -3964,9 +4170,10 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             None,
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -3994,9 +4201,10 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Flat,
                 due_order: false,
+                show_due: true,
             },
             Some(&editor),
-            &[12, 40, 12, 6, 9, 10, 3, 5],
+            &[12, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,
@@ -4020,8 +4228,9 @@ mod tests {
                 now_seconds: 0,
                 render_mode: TaskListRenderMode::Epics,
                 due_order: false,
+                show_due: true,
             },
-            &[14, 40, 12, 6, 9, 10, 3, 5],
+            &[14, 40, 12, 6, 9, 10, 3, 5, 6],
             TaskRowState {
                 selected: false,
                 focused: false,

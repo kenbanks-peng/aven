@@ -281,8 +281,8 @@ tui:
 ```
 
 List the columns in the order you want them to appear. Remove a name to hide
-that column. Aven rejects empty lists, unknown names, and duplicates. Omit
-`columns` to use all columns in the default order.
+that column. Add `due` to show deadlines in their own column. Aven rejects empty
+lists, unknown names, and duplicates. Omit `columns` to use the default order.
 
 | Name | Content |
 | --- | --- |
@@ -293,7 +293,8 @@ that column. Aven rejects empty lists, unknown names, and duplicates. Omit
 | `project` | Project key |
 | `status` | Status icon and text, or icon only with [compact status](#compact-status-column) |
 | `priority` | Priority indicator, headed `P` |
-| `time` | Time value with a context-dependent heading: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE` |
+| `time` | Contextual time value: `IDLE`, `WHEN`, `DUE`, `ACT`, `TIME`, or `AGE`. When `due` is also shown, this column stays on the view-specific value instead of repeating the deadline |
+| `due` | Each task's own due date, always headed `DUE`. Off by default |
 
 The title expands into remaining space when shown. Columns size automatically
 and may collapse when empty, even when listed in the configuration. Narrow

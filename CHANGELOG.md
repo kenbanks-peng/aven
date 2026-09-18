@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Add an optional dedicated [due-date column](https://aventasks.dev/configuration/#tui-table-columns) to TUI task lists. ([#25](https://github.com/raine/aven/issues/25))
 - Fix: Local edits no longer bypass background sync retry delays when the server is unavailable or incompatible.
 - Fix: Sync rejects contradictory server responses instead of silently losing operation history.
 - Sync checks app and server compatibility before transferring attachments and explains which component needs updating while keeping local edits saved.

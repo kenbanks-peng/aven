@@ -106,10 +106,25 @@ pub enum TableColumn {
     Status,
     Priority,
     Time,
+    Due,
 }
 
 impl TableColumn {
-    pub const ALL: [Self; 8] = [
+    /// Every column, in semantic index order. Indexes geometry and cell arrays.
+    pub const ALL: [Self; 9] = [
+        Self::Ref,
+        Self::Title,
+        Self::Labels,
+        Self::Metadata,
+        Self::Project,
+        Self::Status,
+        Self::Priority,
+        Self::Time,
+        Self::Due,
+    ];
+
+    /// Columns shown when `tui.table.columns` is omitted, in display order.
+    pub const DEFAULT: [Self; 8] = [
         Self::Ref,
         Self::Title,
         Self::Labels,
@@ -130,12 +145,13 @@ impl TableColumn {
             Self::Status => "status",
             Self::Priority => "priority",
             Self::Time => "time",
+            Self::Due => "due",
         }
     }
 }
 
 fn default_table_columns() -> Vec<TableColumn> {
-    TableColumn::ALL.to_vec()
+    TableColumn::DEFAULT.to_vec()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1129,7 +1145,7 @@ mod tests {
         for yaml in ["{}", "tui: {}", "tui:\n  table: {}"] {
             assert_eq!(
                 load_config(yaml).unwrap().tui.table.columns,
-                TableColumn::ALL
+                TableColumn::DEFAULT
             );
         }
         let config = load_config("tui:\n  table:\n    columns: [status, priority, ref]").unwrap();
@@ -1161,12 +1177,40 @@ mod tests {
     }
 
     #[test]
+    fn due_column_is_opt_in_and_independent_of_the_time_column() {
+        assert!(!default_table_columns().contains(&TableColumn::Due));
+
+        let config = load_config("tui:\n  table:\n    columns: [title, due]").unwrap();
+        assert_eq!(
+            config.tui.table.columns,
+            [TableColumn::Title, TableColumn::Due]
+        );
+        assert_eq!(TableColumn::Due.name(), "due");
+
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            load_config(&text).unwrap().tui.table.columns,
+            config.tui.table.columns
+        );
+
+        let with_time = load_config("tui:\n  table:\n    columns: [title, due, time]").unwrap();
+        assert_eq!(
+            with_time.tui.table.columns,
+            [TableColumn::Title, TableColumn::Due, TableColumn::Time]
+        );
+    }
+
+    #[test]
     fn table_columns_reject_empty_duplicate_and_unknown_columns() {
         for (columns, expected) in [
             ("[]", "tui.table.columns must include at least one column"),
             (
                 "[ref, title, labels, metadata, project, status, priority, ref]",
                 "tui.table.columns contains duplicate column ref",
+            ),
+            (
+                "[title, due, due]",
+                "tui.table.columns contains duplicate column due",
             ),
             ("[robot]", "unknown variant `robot`"),
         ] {
