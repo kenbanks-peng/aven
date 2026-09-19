@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use crate::config::{CustomTuiCommandExecution, CustomTuiCommandSuccess};
 use crate::tui::app::{App, Notification};
 use crate::tui::custom_command::{plan_invocation, resolve_command_targets};
-use crate::tui::event::{CommandCatalog, CommandHandler};
+use crate::tui::event::CommandCatalog;
 use crate::tui::platform::TerminalTransition;
 use crate::tui::terminal_command::{
     SystemTerminalProcessRunner, TerminalProcessRunner, execute_terminal_invocation_with,
@@ -13,49 +13,6 @@ use crate::tui::toast::ToastSeverity;
 pub(crate) const REFRESH_ERROR_CHAR_LIMIT: usize = 512;
 
 impl App {
-    pub(super) async fn execute_command_handler(&mut self, handler: CommandHandler) -> Result<()> {
-        if let CommandHandler::BuiltIn(action) = handler
-            && action != crate::tui::event::Action::BeginCommand
-            && matches!(
-                self.store.view_state.query,
-                crate::tui::store::TaskQuery::Recurring
-                    | crate::tui::store::TaskQuery::RecentActions
-            )
-        {
-            return self.execute(action).await;
-        }
-        let recurrence_series_id = self
-            .selected_recurrence_target_id()
-            .map(|target| target.series_id);
-        let snapshot = self.capture_command_session(recurrence_series_id);
-        match handler {
-            CommandHandler::BuiltIn(action) => {
-                let command = crate::tui::event::COMMANDS
-                    .iter()
-                    .find(|command| command.action == action)
-                    .context("built-in command disappeared from the catalog")?;
-                let resolved = match self.resolve_builtin_command(&snapshot, command).await? {
-                    Ok(resolved) => resolved,
-                    Err(reason) => {
-                        self.set_warning(reason);
-                        return Ok(());
-                    }
-                };
-                self.execute_resolved_builtin(resolved, &snapshot).await
-            }
-            CommandHandler::Custom(command_id) => {
-                let catalog = self.command_catalog.clone();
-                let name = catalog
-                    .custom(command_id)
-                    .context("custom command disappeared from the catalog")?
-                    .name
-                    .clone();
-                self.execute_captured_custom_command(&catalog, command_id, &name, &snapshot)
-                    .await
-            }
-        }
-    }
-
     pub(super) async fn execute_captured_custom_command(
         &mut self,
         catalog: &CommandCatalog,

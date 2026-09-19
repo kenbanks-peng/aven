@@ -1,4 +1,5 @@
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::config::resolve_blob_dir;
 use crate::operations::TaskDraft;
@@ -10,9 +11,9 @@ use crate::tui::authoring::{
 use crate::tui::natural_add_runtime::task_intake_log_path;
 use crate::tui::overlay::{
     AddTaskMode, AddTaskState, LineEdit, MultilineInputState, MultilineIntent, OverlayState,
-    PickerIntent, PickerState, ScheduleEditorField, TagComboboxIntent,
+    PickerIntent, PickerState, ScheduleEditorField, ScheduleEditorMode, TagComboboxIntent,
 };
-use crate::tui::platform::edit_text_externally;
+use crate::tui::platform::{edit_text_externally, is_editor_prefix_key};
 use crate::tui::store::TaskScope;
 
 pub(crate) const ADD_TASK_NATURAL_TITLE: &str = "Add task: natural language";
@@ -712,6 +713,169 @@ fn add_task_natural_intake(title: &str, description: &str) -> String {
         (false, true) => title.to_string(),
         (true, false) => format!("Description:\n{description}"),
         (true, true) => String::new(),
+    }
+}
+
+impl App {
+    pub(super) fn handle_add_task_overlay_prefix_key(
+        &mut self,
+        key: KeyEvent,
+        overlay: crate::tui::overlay::OverlayState,
+    ) -> Result<Option<crate::tui::overlay::OverlayState>> {
+        let removes_add_task_image = matches!(
+            &overlay,
+            crate::tui::overlay::OverlayState::AddTask(state)
+                if matches!(state.mode, AddTaskMode::Compose)
+                    && state.focus == AddTaskStep::Images
+        );
+        if key.code == KeyCode::Char('D')
+            && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+            && removes_add_task_image
+        {
+            self.overlay = Some(overlay);
+            self.remove_selected_add_task_image();
+            return Ok(None);
+        }
+        if matches!(
+            &overlay,
+            crate::tui::overlay::OverlayState::AddTask(state)
+                if state.mode == AddTaskMode::Compose
+                    && state.focus.is_metadata()
+                    && key.code == KeyCode::Enter
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+        ) {
+            self.overlay = Some(overlay);
+            self.open_focused_add_task_control();
+            return Ok(None);
+        }
+
+        let had_status_prefix = self.pending_shortcut.has_add_task_status_prefix();
+        if let Some(status) = self.pending_shortcut.take_add_task_status_request(key) {
+            if let crate::tui::overlay::OverlayState::AddTask(state) = &overlay {
+                if self.capture_add_task_state(state) {
+                    self.overlay = Some(overlay);
+                    self.set_add_task_status(status);
+                }
+            } else {
+                self.overlay = Some(overlay);
+            }
+            return Ok(None);
+        }
+        if had_status_prefix {
+            self.pending_shortcut.clear();
+            self.overlay = Some(overlay);
+            if key.code != KeyCode::Esc {
+                self.set_warning("invalid status shortcut");
+            }
+            return Ok(None);
+        }
+
+        let had_priority_prefix = self.pending_shortcut.has_add_task_priority_prefix();
+        if let Some(priority) = self.pending_shortcut.take_add_task_priority_request(key) {
+            if let crate::tui::overlay::OverlayState::AddTask(state) = &overlay {
+                if self.capture_add_task_state(state) {
+                    self.overlay = Some(overlay);
+                    self.set_add_task_priority(priority);
+                }
+            } else {
+                self.overlay = Some(overlay);
+            }
+            return Ok(None);
+        }
+        if had_priority_prefix {
+            self.pending_shortcut.clear();
+            self.overlay = Some(overlay);
+            if key.code != KeyCode::Esc {
+                self.set_warning("invalid priority shortcut");
+            }
+            return Ok(None);
+        }
+
+        Ok(Some(overlay))
+    }
+
+    pub(super) async fn handle_add_task_overlay_tail(
+        &mut self,
+        key: KeyEvent,
+        overlay: crate::tui::overlay::OverlayState,
+    ) -> Result<Option<crate::tui::overlay::OverlayState>> {
+        if let crate::tui::overlay::OverlayState::AddTask(state) = &overlay {
+            if is_editor_prefix_key(key) {
+                if state.focus == AddTaskStep::Description {
+                    self.pending_shortcut.begin_editor_prefix();
+                }
+                self.overlay = Some(overlay);
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == KeyCode::Char('u')
+                && state.mode == AddTaskMode::Compose
+            {
+                self.overlay = Some(overlay);
+                if let Some(crate::tui::overlay::OverlayState::AddTask(state)) =
+                    self.overlay.as_mut()
+                {
+                    let mut editor = state.schedule_editor(ScheduleEditorField::Due);
+                    editor.mode = ScheduleEditorMode::Once;
+                    editor.focus = ScheduleEditorField::Due;
+                    editor.refresh();
+                    state.mode = AddTaskMode::Schedule(editor);
+                }
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+                let return_focus = state.focus;
+                self.overlay = Some(overlay);
+                if let Some(crate::tui::overlay::OverlayState::AddTask(state)) =
+                    self.overlay.as_mut()
+                {
+                    state.focus = AddTaskStep::Project;
+                }
+                self.open_focused_add_task_control();
+                if let Some(crate::tui::overlay::OverlayState::AddTask(state)) =
+                    self.overlay.as_mut()
+                {
+                    state.focus = return_focus;
+                }
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+                let return_focus = state.focus;
+                self.overlay = Some(overlay);
+                if let Some(crate::tui::overlay::OverlayState::AddTask(state)) =
+                    self.overlay.as_mut()
+                {
+                    state.focus = AddTaskStep::Labels;
+                }
+                self.open_focused_add_task_control();
+                if let Some(crate::tui::overlay::OverlayState::AddTask(state)) =
+                    self.overlay.as_mut()
+                {
+                    state.focus = return_focus;
+                }
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
+                self.pending_shortcut.begin_add_task_priority_prefix();
+                self.overlay = Some(overlay);
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+                self.pending_shortcut.begin_add_task_status_prefix();
+                self.overlay = Some(overlay);
+                return Ok(None);
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('n') {
+                let title = state.title.text.clone();
+                let description = state.description.buffer.lines.join("\n");
+                if self.capture_add_task_state(state) {
+                    self.submit_add_task_title_natural(title, description)
+                        .await?;
+                }
+                return Ok(None);
+            }
+        }
+        Ok(Some(overlay))
     }
 }
 

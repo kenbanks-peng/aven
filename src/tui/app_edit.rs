@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::choices::TaskStatus;
 use crate::query::TaskListItem;
@@ -1625,6 +1626,82 @@ fn description_overlay_from_value(
     baseline: String,
 ) -> OverlayState {
     OverlayState::multiline_input_with_baseline(intent, EDIT_DESCRIPTION_TITLE, "", value, baseline)
+}
+
+impl App {
+    pub(super) async fn handle_footer_choice_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(choice) = self.footer_choice.clone() else {
+            return Ok(());
+        };
+        if !key.modifiers.is_empty() {
+            return Ok(());
+        }
+        match (choice.mode, key.code) {
+            (_, KeyCode::Esc) => {
+                self.footer_choice = None;
+                Ok(())
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('i')) => {
+                self.submit_footer_status(choice.selection, "inbox").await
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('b')) => {
+                self.submit_footer_status(choice.selection, "backlog").await
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('t')) => {
+                self.submit_footer_status(choice.selection, "todo").await
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('a')) => {
+                self.submit_footer_status(choice.selection, "active").await
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('d')) => {
+                self.submit_footer_status(choice.selection, "done").await
+            }
+            (FooterChoiceMode::Status, KeyCode::Char('x')) => {
+                self.submit_footer_status(choice.selection, "canceled")
+                    .await
+            }
+            (FooterChoiceMode::Priority, KeyCode::Char('n')) => {
+                self.submit_footer_priority(choice.selection, "none").await
+            }
+            (FooterChoiceMode::Priority, KeyCode::Char('l')) => {
+                self.submit_footer_priority(choice.selection, "low").await
+            }
+            (FooterChoiceMode::Priority, KeyCode::Char('m')) => {
+                self.submit_footer_priority(choice.selection, "medium")
+                    .await
+            }
+            (FooterChoiceMode::Priority, KeyCode::Char('h')) => {
+                self.submit_footer_priority(choice.selection, "high").await
+            }
+            (FooterChoiceMode::Priority, KeyCode::Char('u')) => {
+                self.submit_footer_priority(choice.selection, "urgent")
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub(super) async fn submit_footer_status(
+        &mut self,
+        selection: crate::tui::task_selection::TaskSelection,
+        status: &'static str,
+    ) -> Result<()> {
+        self.footer_choice = None;
+        self.submit_edit_status(selection, status.to_string())
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn submit_footer_priority(
+        &mut self,
+        selection: crate::tui::task_selection::TaskSelection,
+        priority: &'static str,
+    ) -> Result<()> {
+        self.footer_choice = None;
+        self.submit_edit_priority(selection, priority.to_string())
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

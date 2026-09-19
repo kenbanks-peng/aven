@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::attachments::AttachmentBytesState;
 use crate::attachments::optimization::ImageOptimizationPolicy;
@@ -600,6 +601,100 @@ fn pasted_image_path(text: &str) -> Option<PathBuf> {
         return None;
     }
     Some(path)
+}
+
+impl App {
+    pub(crate) async fn open_attachment_externally(&mut self, attachment_id: &str) {
+        let Some(db_path) = self.intake.db_path() else {
+            self.set_error("could not resolve attachment storage");
+            return;
+        };
+        let Ok(blob_dir) = crate::config::resolve_blob_dir(db_path, self.intake.config()) else {
+            self.set_error("could not resolve attachment storage");
+            return;
+        };
+        let mut export = match self
+            .store
+            .lease_image_export(&blob_dir, attachment_id)
+            .await
+        {
+            Ok(export) => export,
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("attachment-invalidated") {
+                    self.set_warning("attachment is no longer available");
+                } else if message.contains("attachment-blob-unavailable") {
+                    self.set_warning("attachment bytes are unavailable");
+                } else if message.contains("attachment-format-unsupported") {
+                    self.set_warning("attachment format cannot be opened");
+                } else {
+                    self.set_error("could not prepare attachment for the image viewer");
+                }
+                return;
+            }
+        };
+        let launch_result = self.inline_images.launch_external_viewer(export.path());
+        let release_result = self.store.release_image_export(&mut export).await;
+        if let Err(_error) = launch_result {
+            self.set_error("could not start the default image viewer");
+            return;
+        }
+        self.inline_images
+            .retain_export(attachment_id.to_string(), export.into_directory());
+        if release_result.is_err() {
+            self.set_warning("image opened; attachment read protection expires automatically");
+        } else {
+            self.set_success("opened attachment in default image viewer");
+        }
+    }
+
+    pub(super) async fn handle_attachment_preview_key(
+        &mut self,
+        key: KeyEvent,
+        attachment_id: String,
+        scroll: u16,
+    ) -> Result<()> {
+        if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
+            self.close_detail_session().await?;
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('D')
+            && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        {
+            self.begin_delete_attachment(&attachment_id, scroll);
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('o') && key.modifiers.is_empty() {
+            self.open_attachment_externally(&attachment_id).await;
+            self.overlay = Some(crate::tui::overlay::OverlayState::AttachmentPreview {
+                attachment_id,
+                scroll,
+            });
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('s') && key.modifiers.is_empty() {
+            self.begin_save_attachment(&attachment_id, scroll);
+            return Ok(());
+        }
+        let next_attachment_id = match (key.code, key.modifiers) {
+            (KeyCode::Char('j') | KeyCode::Down, KeyModifiers::NONE) => self
+                .move_attachment_preview_selection(&attachment_id, 1)
+                .unwrap_or_else(|| attachment_id.clone()),
+            (KeyCode::Char('k') | KeyCode::Up, KeyModifiers::NONE) => self
+                .move_attachment_preview_selection(&attachment_id, -1)
+                .unwrap_or_else(|| attachment_id.clone()),
+            _ => attachment_id.clone(),
+        };
+        if key.code == KeyCode::Esc {
+            self.show_detail(scroll);
+        } else {
+            self.overlay = Some(crate::tui::overlay::OverlayState::AttachmentPreview {
+                attachment_id: next_attachment_id,
+                scroll,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
