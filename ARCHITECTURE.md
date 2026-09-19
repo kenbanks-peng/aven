@@ -227,7 +227,7 @@ SQLite stores synced task data and local UI state. Config files store local rout
 - Keep bounded sync limits explicit: `MAX_PUSH_BATCH` bounds client push counts, `MAX_SYNC_REQUEST_BYTES` bounds the complete decoded metadata request and the server `/sync` extractor, `MAX_PULL_BATCH` bounds server pull pages, `MAX_BLOB_TRANSFER_OBJECTS` and `MAX_BLOB_TRANSFER_BYTES` bound attachment transfer rounds, attachment lifecycle policy bounds prune batches, and `DAEMON_SYNC_PAGE_BUDGET` bounds daemon work per wake.
 - Keep cursor semantics based on `server_seq`. Pull pages are ordered by increasing `server_seq`; response cursors equal the last returned `server_seq` or the request cursor for an empty page; local `sync_cursor` advances only after a validated page applies successfully.
 - Keep daemon sync privacy-safe and budget-aware. Daemon logs and stdout include counts, cursor, completion, and page count without user content, and incomplete rounds schedule prompt follow-up sync work.
-- Route successful local mutation wake attempts through `daemon::wake_if_enabled`, which owns the sync-enabled condition, wake-address resolution, and wake logging.
+- Route successful local mutation wake attempts through `daemon::wake_if_enabled`, which owns the sync-enabled condition, wake-address resolution, and wake logging. The daemon loop preserves failure retry deadlines across wakes: typed sync compatibility errors retry at the configured sync interval, while other failures use exponential backoff. Successful sync restores immediate wake-driven scheduling.
 
 
 ## Change routing

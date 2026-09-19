@@ -378,3 +378,137 @@ fn daemon_syncs_large_backlog_across_budgeted_rounds() {
         );
     }
 }
+
+#[test]
+fn daemon_wakes_respect_failure_deadlines_and_recover() {
+    use aven_core::sync::wire::SYNC_PROTOCOL_VERSION;
+    use axum::{Router, body::Bytes, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
+    };
+
+    for initial_status in [400, 401] {
+        let env = TestEnv::new();
+        let server = TestServer::start(&env);
+        let db = env.db("retry-deadline.sqlite");
+        ok(env.aven(&db, ["add", "pending during failure", "--project", "app"]));
+        let pending = scalar_i64(&db, "SELECT count(*) FROM changes WHERE server_seq IS NULL");
+        let wake_addr = env.free_loopback_addr();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let status = Arc::new(AtomicU16::new(initial_status));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let proxy_status = Arc::clone(&status);
+        let proxy_requests = Arc::clone(&requests);
+        let upstream = server.url.clone();
+        let proxy = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let client = reqwest::Client::new();
+                let app = Router::new().route(
+                    "/sync",
+                    post(move |headers: axum::http::HeaderMap, body: Bytes| {
+                        let status = Arc::clone(&proxy_status);
+                        let requests = Arc::clone(&proxy_requests);
+                        let upstream = upstream.clone();
+                        let client = client.clone();
+                        async move {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            match status.load(Ordering::SeqCst) {
+                                400 => (
+                                    StatusCode::BAD_REQUEST,
+                                    format!(
+                                        "error sync-protocol-unsupported client={} server={}",
+                                        SYNC_PROTOCOL_VERSION,
+                                        SYNC_PROTOCOL_VERSION + 1
+                                    ),
+                                ),
+                                401 => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
+                                _ => {
+                                    let mut request = client
+                                        .post(format!("{upstream}/sync"))
+                                        .header("content-type", "application/json");
+                                    if let Some(encoding) = headers.get("content-encoding") {
+                                        request = request.header("content-encoding", encoding);
+                                    }
+                                    let response = request.body(body).send().await.unwrap();
+                                    (response.status(), response.text().await.unwrap())
+                                }
+                            }
+                        }
+                    }),
+                );
+                axum::serve(tokio::net::TcpListener::from_std(listener).unwrap(), app)
+                    .with_graceful_shutdown(async {
+                        let _ = stop_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+        // Dropping the sender also ends the proxy if a test assertion panics.
+        let interval = if initial_status == 400 { 3 } else { 3600 };
+        env.write_config(&format!(
+            "local:\n  db_path: '{}'\nsync:\n  enabled: true\n  server_url: '{}'\n  interval_seconds: {}\ndaemon:\n  wake_addr: '{}'\n",
+            db.display(), url, interval, wake_addr
+        ));
+        let daemon = TestProcess::start_daemon(&env);
+        daemon.wait_for_log("daemon sync failed", Duration::from_secs(5));
+        if initial_status == 401 {
+            let mark = daemon.log_mark();
+            daemon.wait_for_log_after(mark, "daemon sync failed", Duration::from_secs(5));
+        }
+        let attempts = requests.load(Ordering::SeqCst);
+        assert_eq!(attempts, if initial_status == 400 { 1 } else { 2 });
+        let wake = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for _ in 0..20 {
+            wake.send_to(b"1", &wake_addr).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            attempts,
+            "wake bypassed retry deadline"
+        );
+        assert_eq!(
+            scalar_i64(&db, "SELECT count(*) FROM changes WHERE server_seq IS NULL"),
+            pending
+        );
+        assert_eq!(common::meta_value(&db, "sync_cursor").as_deref(), Some("0"));
+        if initial_status == 400 {
+            assert_eq!(
+                common::meta_value(&db, "sync_blocked_protocol"),
+                Some((SYNC_PROTOCOL_VERSION + 1).to_string())
+            );
+        }
+        status.store(0, Ordering::SeqCst);
+        daemon.wait_for_log("daemon-synced", Duration::from_secs(8));
+        assert_eq!(
+            scalar_i64(&db, "SELECT count(*) FROM changes WHERE server_seq IS NULL"),
+            0
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), attempts + 2);
+        assert_eq!(
+            common::meta_value(&db, "sync_blocked_protocol").as_deref(),
+            Some("")
+        );
+        if initial_status == 401 {
+            let mark = daemon.log_mark();
+            ok(env.aven_config(["add", "wake after recovery", "--project", "app"]));
+            daemon.wait_for_log_after(mark, "daemon-synced", Duration::from_secs(5));
+            assert_eq!(
+                scalar_i64(&db, "SELECT count(*) FROM changes WHERE server_seq IS NULL"),
+                0
+            );
+        }
+        drop(daemon);
+        let _ = stop_tx.send(());
+        proxy.join().unwrap();
+    }
+}

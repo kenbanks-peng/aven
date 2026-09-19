@@ -104,6 +104,7 @@ async fn run_loop(
     let mut wake_buf = [0_u8; 16];
     let mut backoff_seconds = 1_u64;
     let mut next_sync = Instant::now();
+    let mut retry_not_before = None;
     let mut next_attachment_maintenance = Instant::now();
     let mut next_binary_check = Instant::now() + BINARY_CHECK_INTERVAL;
     loop {
@@ -120,7 +121,10 @@ async fn run_loop(
                     debug!("daemon wake received");
                 }
                 drain_wakes(&socket, &mut wake_buf);
-                next_sync = Instant::now();
+                let now = Instant::now();
+                if retry_not_before.is_none_or(|deadline| now >= deadline) {
+                    next_sync = now;
+                }
             }
             _ = sleep_until(next_binary_check) => {
                 if binary_changed(&binary_fingerprint)? {
@@ -136,6 +140,7 @@ async fn run_loop(
                     Instant::now() + crate::sync::ATTACHMENT_MAINTENANCE_INTERVAL;
             }
             _ = sleep_until(next_sync) => {
+                retry_not_before = None;
                 match sync_once(
                     &database,
                     &blob_dir,
@@ -159,10 +164,20 @@ async fn run_loop(
                         next_sync = Instant::now() + DAEMON_CONTENTION_RESCHEDULE;
                     }
                     Err(err) => {
-                        warn!(error = %err, backoff_seconds, "daemon sync failed");
+                        let retry_seconds = if err
+                            .downcast_ref::<aven_core::sync::protocol::SyncCompatibilityError>()
+                            .is_some()
+                        {
+                            interval_seconds
+                        } else {
+                            let delay = backoff_seconds;
+                            backoff_seconds = (backoff_seconds * 2).min(300);
+                            delay
+                        };
+                        next_sync = Instant::now() + Duration::from_secs(retry_seconds);
+                        retry_not_before = Some(next_sync);
+                        warn!(error = %err, retry_seconds, "daemon sync failed");
                         eprintln!("daemon sync failed: {err}");
-                        next_sync = Instant::now() + Duration::from_secs(backoff_seconds);
-                        backoff_seconds = (backoff_seconds * 2).min(300);
                     }
                 }
             }

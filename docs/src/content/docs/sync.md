@@ -196,7 +196,7 @@ aven daemon
 
 Daemon sync requires `sync.enabled = true` and `sync.server_url`. The wake address must be loopback.
 
-The daemon wakes after successful local mutations when possible, syncs periodically, reschedules incomplete sync quickly, and backs off after failures.
+The daemon wakes after successful local mutations when possible, syncs periodically, reschedules incomplete sync quickly, and backs off after failures. Local edits do not bypass a pending retry delay. When sync is blocked by protocol compatibility, the daemon checks again at the configured sync interval. You can run `aven sync` to retry immediately.
 
 Inspect service installation, configuration, executable consistency, runtime,
 and log paths without changing the service:
