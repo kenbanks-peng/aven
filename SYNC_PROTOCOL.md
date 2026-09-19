@@ -14,6 +14,17 @@ UI changes, local-only settings, and performance changes that preserve the
 contract do not ordinarily require one. A SQLite schema migration is not itself
 a sync protocol change; database compatibility is a separate concern.
 
+The user-facing mental model is:
+
+> Updating an app keeps it working with your existing server. Some new shared
+> features require updating the server first. Updating the server may require
+> updating your other apps.
+
+Normally hide protocol numbers in user-facing guidance. Name the app or server
+that needs updating and confirm that local work remains saved. Feature-gating
+messages should distinguish an unavailable new feature from blocked ordinary
+sync: existing tasks and edits continue working under the established contract.
+
 Compatibility is asymmetric:
 
 - A server accepts requests for exactly one active protocol.
@@ -28,6 +39,13 @@ Compatibility is asymmetric:
 A newer server must still interpret retained older operations with their original
 meaning. Requiring a newer request envelope does not give permission to reinterpret
 or rewrite the operations inside it.
+
+Genuine fallback includes operation creation, validation, interpretation, merge
+semantics, recurrence, attachments, retries, and pending changes. Keep shared
+implementation where semantics are unchanged rather than copying the application
+for each protocol. A semantic change with unchanged serialized bytes can still
+break compatibility; a version check cannot detect it. Review interpretation code
+and retain historical replay and mixed-version evidence.
 
 ## How it is encoded
 
@@ -171,6 +189,8 @@ For a protocol addition, retain evidence for:
 - Unsupported clients retaining pending work and receiving actionable guidance.
 - Unknown operations rejected at both creation and server admission, even when
   submitted under a supported protocol number.
+- Unknown or unsupported incoming data rejected without advancing the cursor past
+  it; acknowledgements and local application remain transactional.
 - Historical replay preserving materialized state, conflict behavior, and
   deterministic identities across the supported contracts.
 - Import, standalone behavior, release-marker interpretation, and host surfaces
@@ -217,3 +237,15 @@ Protocol support does not guarantee that an older binary can open a newer SQLite
 schema. It also does not detect restored or replaced server history at the same
 URL. Dataset epochs, fleet tracking, selective synchronization, capability
 negotiation, and automatic operation down-conversion are not part of this model.
+Do not skip incompatible pending operations to upload later ones, introduce
+client-specific task representations, or add historical compaction as part of a
+protocol bump. User-managed transitions and automatic first-feature-use cutovers
+are also outside this contract.
+
+A dataset epoch would address a different product requirement: a server update
+must keep old clients syncing until incompatible shared data is actually
+committed. Supporting that requirement would mean serving multiple session
+protocols against one dataset, with a persisted dataset compatibility floor and
+an atomic transition when newer data is accepted. It is not required here:
+deliberate server upgrades are the accepted cutover point. Revisit that design
+only if the product requirement changes.
