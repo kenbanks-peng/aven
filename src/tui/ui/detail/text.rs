@@ -1,7 +1,7 @@
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::super::input::clipped_input_line;
 use super::super::task_display::linked_task_ref_spans;
@@ -290,7 +290,7 @@ pub(super) fn title_line_ranges(title: &str, width: usize) -> Vec<std::ops::Rang
     lines
 }
 
-pub(super) fn markdown_links(markdown: &str) -> Vec<ParsedMarkdownLink> {
+fn markdown_links(markdown: &str) -> Vec<ParsedMarkdownLink> {
     let mut links = Vec::new();
     let mut current = None;
     for event in Parser::new(markdown) {

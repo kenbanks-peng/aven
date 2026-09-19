@@ -13,28 +13,29 @@ pub(crate) use document::{DetailDocument, DetailInteractiveRow, DetailRenderCont
 pub(crate) use metadata::{DetailMetadataTarget, detail_copy_target_at, detail_metadata_target_at};
 
 #[cfg(test)]
+use crate::tui::theme::{BORDER, FG_MUTED};
+#[cfg(test)]
 use attachments::{DetailBodyAttachmentPlacement, DetailBodyImagePlacement};
 #[cfg(test)]
-use body::{
-    DetailBodyBlock, DetailBodyDocument, build_detail_body_document, extend_activity_section,
-    extend_detail_note_section,
-};
+use body::build_detail_body_document;
 #[cfg(test)]
 use document::{
     DetailContentRenderModel, apply_active_style, detail_body_area, detail_content_layout,
     project_detail_content_model, render_detail_content_from_model, visible_detail_image_rect,
 };
+#[cfg(test)]
+use metadata::detail_metadata_lines_with_children;
+#[cfg(test)]
+use ratatui::style::Style;
 use relationships::DETAIL_DEPENDENCY_TREE_CAP;
 #[cfg(test)]
 use relationships::{
-    DependencyDirection, DetailEpicChild, EpicChildState, apply_link_row_style,
-    dependency_heading, dependency_tree_item_lines, detail_epic_children,
-    epic_child_dependency_lines,
+    DependencyDirection, EpicChildState, dependency_heading, dependency_tree_item_lines,
+    detail_epic_children, epic_child_dependency_lines,
 };
 #[cfg(test)]
 use text::{
-    DetailHyperlink, DetailSelectableDocument, SelectableLine,
-    apply_detail_selection_from_document, detail_body_blocks, detail_header_options,
+    DetailSelectableDocument, apply_detail_selection_from_document, detail_header_options,
     detail_selectable_document_from_body,
 };
 

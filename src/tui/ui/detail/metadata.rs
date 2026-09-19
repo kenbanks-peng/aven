@@ -343,7 +343,7 @@ pub(crate) fn detail_metadata_target_at(
     Some((target, column, row))
 }
 
-pub(super) fn detail_metadata_rows(item: &TaskListItem) -> DetailMetadataRows {
+fn detail_metadata_rows(item: &TaskListItem) -> DetailMetadataRows {
     let now_seconds = crate::queue::now_seconds();
     let availability_len = u16::from(
         crate::tui::time::availability_summary_lines(

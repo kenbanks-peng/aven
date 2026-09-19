@@ -2,9 +2,16 @@ use std::collections::BTreeSet;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
+use ratatui::text::Line;
 
+use super::super::task_list::EPIC_MARKER;
+use super::super::timestamps::{local_activity_timestamp_display, local_timestamp_display};
+use super::attachments::attachment_detail_line;
+use super::text::detail_title_lines;
 use super::*;
 use crate::choices::{TaskPriority, TaskStatus};
+use crate::tui::theme::{self, ACCENT, BG_PANEL, FG, FG_DIM, FG_MUTED, INVERSE_FG, YELLOW};
 
 mod activity;
 mod attachments;

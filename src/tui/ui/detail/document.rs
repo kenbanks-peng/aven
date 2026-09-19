@@ -8,6 +8,8 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 
 use super::super::scroll::{clamp_scroll_start, scrollbar_thumb_position};
+#[cfg(test)]
+use super::attachments::attachment_is_locally_openable;
 use super::attachments::{
     DetailBodyImagePlacement, DetailInlineImageContext, DetailInlineImagePlacement,
 };
@@ -58,13 +60,13 @@ impl DetailRenderContext<'_> {
 
 #[derive(Debug, Clone)]
 pub(super) struct DetailContentRenderModel {
-    sticky_lines: Vec<Line<'static>>,
-    lines: Vec<Line<'static>>,
-    content_height: usize,
-    body_start: usize,
-    scrollbar_position: usize,
-    image_placements: Rc<Vec<DetailBodyImagePlacement>>,
-    interactive_rows: Rc<Vec<DetailInteractiveRow>>,
+    pub(super) sticky_lines: Vec<Line<'static>>,
+    pub(super) lines: Vec<Line<'static>>,
+    pub(super) content_height: usize,
+    pub(super) body_start: usize,
+    pub(super) scrollbar_position: usize,
+    pub(super) image_placements: Rc<Vec<DetailBodyImagePlacement>>,
+    pub(super) interactive_rows: Rc<Vec<DetailInteractiveRow>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,26 +77,26 @@ pub(crate) struct DetailInteractiveRow {
 }
 
 #[derive(Debug)]
-struct DetailBodyGeometry {
-    task_id: crate::ids::TaskId,
-    detail_revision: DetailRevision,
-    content_width: usize,
-    expanded_sections: BTreeSet<DetailSection>,
-    inline_images: Option<DetailInlineImageContext>,
-    pending_attachments: Vec<crate::tui::attachment_controller::PendingAttachmentView>,
-    removed_epic_child: Option<crate::tui::app::RemovedEpicChild>,
-    epic_children: Vec<DetailEpicChild>,
-    body: DetailBodyDocument,
-    selectable: DetailSelectableDocument,
+pub(super) struct DetailBodyGeometry {
+    pub(super) task_id: crate::ids::TaskId,
+    pub(super) detail_revision: DetailRevision,
+    pub(super) content_width: usize,
+    pub(super) expanded_sections: BTreeSet<DetailSection>,
+    pub(super) inline_images: Option<DetailInlineImageContext>,
+    pub(super) pending_attachments: Vec<crate::tui::attachment_controller::PendingAttachmentView>,
+    pub(super) removed_epic_child: Option<crate::tui::app::RemovedEpicChild>,
+    pub(super) epic_children: Vec<DetailEpicChild>,
+    pub(super) body: DetailBodyDocument,
+    pub(super) selectable: DetailSelectableDocument,
 }
 
 #[derive(Debug)]
 pub(crate) struct DetailDocument {
-    geometry: Rc<DetailBodyGeometry>,
-    layout: DetailContentLayout,
-    scroll: u16,
-    inline_title_editor: Option<(String, usize)>,
-    model: DetailContentRenderModel,
+    pub(super) geometry: Rc<DetailBodyGeometry>,
+    pub(super) layout: DetailContentLayout,
+    pub(super) scroll: u16,
+    pub(super) inline_title_editor: Option<(String, usize)>,
+    pub(super) model: DetailContentRenderModel,
     #[cfg(test)]
     projection_id: usize,
 }
@@ -272,7 +274,7 @@ impl DetailDocument {
         self.geometry_matches(item, context) && self.view_matches(context)
     }
 
-    fn sticky_height(&self) -> usize {
+    pub(super) fn sticky_height(&self) -> usize {
         self.model
             .sticky_lines
             .len()

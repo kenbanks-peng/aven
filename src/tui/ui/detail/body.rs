@@ -16,8 +16,8 @@ use crate::tui::theme::{BORDER, FG, FG_DIM, FG_MUTED};
 
 use super::DetailInteractiveRow;
 use super::attachments::{
-    DetailBodyImagePlacement, DetailInlineImageContext,
-    extend_attachment_section, extend_pending_attachment_section,
+    DetailBodyImagePlacement, DetailInlineImageContext, extend_attachment_section,
+    extend_pending_attachment_section,
 };
 use super::relationships::{
     DetailEpicChild, extend_dependency_sections, extend_epic_children_section,
