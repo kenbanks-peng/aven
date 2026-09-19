@@ -103,6 +103,7 @@ pub(super) fn sync_status_summary(status: &TuiSyncStatus) -> SyncStatusSummary {
         runtime_allowed: status.runtime_allowed,
         configured,
         server_mismatch: status.server_match.as_ref().is_some_and(|check| !check.ok),
+        blocked_protocol: None,
         conflicts: status.conflicts,
         current_failure: status.last_error_value().is_some(),
         pending: status.pending_changes > 0,

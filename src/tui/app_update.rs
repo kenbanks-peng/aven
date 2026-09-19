@@ -324,12 +324,10 @@ impl App {
     fn check_then_confirm_update(&mut self, plan: InstallPlan) -> Result<()> {
         let server = ConfiguredSyncServer::from_config(self.store.config());
         if server.is_none()
-            || (plan.release.sync_protocol == Some(crate::sync::wire::SYNC_PROTOCOL_VERSION)
-                && plan
-                    .release
-                    .sync_protocol_min
-                    .unwrap_or(crate::sync::wire::SYNC_PROTOCOL_VERSION)
-                    <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE)
+            || update::retains_current_sync_support(
+                plan.release.sync_protocol,
+                plan.release.sync_protocol_min,
+            )
         {
             return self.confirm_update(plan);
         }

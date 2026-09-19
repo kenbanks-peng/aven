@@ -118,34 +118,21 @@ pub(crate) async fn build_sync_status(
         attachment_downloads: missing.count,
         attachment_download_bytes: missing.bytes,
     };
-    let mut state = classify_sync_state(SyncStateInput {
+    let input = SyncStateInput {
         enabled: config.sync.enabled,
         runtime_allowed: config.sync_is_allowed(),
         configured,
         server_mismatch: server_matches_pin == Some(false),
+        blocked_protocol: persistence.blocked_protocol,
         conflicts: persistence.conflicts,
         current_failure: failure_is_current,
         pending: pending.changes > 0
             || pending.attachment_uploads > 0
             || pending.attachment_downloads > 0,
         ever_succeeded: persistence.last_success.is_some(),
-    });
-    let mut guidance = sync_guidance(state, persistence.conflicts);
-    if let Some(server_protocol) = persistence.blocked_protocol
-        && config.sync_is_allowed()
-        && config.sync.enabled
-        && configured
-        && server_matches_pin != Some(false)
-    {
-        state = StatusState::Blocked;
-        guidance = vec![
-            aven_core::sync::protocol::SyncCompatibilityError {
-                server_protocol,
-                client_protocol: aven_core::sync::wire::SYNC_PROTOCOL_VERSION,
-            }
-            .to_string(),
-        ];
-    }
+    };
+    let state = classify_sync_state(input);
+    let guidance = sync_guidance(state, input);
 
     Ok(SyncStatusReport {
         version: 1,
@@ -181,6 +168,7 @@ pub(crate) struct SyncStateInput {
     pub(crate) runtime_allowed: bool,
     pub(crate) configured: bool,
     pub(crate) server_mismatch: bool,
+    pub(crate) blocked_protocol: Option<u32>,
     pub(crate) conflicts: i64,
     pub(crate) current_failure: bool,
     pub(crate) pending: bool,
@@ -192,7 +180,7 @@ pub(crate) fn classify_sync_state(input: SyncStateInput) -> StatusState {
         StatusState::Disabled
     } else if !input.configured {
         StatusState::Unconfigured
-    } else if input.server_mismatch || input.conflicts > 0 {
+    } else if input.server_mismatch || input.blocked_protocol.is_some() || input.conflicts > 0 {
         StatusState::Blocked
     } else if input.current_failure {
         StatusState::Failed
@@ -207,7 +195,7 @@ fn parse_counter(value: Option<&str>) -> Option<i64> {
     value?.parse().ok()
 }
 
-fn sync_guidance(state: StatusState, conflicts: i64) -> Vec<String> {
+fn sync_guidance(state: StatusState, input: SyncStateInput) -> Vec<String> {
     let mut guidance = Vec::new();
     match state {
         StatusState::Disabled => guidance.push(
@@ -224,7 +212,16 @@ fn sync_guidance(state: StatusState, conflicts: i64) -> Vec<String> {
         StatusState::Degraded => {
             guidance.push("Run `aven sync` or verify that the daemon is healthy.".to_string())
         }
-        StatusState::Blocked if conflicts > 0 => {
+        StatusState::Blocked if !input.server_mismatch && input.blocked_protocol.is_some() => {
+            guidance.push(
+                aven_core::sync::protocol::SyncCompatibilityError {
+                    server_protocol: input.blocked_protocol.unwrap(),
+                    client_protocol: aven_core::sync::wire::SYNC_PROTOCOL_VERSION,
+                }
+                .to_string(),
+            );
+        }
+        StatusState::Blocked if input.conflicts > 0 => {
             guidance.push("Inspect unresolved conflicts with `aven conflict list`.".to_string())
         }
         StatusState::Blocked => guidance.push(
@@ -373,6 +370,79 @@ fn nonempty_path(path: PathBuf) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compatibility_guidance_preserves_status_precedence() {
+        let blocked = SyncStateInput {
+            enabled: true,
+            runtime_allowed: true,
+            configured: true,
+            server_mismatch: false,
+            blocked_protocol: Some(aven_core::sync::wire::SYNC_PROTOCOL_VERSION + 1),
+            conflicts: 0,
+            current_failure: true,
+            pending: true,
+            ever_succeeded: true,
+        };
+        for (input, expected_state, expected_guidance) in [
+            (blocked, StatusState::Blocked, "Update Aven on this device"),
+            (
+                SyncStateInput {
+                    conflicts: 1,
+                    ..blocked
+                },
+                StatusState::Blocked,
+                "Update Aven on this device",
+            ),
+            (
+                SyncStateInput {
+                    enabled: false,
+                    ..blocked
+                },
+                StatusState::Disabled,
+                "Enable sync",
+            ),
+            (
+                SyncStateInput {
+                    runtime_allowed: false,
+                    ..blocked
+                },
+                StatusState::Disabled,
+                "Enable sync",
+            ),
+            (
+                SyncStateInput {
+                    configured: false,
+                    ..blocked
+                },
+                StatusState::Unconfigured,
+                "Set a server",
+            ),
+            (
+                SyncStateInput {
+                    server_mismatch: true,
+                    ..blocked
+                },
+                StatusState::Blocked,
+                "Use a fresh database",
+            ),
+            (
+                SyncStateInput {
+                    server_mismatch: true,
+                    conflicts: 1,
+                    ..blocked
+                },
+                StatusState::Blocked,
+                "Inspect unresolved conflicts",
+            ),
+        ] {
+            let state = classify_sync_state(input);
+            assert_eq!(state, expected_state);
+            let guidance = sync_guidance(state, input);
+            assert_eq!(guidance.len(), 1);
+            assert!(guidance[0].contains(expected_guidance), "{guidance:?}");
+        }
+    }
 
     fn service(installed: bool) -> ServiceStatus {
         ServiceStatus {

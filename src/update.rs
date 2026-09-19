@@ -22,6 +22,7 @@ pub(crate) use cache::{
 };
 pub(crate) use compatibility::{
     CompatibilityFailure, CompatibilityResult, ConfiguredSyncServer, assess_sync_compatibility,
+    retains_current_sync_support,
 };
 pub(crate) use eligibility::install_plan;
 pub(crate) use install::install_direct;

@@ -79,6 +79,12 @@ impl CompatibilityResult {
     }
 }
 
+pub(crate) fn retains_current_sync_support(target: Option<u32>, baseline: Option<u32>) -> bool {
+    target == Some(SYNC_PROTOCOL_VERSION)
+        && baseline.unwrap_or(SYNC_PROTOCOL_VERSION)
+            <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE
+}
+
 pub(crate) async fn assess_sync_compatibility(
     target: Option<u32>,
     baseline: Option<u32>,
@@ -93,9 +99,7 @@ pub(crate) async fn assess_sync_compatibility(
             reason: CompatibilityFailure::ProtocolMarkerMissing,
         };
     };
-    if target == SYNC_PROTOCOL_VERSION
-        && baseline.unwrap_or(target) <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE
-    {
+    if retains_current_sync_support(Some(target), baseline) {
         return CompatibilityResult::NotRequired;
     }
     probe_server(target, baseline.unwrap_or(target), &server).await
@@ -154,7 +158,7 @@ async fn probe_server(
     }
     if status == StatusCode::BAD_REQUEST
         && let Ok(detail) = std::str::from_utf8(&body)
-        && let Some((client, server)) = protocol_versions(detail)
+        && let Some((client, server)) = protocol_mismatch(detail)
         && client == target
     {
         return if (baseline..=target).contains(&server) {
@@ -186,10 +190,6 @@ async fn read_body_limited(mut response: reqwest::Response) -> Option<Vec<u8>> {
     Some(body)
 }
 
-fn protocol_versions(detail: &str) -> Option<(u32, u32)> {
-    protocol_mismatch(detail)
-}
-
 fn unverified(target: u32, reason: CompatibilityFailure) -> CompatibilityResult {
     CompatibilityResult::Unverified {
         target: Some(target),
@@ -202,16 +202,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_support_requires_matching_active_and_preserved_baseline() {
+        let active = SYNC_PROTOCOL_VERSION;
+        let baseline = aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE;
+        assert!(!retains_current_sync_support(None, None));
+        assert!(!retains_current_sync_support(None, Some(baseline)));
+        assert_eq!(
+            retains_current_sync_support(Some(active), None),
+            active == baseline
+        );
+        assert!(retains_current_sync_support(Some(active), Some(baseline)));
+        assert!(retains_current_sync_support(
+            Some(active),
+            Some(baseline - 1)
+        ));
+        assert!(!retains_current_sync_support(
+            Some(active),
+            Some(baseline + 1)
+        ));
+        assert!(!retains_current_sync_support(
+            Some(active + 1),
+            Some(baseline)
+        ));
+    }
+
+    #[test]
     fn parses_only_exact_protocol_mismatch_errors() {
         assert_eq!(
-            protocol_versions("error sync-protocol-unsupported client=19 server=18"),
+            protocol_mismatch("error sync-protocol-unsupported client=19 server=18"),
             Some((19, 18))
         );
         assert_eq!(
-            protocol_versions("error sync-protocol-unsupported client=18 server=18"),
+            protocol_mismatch("error sync-protocol-unsupported client=18 server=18"),
             None
         );
-        assert_eq!(protocol_versions("server=18 client=19"), None);
+        assert_eq!(protocol_mismatch("server=18 client=19"), None);
     }
 
     #[tokio::test]

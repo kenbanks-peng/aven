@@ -115,10 +115,7 @@ async fn install_release(
 }
 
 async fn assess_for_cli(release: &Release) -> (CompatibilityResult, Option<String>) {
-    if release.sync_protocol == Some(SYNC_PROTOCOL_VERSION)
-        && release.sync_protocol_min.unwrap_or(SYNC_PROTOCOL_VERSION)
-            <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE
-    {
+    if update::retains_current_sync_support(release.sync_protocol, release.sync_protocol_min) {
         return (CompatibilityResult::NotRequired, None);
     }
     let config = match AppConfig::load() {
