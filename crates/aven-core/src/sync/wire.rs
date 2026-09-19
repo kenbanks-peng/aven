@@ -336,7 +336,14 @@ pub struct ValidatedSyncRequestEnvelope {
 pub fn validate_sync_request_envelope(
     request: &SyncRequest,
 ) -> Result<ValidatedSyncRequestEnvelope> {
-    validate_sync_request_protocol_version(request.protocol_version)?;
+    validate_request_at_protocol(request, SYNC_PROTOCOL_VERSION)
+}
+
+pub(crate) fn validate_request_at_protocol(
+    request: &SyncRequest,
+    protocol: u32,
+) -> Result<ValidatedSyncRequestEnvelope> {
+    validate_sync_protocol_version(request.protocol_version.unwrap_or(0), protocol)?;
     validate_request_cursor(request.after)?;
     validate_push_batch_size(request.changes.len())?;
     Ok(ValidatedSyncRequestEnvelope {
@@ -366,7 +373,23 @@ pub fn validate_sync_response_for_request(
     request_change_ids: &[String],
     response: &SyncResponse,
 ) -> Result<()> {
-    validate_sync_protocol_version(SYNC_PROTOCOL_VERSION, response.protocol_version)?;
+    validate_response_at_protocol(
+        SYNC_PROTOCOL_VERSION,
+        after,
+        pull_limit,
+        request_change_ids,
+        response,
+    )
+}
+
+pub(crate) fn validate_response_at_protocol(
+    protocol: u32,
+    after: i64,
+    pull_limit: u32,
+    request_change_ids: &[String],
+    response: &SyncResponse,
+) -> Result<()> {
+    validate_sync_protocol_version(protocol, response.protocol_version)?;
     if response.changes.len() > pull_limit as usize {
         bail!(
             "error invalid-sync-response pull-too-large limit={} got={}",
@@ -383,6 +406,9 @@ pub fn validate_sync_response_for_request(
     }
     validate_push_acks(request_change_ids, response)?;
     validate_pull_page(after, pull_limit, response)?;
+    for change in &response.changes {
+        super::protocol::validate_change(protocol, change)?;
+    }
     validate_push_pull_overlap(response)?;
     Ok(())
 }
@@ -394,6 +420,11 @@ enum ChangeDirection {
 }
 
 pub fn validate_pushed_change(change: &ChangeWire) -> Result<()> {
+    validate_local_change_shape(change)?;
+    super::protocol::validate_change(SYNC_PROTOCOL_VERSION, change)
+}
+
+pub(crate) fn validate_local_change_shape(change: &ChangeWire) -> Result<()> {
     validate_change_shape(change, ChangeDirection::Pushed)
 }
 

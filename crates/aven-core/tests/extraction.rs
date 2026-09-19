@@ -718,6 +718,28 @@ async fn sync_byte_bounded_pages_replay_acknowledge_and_converge() {
     )
     .await
     .unwrap();
+    let probe = session.prepare_request().await.unwrap().unwrap();
+    let request: SyncRequest = serde_json::from_slice(&probe.body).unwrap();
+    assert_eq!(request.after, i64::MAX);
+    assert!(request.changes.is_empty());
+    session
+        .accept_response(
+            &probe.context,
+            SyncHttpResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: serde_json::to_vec(&SyncResponse {
+                    protocol_version: SYNC_PROTOCOL_VERSION,
+                    cursor: i64::MAX,
+                    has_more: false,
+                    push_acks: Vec::new(),
+                    changes: Vec::new(),
+                })
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
     let mut acknowledged = 0;
     let mut pages = 0;
     while let Some(prepared) = session.prepare_request().await.unwrap() {

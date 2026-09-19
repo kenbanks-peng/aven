@@ -97,7 +97,22 @@ fn parse_release(release: GithubRelease) -> Result<Release> {
         archive_url,
         checksum_url,
         sync_protocol,
+        sync_protocol_min: sync_protocol_min_marker(&release.assets, sync_protocol),
     })
+}
+
+fn sync_protocol_min_marker(assets: &[GithubAsset], active: Option<u32>) -> Option<u32> {
+    let values = assets
+        .iter()
+        .filter_map(|asset| asset.name.strip_prefix("sync-client-baseline-"))
+        .collect::<Vec<_>>();
+    let [value] = values.as_slice() else {
+        return None;
+    };
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|min| *min > 0 && active.is_some_and(|max| *min <= max))
 }
 
 fn sync_protocol_marker(assets: &[GithubAsset]) -> Option<u32> {
@@ -182,6 +197,28 @@ mod tests {
         assert_eq!(sync_protocol_marker(&[asset("sync-protocol-nope")]), None);
         assert_eq!(
             sync_protocol_marker(&[asset("sync-protocol-18"), asset("sync-protocol-19")]),
+            None
+        );
+    }
+
+    #[test]
+    fn baseline_marker_does_not_change_legacy_active_marker() {
+        let assets = [asset("sync-protocol-20"), asset("sync-client-baseline-18")];
+        assert_eq!(sync_protocol_marker(&assets), Some(20));
+        assert_eq!(sync_protocol_min_marker(&assets, Some(20)), Some(18));
+        assert_eq!(sync_protocol_min_marker(&assets, Some(17)), None);
+        assert_eq!(
+            sync_protocol_min_marker(&[asset("sync-protocol-20")], Some(20)),
+            None
+        );
+        assert_eq!(
+            sync_protocol_min_marker(
+                &[
+                    asset("sync-client-baseline-18"),
+                    asset("sync-client-baseline-19")
+                ],
+                Some(20)
+            ),
             None
         );
     }

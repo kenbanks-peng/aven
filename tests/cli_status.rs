@@ -138,3 +138,25 @@ fn daemon_status_json_is_typed_and_never_contains_authentication_secrets() {
     assert!(report["installed"].is_boolean());
     assert!(report["paths"].is_object());
 }
+
+#[test]
+fn compatibility_block_survives_generic_host_error_and_names_the_update() {
+    let env = TestEnv::new();
+    let db = env.db("compatibility-status.sqlite");
+    ok(env.aven(&db, ["list"]));
+    configured(&env, &db, None);
+    execute(
+        &db,
+        &[
+            "INSERT INTO meta(key, value) VALUES ('sync_blocked_protocol', '19')",
+            "INSERT INTO meta(key, value) VALUES ('sync_last_error', 'sync response rejected')",
+            "INSERT INTO meta(key, value) VALUES ('sync_last_attempt_at', '2026-09-19T00:00:00Z')",
+        ],
+    );
+    let status = json_status(&env);
+    assert_eq!(status["state"], "blocked");
+    let guidance = status["guidance"][0].as_str().unwrap();
+    assert!(guidance.contains("Update Aven on this device"));
+    assert!(guidance.contains("local tasks and edits remain saved"));
+    assert!(!guidance.contains("19"));
+}

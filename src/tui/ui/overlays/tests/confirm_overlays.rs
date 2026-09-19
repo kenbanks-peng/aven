@@ -39,6 +39,7 @@ fn available_update_combines_release_notes_and_actions() {
                     archive_url: "https://example.com/aven-test.tar.gz".to_string(),
                     checksum_url: "https://example.com/aven-test.sha256".to_string(),
                     sync_protocol: Some(crate::sync::wire::SYNC_PROTOCOL_VERSION),
+                    sync_protocol_min: None,
                 },
                 method: crate::update::InstallMethod::Direct {
                     target: "/usr/local/bin/aven".into(),
@@ -75,6 +76,7 @@ fn compatibility_warning_recommends_updating_server_first() {
                     archive_url: "https://example.com/aven-test.tar.gz".to_string(),
                     checksum_url: "https://example.com/aven-test.sha256".to_string(),
                     sync_protocol: Some(19),
+                    sync_protocol_min: None,
                 },
                 method: crate::update::InstallMethod::Direct {
                     target: "/usr/local/bin/aven".into(),

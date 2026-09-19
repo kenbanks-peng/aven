@@ -56,6 +56,14 @@ async fn install_release(
         return Ok(());
     }
 
+    if release
+        .sync_protocol
+        .is_some_and(|protocol| protocol != SYNC_PROTOCOL_VERSION)
+    {
+        eprintln!(
+            "Server operators: this update changes sync compatibility. Update your other apps before restarting the sync server; older apps may stop syncing. Their local work remains saved."
+        );
+    }
     let target = plan
         .direct_target()
         .expect("direct update plan must have a target");
@@ -107,7 +115,10 @@ async fn install_release(
 }
 
 async fn assess_for_cli(release: &Release) -> (CompatibilityResult, Option<String>) {
-    if release.sync_protocol == Some(SYNC_PROTOCOL_VERSION) {
+    if release.sync_protocol == Some(SYNC_PROTOCOL_VERSION)
+        && release.sync_protocol_min.unwrap_or(SYNC_PROTOCOL_VERSION)
+            <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE
+    {
         return (CompatibilityResult::NotRequired, None);
     }
     let config = match AppConfig::load() {
@@ -125,7 +136,8 @@ async fn assess_for_cli(release: &Release) -> (CompatibilityResult, Option<Strin
     let server = ConfiguredSyncServer::from_config(&config);
     let origin = server.as_ref().map(ConfiguredSyncServer::origin);
     (
-        update::assess_sync_compatibility(release.sync_protocol, server).await,
+        update::assess_sync_compatibility(release.sync_protocol, release.sync_protocol_min, server)
+            .await,
         origin,
     )
 }

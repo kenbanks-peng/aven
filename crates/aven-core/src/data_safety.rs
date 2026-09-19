@@ -699,6 +699,39 @@ async fn ensure_supported_export(_conn: &mut SqliteConnection, export: &AvenExpo
 }
 
 fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
+    use crate::sync::protocol::{MAINTAINED_PROTOCOL_BASELINE, validate_operation};
+    for row in &export.tables.tasks {
+        validate_operation(
+            MAINTAINED_PROTOCOL_BASELINE,
+            "create_task",
+            None,
+            &serde_json::to_value(row)?,
+        )?;
+    }
+    for row in &export.tables.recurrence_series {
+        validate_operation(
+            MAINTAINED_PROTOCOL_BASELINE,
+            "create_recurrence_series",
+            None,
+            &serde_json::to_value(row)?,
+        )?;
+    }
+    for row in &export.tables.task_attachments {
+        validate_operation(
+            MAINTAINED_PROTOCOL_BASELINE,
+            "attachment_add",
+            Some("attachments"),
+            &serde_json::to_value(row)?,
+        )?;
+    }
+    for row in &export.tables.changes {
+        validate_operation(
+            MAINTAINED_PROTOCOL_BASELINE,
+            &row.op_type,
+            row.field.as_deref(),
+            &serde_json::from_str(&row.payload)?,
+        )?;
+    }
     ensure!(
         export.version == EXPORT_VERSION
             || (export.tables.task_related_links.is_empty()
@@ -1717,7 +1750,12 @@ async fn replace_from_export(
     for meta in &export.tables.meta {
         if matches!(
             meta.key.as_str(),
-            "client_id" | "sync_server_url" | "sync_cursor" | "local_seq"
+            "client_id"
+                | "sync_server_url"
+                | "sync_cursor"
+                | "local_seq"
+                | "sync_established_protocol"
+                | "sync_blocked_protocol"
         ) {
             continue;
         }
@@ -2123,6 +2161,15 @@ async fn push_meta_checks(
         },
     };
     checks.push(sync_cursor_ok);
+    let protocol = crate::sync::protocol::replica_protocol(conn).await;
+    checks.push(IntegrityCheck {
+        label: "replica sync protocol",
+        ok: protocol.is_ok(),
+        value: match protocol {
+            Ok(value) => value.to_string(),
+            Err(error) => error.to_string(),
+        },
+    });
 
     Ok(())
 }

@@ -11,6 +11,45 @@ Use [Configuration](/configuration/) for `sync.*` and `daemon.*` settings. See
 [Back up and restore](/backups/) when you need to preserve, move, or recover
 local data.
 
+## App and server compatibility
+
+Updating an app keeps it working with your existing server while that server
+remains within Aven's maintained support baseline. Some new shared features may
+require updating the server first. Updating the server can require updating
+other apps.
+
+Aven checks compatibility before sending changes or transferring attachments.
+Each database remembers its established server behavior, including while
+offline. App updates and temporarily disabling sync do not change that behavior.
+Ordinary offline edits stay available; a shared feature that needs a newer server
+is rejected without saving a partial change. Local-only search and interface
+features do not require a server update.
+
+### Local-only databases
+
+Databases that have never connected to a server use the maintained baseline,
+even if you intend to keep them permanently local-only. They do not automatically
+enable newer shared behavior merely because sync is unconfigured or disabled.
+All currently shipped shared features are available at the baseline. This policy
+keeps later server attachment safe without a separate standalone-mode switch.
+
+### Updating a server
+
+Before updating your server, check the release notes and update the apps on your
+other devices. A server exposes one active protocol, not a choice of older
+protocols. A compatibility-changing server update is a deliberate cutover:
+unsupported apps pause sync and retain their local work until updated. Compatible
+apps select the new server protocol automatically, preserving pending changes.
+
+Protocol 18 is the maintained baseline. Aven does not automatically retire it
+when another client generation ships. A support-policy change requires an
+announced migration path.
+
+Sync compatibility does not make a database downgrade safe. Keep backups before
+updating. Aven also cannot reliably detect a server database replaced or restored
+behind a client's cursor; restoring server history requires separate recovery
+planning.
+
 ## Start a server
 
 ```sh

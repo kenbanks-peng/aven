@@ -324,7 +324,12 @@ impl App {
     fn check_then_confirm_update(&mut self, plan: InstallPlan) -> Result<()> {
         let server = ConfiguredSyncServer::from_config(self.store.config());
         if server.is_none()
-            || plan.release.sync_protocol == Some(crate::sync::wire::SYNC_PROTOCOL_VERSION)
+            || (plan.release.sync_protocol == Some(crate::sync::wire::SYNC_PROTOCOL_VERSION)
+                && plan
+                    .release
+                    .sync_protocol_min
+                    .unwrap_or(crate::sync::wire::SYNC_PROTOCOL_VERSION)
+                    <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE)
         {
             return self.confirm_update(plan);
         }
@@ -335,7 +340,9 @@ impl App {
             UpdateOverlayState::CheckingCompatibility { version },
         ));
         self.update.compatibility = Some(tokio::spawn(async move {
-            let result = update::assess_sync_compatibility(target, server).await;
+            let result =
+                update::assess_sync_compatibility(target, plan.release.sync_protocol_min, server)
+                    .await;
             (plan, result, server_origin)
         }));
         Ok(())
@@ -582,6 +589,7 @@ mod tests {
             archive_url: "https://example.com/aven-test.tar.gz".to_string(),
             checksum_url: "https://example.com/aven-test.sha256".to_string(),
             sync_protocol: Some(crate::sync::wire::SYNC_PROTOCOL_VERSION),
+            sync_protocol_min: None,
         }
     }
 

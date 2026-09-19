@@ -49,6 +49,7 @@ pub struct IosSyncFacts {
     pub attachment_downloads: u64,
     pub metadata_confirmed_at: Option<String>,
     pub metadata_caught_up: bool,
+    pub compatibility_block: Option<crate::sync::protocol::SyncCompatibilityError>,
 }
 
 #[derive(Clone)]
@@ -2679,6 +2680,7 @@ fn bounded_conflict_display_value(value: String) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
+    SyncCompatibility,
     Validation,
     NotFound,
     OpenConflict,
@@ -2690,6 +2692,7 @@ pub enum ErrorCode {
 impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::SyncCompatibility => "sync_compatibility",
             Self::Validation => "validation",
             Self::NotFound => "not_found",
             Self::OpenConflict => "open_conflict",
@@ -2716,6 +2719,15 @@ impl Error {
     }
 
     fn from_internal(error: InternalError) -> Self {
+        if error
+            .downcast_ref::<crate::sync::protocol::SyncCompatibilityError>()
+            .is_some()
+            || error
+                .downcast_ref::<crate::sync::protocol::SharedOperationCompatibilityError>()
+                .is_some()
+        {
+            return Self::new(ErrorCode::SyncCompatibility, error.to_string());
+        }
         let code = error
             .chain()
             .find_map(|cause| cause.downcast_ref::<crate::error::CoreError>())

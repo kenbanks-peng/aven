@@ -2,6 +2,7 @@ mod apply;
 mod blob;
 mod persistence;
 mod planner;
+pub mod protocol;
 mod session;
 pub mod wire;
 

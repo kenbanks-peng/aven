@@ -600,7 +600,7 @@ struct FakeSyncHttpResponse {
 }
 
 fn start_fake_sync_http_server_sequence(responses: Vec<FakeSyncHttpResponse>) -> FakeSyncServer {
-    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::io::{BufRead as _, BufReader, Read as _, Write as _};
     use std::net::TcpListener;
     use std::thread;
 
@@ -612,7 +612,8 @@ fn start_fake_sync_http_server_sequence(responses: Vec<FakeSyncHttpResponse>) ->
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let thread_stop = std::sync::Arc::clone(&stop);
     let thread = thread::spawn(move || {
-        for response in responses {
+        let mut responses = responses.into_iter().peekable();
+        while let Some(scripted) = responses.peek() {
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(connection) => break connection,
@@ -630,13 +631,31 @@ fn start_fake_sync_http_server_sequence(responses: Vec<FakeSyncHttpResponse>) ->
                 .expect("set fake sync stream blocking");
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut line = String::new();
+            let mut content_length = 0;
             loop {
                 line.clear();
                 reader.read_line(&mut line).expect("read request line");
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse::<usize>().unwrap();
+                }
                 if line == "\r\n" || line.is_empty() {
                     break;
                 }
             }
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            let discovery = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .is_some_and(|request| request["after"] == i64::MAX);
+            let response = if discovery && scripted.status_line == "200 OK" {
+                FakeSyncHttpResponse {
+                    status_line: "200 OK",
+                    content_type: "application/json",
+                    body: sync_response(i64::MAX, []).to_string().into_bytes(),
+                }
+            } else {
+                responses.next().unwrap()
+            };
             write!(
                 stream,
                 "HTTP/1.1 {}\r\n\
@@ -849,10 +868,7 @@ fn sync_http_error_includes_server_rejection_detail() {
 
     contains_all(
         &error,
-        &[
-            "sync request failed with HTTP status 400",
-            "error invalid-sync-change op_type=invalid_test_op",
-        ],
+        &["error invalid-sync-change op_type=invalid_test_op"],
     );
 }
 
@@ -879,8 +895,8 @@ fn sync_http_error_explains_protocol_upgrade_direction() {
     contains_all(
         &server_error,
         &[
-            "client and server use incompatible sync protocol versions (client 9, server 5)",
-            "upgrade the sync server",
+            "Update your Aven sync server",
+            "Your local tasks and edits remain saved",
         ],
     );
     contains_none(&server_error, &["sync-protocol-unsupported"]);
@@ -889,8 +905,8 @@ fn sync_http_error_explains_protocol_upgrade_direction() {
     contains_all(
         &client_error,
         &[
-            "client and server use incompatible sync protocol versions (client 5, server 9)",
-            "upgrade the sync client",
+            "Update Aven on this device",
+            "Your local tasks and edits remain saved",
         ],
     );
     contains_none(&client_error, &["sync-protocol-unsupported"]);
@@ -3445,6 +3461,19 @@ fn download_failure_preserves_applied_metadata_and_cursor() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake blob server");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
+        let (mut probe, _) = listener.accept().expect("accept discovery request");
+        let mut reader = BufReader::new(probe.try_clone().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let discovery = sync_response(i64::MAX, []).to_string();
+        write!(probe, "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", discovery.len(), discovery).unwrap();
+        drop(probe);
         let (mut sync_stream, _) = listener.accept().expect("accept sync request");
         let mut reader = BufReader::new(sync_stream.try_clone().unwrap());
         let mut line = String::new();

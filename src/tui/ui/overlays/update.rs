@@ -233,6 +233,18 @@ fn render_available_update(
             Rect::new(content.x, content.y.saturating_add(2), content.width, 1),
         );
     }
+    if plan.guidance().is_none()
+        && plan
+            .release
+            .sync_protocol
+            .is_some_and(|protocol| protocol != crate::sync::wire::SYNC_PROTOCOL_VERSION)
+    {
+        frame.render_widget(
+            Paragraph::new("Server update: older apps may stop syncing.")
+                .style(Style::new().fg(ORANGE).bg(BG_ALT)),
+            Rect::new(content.x, content.y.saturating_add(2), content.width, 1),
+        );
+    }
     frame.render_widget(
         Paragraph::new("Changelog")
             .style(Style::new().fg(FG).bg(BG_ALT).add_modifier(Modifier::BOLD)),

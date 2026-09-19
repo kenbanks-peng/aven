@@ -38,6 +38,8 @@ pub(crate) struct Release {
     pub(crate) checksum_url: String,
     #[serde(default)]
     pub(crate) sync_protocol: Option<u32>,
+    #[serde(default)]
+    pub(crate) sync_protocol_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

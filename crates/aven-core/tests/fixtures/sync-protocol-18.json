@@ -1,0 +1,1977 @@
+{
+  "source_revision": "7c1f7ca415fc53468f7457bbb64bc7c8c7b42cd0",
+  "attempted_at": "2026-09-19T14:50:22Z",
+  "changes": [
+    {
+      "change_id": "YFA44VJYS0V4F3BZ",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 1,
+      "entity_type": "project",
+      "entity_id": "M09TKA8Y021HA2JE",
+      "field": null,
+      "op_type": "create_project",
+      "payload": {
+        "created_at": "2026-09-19T14:50:20Z",
+        "key": "compatibility",
+        "name": "compatibility",
+        "prefix": "CMP",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 1
+    },
+    {
+      "change_id": "MZTJSEVTY3NGDMA7",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 2,
+      "entity_type": "metadata_field",
+      "entity_id": "WR6NWC8Q83Z0GY7J",
+      "field": null,
+      "op_type": "create_metadata_field",
+      "payload": {
+        "created_at": "2026-09-19T14:50:20Z",
+        "key": "kind",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 2
+    },
+    {
+      "change_id": "YX53972CGV28DY0S",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 3,
+      "entity_type": "task",
+      "entity_id": "Z3P6H3Z8KYYDFVF9",
+      "field": null,
+      "op_type": "create_task",
+      "payload": {
+        "available_at": "",
+        "created_at": "2026-09-19T14:50:20Z",
+        "description": "",
+        "due_on": "",
+        "is_epic": "1",
+        "labels": [],
+        "metadata": [
+          {
+            "field_id": "WR6NWC8Q83Z0GY7J",
+            "key": "kind",
+            "value": "baseline"
+          }
+        ],
+        "priority": "none",
+        "project_id": "M09TKA8Y021HA2JE",
+        "project_key": "compatibility",
+        "project_name": "compatibility",
+        "project_prefix": "CMP",
+        "source": "cli",
+        "status": "inbox",
+        "title": "Historical parent",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 3
+    },
+    {
+      "change_id": "ZF5CQCW4S6P56JH4",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 4,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": null,
+      "op_type": "create_task",
+      "payload": {
+        "available_at": "",
+        "created_at": "2026-09-19T14:50:20Z",
+        "description": "",
+        "due_on": "",
+        "is_epic": "0",
+        "labels": [],
+        "metadata": [],
+        "priority": "none",
+        "project_id": "M09TKA8Y021HA2JE",
+        "project_key": "compatibility",
+        "project_name": "compatibility",
+        "project_prefix": "CMP",
+        "source": "cli",
+        "status": "inbox",
+        "title": "Historical child",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 4
+    },
+    {
+      "change_id": "7PC3A1VRRW41Z59K",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 5,
+      "entity_type": "task",
+      "entity_id": "B40WBMNX180GKMY4",
+      "field": null,
+      "op_type": "create_task",
+      "payload": {
+        "available_at": "",
+        "created_at": "2026-09-19T14:50:20Z",
+        "description": "",
+        "due_on": "",
+        "is_epic": "0",
+        "labels": [],
+        "metadata": [],
+        "priority": "none",
+        "project_id": "M09TKA8Y021HA2JE",
+        "project_key": "compatibility",
+        "project_name": "compatibility",
+        "project_prefix": "CMP",
+        "source": "cli",
+        "status": "inbox",
+        "title": "Related task",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 5
+    },
+    {
+      "change_id": "3GGG4J6RCQ4JRA3D",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 6,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "epics",
+      "op_type": "epic_link_add",
+      "payload": {
+        "created_at": "2026-09-19T14:50:20Z",
+        "epic_task_id": "Z3P6H3Z8KYYDFVF9",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 6
+    },
+    {
+      "change_id": "H6H6CVXCWK56Q08W",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 7,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "related",
+      "op_type": "related_add",
+      "payload": {
+        "related_task_id": "B40WBMNX180GKMY4",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 7
+    },
+    {
+      "change_id": "YZCMX9W3X2SRF0PY",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 8,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "dependencies",
+      "op_type": "dependency_add",
+      "payload": {
+        "depends_on_task_id": "B40WBMNX180GKMY4",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 8
+    },
+    {
+      "change_id": "J6PAMYGHN5PHF6TP",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 9,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "notes",
+      "op_type": "note_add",
+      "payload": {
+        "body": "Frozen historical note",
+        "created_at": "2026-09-19T14:50:20Z",
+        "note_id": "SFJ34J08ZWMVKCYT",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 9
+    },
+    {
+      "change_id": "DY9Q8N9ARHN42DY2",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 10,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "description",
+      "op_type": "set_field",
+      "payload": {
+        "value": "Protocol 18 meaning",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "ZF5CQCW4S6P56JH4",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 10
+    },
+    {
+      "change_id": "YKRSYQ1P7B71TW4X",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 11,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "status",
+      "op_type": "set_field",
+      "payload": {
+        "value": "todo",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "ZF5CQCW4S6P56JH4",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 11
+    },
+    {
+      "change_id": "DQ3VTJ3XM1BE9KE6",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 12,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "priority",
+      "op_type": "set_field",
+      "payload": {
+        "value": "high",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "ZF5CQCW4S6P56JH4",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 12
+    },
+    {
+      "change_id": "7XHD6EPKDCED1ZKQ",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 13,
+      "entity_type": "project",
+      "entity_id": "JSGZRM8TR7YETBFX",
+      "field": null,
+      "op_type": "create_project",
+      "payload": {
+        "created_at": "2026-09-19T14:50:20Z",
+        "key": "aven",
+        "name": "aven",
+        "prefix": "AVN",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 13
+    },
+    {
+      "change_id": "M7RVKJCME989S8G0",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 14,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": null,
+      "op_type": "create_recurrence_series",
+      "payload": {
+        "available_local_time": "",
+        "created_at": "2026-09-19T14:50:20Z",
+        "description": "",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "initial_status": "todo",
+        "interval": 1,
+        "labels": [],
+        "metadata": [],
+        "priority": "none",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "project_key": "aven",
+        "project_name": "aven",
+        "project_prefix": "AVN",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "start_on": "2026-09-19",
+        "state": "active",
+        "stopped_at": "",
+        "timezone": "UTC",
+        "title": "Recurring baseline",
+        "updated_at": "2026-09-19T14:50:20Z",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 14
+    },
+    {
+      "change_id": "VNBCGVMEFAG33NZG",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 15,
+      "entity_type": "task",
+      "entity_id": "6WDVXQ450VXH70WX",
+      "field": null,
+      "op_type": "create_task",
+      "payload": {
+        "available_at": "2026-09-19T00:00:00Z",
+        "available_local_time": "",
+        "created_at": "2026-09-19T00:00:00Z",
+        "description": "",
+        "due_on": "2026-09-19",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "interval": 1,
+        "is_epic": "0",
+        "labels": [],
+        "metadata": [],
+        "occurrence_change_id": "RPDJNEJTK2CA5Z0G",
+        "occurrence_field_version_seed": "BCGA7B0Y1R5NZ368",
+        "priority": "none",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-19",
+        "start_on": "2026-09-19",
+        "status": "todo",
+        "task_change_id": "VNBCGVMEFAG33NZG",
+        "task_field_version_seed": "N7DYET7AHY817E1P",
+        "task_id": "6WDVXQ450VXH70WX",
+        "timezone": "UTC",
+        "title": "Recurring baseline",
+        "updated_at": "2026-09-19T00:00:00Z",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T00:00:00Z",
+      "server_seq": 15
+    },
+    {
+      "change_id": "RPDJNEJTK2CA5Z0G",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 16,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "projection",
+      "op_type": "project_recurrence_occurrence",
+      "payload": {
+        "available_local_time": "",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "interval": 1,
+        "occurrence_change_id": "RPDJNEJTK2CA5Z0G",
+        "occurrence_field_version_seed": "BCGA7B0Y1R5NZ368",
+        "projected_at": "2026-09-19T00:00:00Z",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-19",
+        "start_on": "2026-09-19",
+        "task_change_id": "VNBCGVMEFAG33NZG",
+        "task_field_version_seed": "N7DYET7AHY817E1P",
+        "task_id": "6WDVXQ450VXH70WX",
+        "timezone": "UTC",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T00:00:00Z",
+      "server_seq": 16
+    },
+    {
+      "change_id": "CSX2QWQ01VJ0WQWR",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 17,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": null,
+      "op_type": "update_recurrence_template",
+      "payload": {
+        "base_versions": {
+          "title": "M7RVKJCME989S8G0"
+        },
+        "fields": [
+          [
+            "title",
+            "Updated recurring template"
+          ]
+        ],
+        "labels": [],
+        "labels_changed": false,
+        "updated_at": "2026-09-19T14:50:20Z",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 17
+    },
+    {
+      "change_id": "NXAQXJ0CVB7V62ZE",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 18,
+      "entity_type": "task",
+      "entity_id": "6WDVXQ450VXH70WX",
+      "field": "status",
+      "op_type": "set_field",
+      "payload": {
+        "value": "canceled",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "N7DYET7AHY817E1P",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 18
+    },
+    {
+      "change_id": "T26FJS5WJ11P7BEG",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 19,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "outcome",
+      "op_type": "resolve_recurrence_occurrence",
+      "payload": {
+        "available_local_time": "",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "interval": 1,
+        "outcome": "skipped",
+        "resolved_at": "2026-09-19T14:50:20Z",
+        "slot_on": "2026-09-19",
+        "start_on": "2026-09-19",
+        "successor_task_id": "VG30KE1MVW5XASJS",
+        "task_id": "6WDVXQ450VXH70WX",
+        "task_status": "canceled",
+        "task_status_change_id": "NXAQXJ0CVB7V62ZE",
+        "timezone": "UTC",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 19
+    },
+    {
+      "change_id": "HTQ3P5ZZPJK9H54D",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 20,
+      "entity_type": "task",
+      "entity_id": "VG30KE1MVW5XASJS",
+      "field": null,
+      "op_type": "create_task",
+      "payload": {
+        "available_at": "2026-09-20T00:00:00Z",
+        "available_local_time": "",
+        "created_at": "2026-09-20T00:00:00Z",
+        "description": "",
+        "due_on": "2026-09-20",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "interval": 1,
+        "is_epic": "0",
+        "labels": [],
+        "metadata": [],
+        "occurrence_change_id": "DHZPH27YBEZ9Z9PY",
+        "occurrence_field_version_seed": "DGF36PMHAH9TS9DQ",
+        "priority": "none",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-20",
+        "start_on": "2026-09-19",
+        "status": "todo",
+        "task_change_id": "HTQ3P5ZZPJK9H54D",
+        "task_field_version_seed": "RFK3MYK1R5VC1WRY",
+        "task_id": "VG30KE1MVW5XASJS",
+        "timezone": "UTC",
+        "title": "Updated recurring template",
+        "updated_at": "2026-09-20T00:00:00Z",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-20T00:00:00Z",
+      "server_seq": 20
+    },
+    {
+      "change_id": "DHZPH27YBEZ9Z9PY",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 21,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "projection",
+      "op_type": "project_recurrence_occurrence",
+      "payload": {
+        "available_local_time": "",
+        "due_policy": "same_day",
+        "frequency": "daily",
+        "interval": 1,
+        "occurrence_change_id": "DHZPH27YBEZ9Z9PY",
+        "occurrence_field_version_seed": "DGF36PMHAH9TS9DQ",
+        "projected_at": "2026-09-20T00:00:00Z",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-20",
+        "start_on": "2026-09-19",
+        "task_change_id": "HTQ3P5ZZPJK9H54D",
+        "task_field_version_seed": "RFK3MYK1R5VC1WRY",
+        "task_id": "VG30KE1MVW5XASJS",
+        "timezone": "UTC",
+        "weekdays": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-20T00:00:00Z",
+      "server_seq": 21
+    },
+    {
+      "change_id": "RH2XBJFXK0G8ACTT",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 22,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "state",
+      "op_type": "set_recurrence_state",
+      "payload": {
+        "changed_at": "2026-09-19T14:50:20Z",
+        "state": "paused",
+        "stopped_at": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "M7RVKJCME989S8G0",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 22
+    },
+    {
+      "change_id": "JXS351E6EPPGZF43",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 23,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "pause",
+      "op_type": "open_recurrence_pause",
+      "payload": {
+        "interval_id": "NVJAB0VRHAPDW3JC",
+        "paused_at": "2026-09-19T14:50:20Z",
+        "suspended_slot_on": "2026-09-20",
+        "suspended_task_id": "VG30KE1MVW5XASJS",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 23
+    },
+    {
+      "change_id": "VJJSDRPZ3FTW3BXW",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 24,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "pause",
+      "op_type": "close_recurrence_pause",
+      "payload": {
+        "interval_id": "NVJAB0VRHAPDW3JC",
+        "paused_at": "2026-09-19T14:50:20Z",
+        "resumed_at": "2026-09-19T14:50:21Z",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 24
+    },
+    {
+      "change_id": "B5V7F9X590JNY002",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 25,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "state",
+      "op_type": "set_recurrence_state",
+      "payload": {
+        "changed_at": "2026-09-19T14:50:21Z",
+        "state": "active",
+        "stopped_at": "",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "RH2XBJFXK0G8ACTT",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 25
+    },
+    {
+      "change_id": "26MKNQAGNJJBZ8RF",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 26,
+      "entity_type": "recurrence_series",
+      "entity_id": "1F5AVN1HDQTXHSW5",
+      "field": "state",
+      "op_type": "stop_recurrence_series",
+      "payload": {
+        "changed_at": "2026-09-19T14:50:20Z",
+        "state": "stopped",
+        "stopped_at": "2026-09-19T14:50:20Z",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "B5V7F9X590JNY002",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 26
+    },
+    {
+      "change_id": "XPD7YX2S2M8R25C8",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 27,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "attachments",
+      "op_type": "attachment_add",
+      "payload": {
+        "alt_text": null,
+        "attachment_id": "B1RFY5JKHCVSPKM2",
+        "byte_size": 74,
+        "created_at": "2026-09-19T14:50:20Z",
+        "filename": "sample.png",
+        "height": 2,
+        "media_type": "image/png",
+        "sha256": "f61eb2acfd02f7a571aa5df0c35ae878fb96d6b9c0eb9c3b0beefa70df111865",
+        "width": 2,
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 27
+    },
+    {
+      "change_id": "PEMTDMBQR16FK61X",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 28,
+      "entity_type": "label",
+      "entity_id": "historical",
+      "field": null,
+      "op_type": "create_label",
+      "payload": {
+        "created_at": "2026-09-19T14:50:20Z",
+        "name": "historical",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 28
+    },
+    {
+      "change_id": "EJNV70XG0S2EMMH7",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 29,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "labels",
+      "op_type": "label_add",
+      "payload": {
+        "label": "historical",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 29
+    },
+    {
+      "change_id": "E110C7Q8DNPXZ49M",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 30,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "metadata:WR6NWC8Q83Z0GY7J",
+      "op_type": "set_task_metadata",
+      "payload": {
+        "field_id": "WR6NWC8Q83Z0GY7J",
+        "key": "kind",
+        "value": "child",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 30
+    },
+    {
+      "change_id": "4TJ76FW73E9Q4FZG",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 31,
+      "entity_type": "metadata_field",
+      "entity_id": "WR6NWC8Q83Z0GY7J",
+      "field": "key",
+      "op_type": "set_metadata_field",
+      "payload": {
+        "conflict_resolution": false,
+        "key": "category",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "MZTJSEVTY3NGDMA7",
+      "created_at": "2026-09-19T14:50:20Z",
+      "server_seq": 31
+    },
+    {
+      "change_id": "3YWPS6BHFTTFYCJ9",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 32,
+      "entity_type": "task",
+      "entity_id": "3KVYWE5GXZJY1G8C",
+      "field": "title",
+      "op_type": "set_field",
+      "payload": {
+        "value": "Edited after offline client update",
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": "ZF5CQCW4S6P56JH4",
+      "created_at": "2026-09-19T14:50:22Z",
+      "server_seq": 32
+    },
+    {
+      "change_id": "SBE7T6BJYMEZW85X",
+      "client_id": "DYRJ020Z6ABA5C9K",
+      "local_seq": 33,
+      "entity_type": "task",
+      "entity_id": "B40WBMNX180GKMY4",
+      "field": "attachments",
+      "op_type": "attachment_add",
+      "payload": {
+        "alt_text": null,
+        "attachment_id": "RD7R966PHNCR24K3",
+        "byte_size": 73,
+        "created_at": "2026-09-19T14:50:22Z",
+        "filename": "new.png",
+        "height": 2,
+        "media_type": "image/png",
+        "sha256": "d17865856cb230323ba5d281361e78889878bbfc11682f28e23b0efba737757c",
+        "width": 2,
+        "workspace_id": "0000000000000000",
+        "workspace_key": "default"
+      },
+      "base_version": null,
+      "created_at": "2026-09-19T14:50:22Z",
+      "server_seq": 33
+    }
+  ],
+  "expected": {
+    "tasks": [
+      {
+        "workspace_id": "0000000000000000",
+        "id": "Z3P6H3Z8KYYDFVF9",
+        "title": "Historical parent",
+        "description": "",
+        "project_id": "M09TKA8Y021HA2JE",
+        "status": "inbox",
+        "priority": "none",
+        "created_at": "2026-09-19T14:50:20Z",
+        "deleted": 0,
+        "is_epic": 1,
+        "available_at": "",
+        "due_on": "",
+        "source": "cli"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "id": "3KVYWE5GXZJY1G8C",
+        "title": "Edited after offline client update",
+        "description": "Protocol 18 meaning",
+        "project_id": "M09TKA8Y021HA2JE",
+        "status": "todo",
+        "priority": "high",
+        "created_at": "2026-09-19T14:50:20Z",
+        "deleted": 0,
+        "is_epic": 0,
+        "available_at": "",
+        "due_on": "",
+        "source": "cli"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "id": "B40WBMNX180GKMY4",
+        "title": "Related task",
+        "description": "",
+        "project_id": "M09TKA8Y021HA2JE",
+        "status": "inbox",
+        "priority": "none",
+        "created_at": "2026-09-19T14:50:20Z",
+        "deleted": 0,
+        "is_epic": 0,
+        "available_at": "",
+        "due_on": "",
+        "source": "cli"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "id": "6WDVXQ450VXH70WX",
+        "title": "Recurring baseline",
+        "description": "",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "status": "canceled",
+        "priority": "none",
+        "created_at": "2026-09-19T00:00:00Z",
+        "deleted": 0,
+        "is_epic": 0,
+        "available_at": "2026-09-19T00:00:00Z",
+        "due_on": "2026-09-19",
+        "source": "unknown"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "id": "VG30KE1MVW5XASJS",
+        "title": "Updated recurring template",
+        "description": "",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "status": "todo",
+        "priority": "none",
+        "created_at": "2026-09-20T00:00:00Z",
+        "deleted": 0,
+        "is_epic": 0,
+        "available_at": "2026-09-20T00:00:00Z",
+        "due_on": "2026-09-20",
+        "source": "unknown"
+      }
+    ],
+    "notes": [
+      {
+        "id": "SFJ34J08ZWMVKCYT",
+        "task_id": "3KVYWE5GXZJY1G8C",
+        "body": "Frozen historical note",
+        "created_at": "2026-09-19T14:50:20Z",
+        "change_id": "J6PAMYGHN5PHF6TP",
+        "workspace_id": "0000000000000000"
+      }
+    ],
+    "task_dependencies": [
+      {
+        "workspace_id": "0000000000000000",
+        "task_id": "3KVYWE5GXZJY1G8C",
+        "depends_on_task_id": "B40WBMNX180GKMY4",
+        "created_at": "2026-09-19T14:50:20Z"
+      }
+    ],
+    "task_epic_links": [
+      {
+        "workspace_id": "0000000000000000",
+        "epic_task_id": "Z3P6H3Z8KYYDFVF9",
+        "child_task_id": "3KVYWE5GXZJY1G8C",
+        "created_at": "2026-09-19T14:50:20Z"
+      }
+    ],
+    "task_related_links": [
+      {
+        "workspace_id": "0000000000000000",
+        "task_a_id": "3KVYWE5GXZJY1G8C",
+        "task_b_id": "B40WBMNX180GKMY4",
+        "linked": 1,
+        "last_change_id": "H6H6CVXCWK56Q08W"
+      }
+    ],
+    "metadata_fields": [
+      {
+        "id": "WR6NWC8Q83Z0GY7J",
+        "workspace_id": "0000000000000000",
+        "key": "category",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z"
+      }
+    ],
+    "task_metadata": [
+      {
+        "workspace_id": "0000000000000000",
+        "task_id": "Z3P6H3Z8KYYDFVF9",
+        "field_id": "WR6NWC8Q83Z0GY7J",
+        "value": "baseline",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "task_id": "3KVYWE5GXZJY1G8C",
+        "field_id": "WR6NWC8Q83Z0GY7J",
+        "value": "child",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z"
+      }
+    ],
+    "task_attachments": [
+      {
+        "workspace_id": "0000000000000000",
+        "attachment_id": "B1RFY5JKHCVSPKM2",
+        "task_id": "3KVYWE5GXZJY1G8C",
+        "sha256": "f61eb2acfd02f7a571aa5df0c35ae878fb96d6b9c0eb9c3b0beefa70df111865",
+        "byte_size": 74,
+        "media_type": "image/png",
+        "filename": "sample.png",
+        "alt_text": null,
+        "width": 2,
+        "height": 2,
+        "created_at": "2026-09-19T14:50:20Z",
+        "created_by_change_id": "XPD7YX2S2M8R25C8",
+        "deleted": 0,
+        "deleted_at": null,
+        "deleted_by_change_id": null
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "attachment_id": "RD7R966PHNCR24K3",
+        "task_id": "B40WBMNX180GKMY4",
+        "sha256": "d17865856cb230323ba5d281361e78889878bbfc11682f28e23b0efba737757c",
+        "byte_size": 73,
+        "media_type": "image/png",
+        "filename": "new.png",
+        "alt_text": null,
+        "width": 2,
+        "height": 2,
+        "created_at": "2026-09-19T14:50:22Z",
+        "created_by_change_id": "SBE7T6BJYMEZW85X",
+        "deleted": 0,
+        "deleted_at": null,
+        "deleted_by_change_id": null
+      }
+    ],
+    "recurrence_series": [
+      {
+        "workspace_id": "0000000000000000",
+        "id": "1F5AVN1HDQTXHSW5",
+        "title": "Updated recurring template",
+        "description": "",
+        "project_id": "JSGZRM8TR7YETBFX",
+        "priority": "none",
+        "initial_status": "todo",
+        "frequency": "daily",
+        "interval": 1,
+        "weekdays": "",
+        "timezone": "UTC",
+        "start_on": "2026-09-19",
+        "available_local_time": "",
+        "due_policy": "same_day",
+        "state": "stopped",
+        "stopped_at": "2026-09-19T14:50:20Z",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z",
+        "deleted": 0
+      }
+    ],
+    "recurrence_occurrences": [
+      {
+        "workspace_id": "0000000000000000",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-19",
+        "task_id": "6WDVXQ450VXH70WX",
+        "outcome": "skipped",
+        "resolved_at": "2026-09-19T14:50:20Z",
+        "outcome_change_id": "T26FJS5WJ11P7BEG",
+        "projection_state": "resolved",
+        "archived_at": ""
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "slot_on": "2026-09-20",
+        "task_id": "VG30KE1MVW5XASJS",
+        "outcome": "",
+        "resolved_at": "",
+        "outcome_change_id": "",
+        "projection_state": "projected",
+        "archived_at": ""
+      }
+    ],
+    "recurrence_pause_intervals": [
+      {
+        "workspace_id": "0000000000000000",
+        "id": "NVJAB0VRHAPDW3JC",
+        "series_id": "1F5AVN1HDQTXHSW5",
+        "paused_at": "2026-09-19T14:50:20Z",
+        "resumed_at": "2026-09-19T14:50:21Z",
+        "suspended_slot_on": "2026-09-20",
+        "suspended_task_id": "VG30KE1MVW5XASJS",
+        "created_by_change_id": "JXS351E6EPPGZF43",
+        "resolved_by_change_id": "VJJSDRPZ3FTW3BXW"
+      }
+    ],
+    "field_versions": [
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "metadata_field",
+        "entity_id": "WR6NWC8Q83Z0GY7J",
+        "field": "key",
+        "version": "4TJ76FW73E9Q4FZG"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "metadata:WR6NWC8Q83Z0GY7J",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "title",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "description",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "project",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "status",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "priority",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "available_at",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "deleted",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "is_epic",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": "due_on",
+        "version": "YX53972CGV28DY0S"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "title",
+        "version": "3YWPS6BHFTTFYCJ9"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "description",
+        "version": "DY9Q8N9ARHN42DY2"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "project",
+        "version": "ZF5CQCW4S6P56JH4"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "status",
+        "version": "YKRSYQ1P7B71TW4X"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "priority",
+        "version": "DQ3VTJ3XM1BE9KE6"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "available_at",
+        "version": "ZF5CQCW4S6P56JH4"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "deleted",
+        "version": "ZF5CQCW4S6P56JH4"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "is_epic",
+        "version": "ZF5CQCW4S6P56JH4"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "due_on",
+        "version": "ZF5CQCW4S6P56JH4"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "title",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "description",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "project",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "status",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "priority",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "available_at",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "deleted",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "is_epic",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "due_on",
+        "version": "7PC3A1VRRW41Z59K"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "title",
+        "version": "CSX2QWQ01VJ0WQWR"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "description",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "project",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "priority",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "initial_status",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "labels",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "available_local_time",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "due_policy",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "state",
+        "version": "26MKNQAGNJJBZ8RF"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "stopped_at",
+        "version": "26MKNQAGNJJBZ8RF"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "deleted",
+        "version": "M7RVKJCME989S8G0"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "title",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "description",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "project",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "status",
+        "version": "NXAQXJ0CVB7V62ZE"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "priority",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "available_at",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "deleted",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "is_epic",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "due_on",
+        "version": "N7DYET7AHY817E1P"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "title",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "description",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "project",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "status",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "priority",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "available_at",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "deleted",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "is_epic",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": "due_on",
+        "version": "RFK3MYK1R5VC1WRY"
+      },
+      {
+        "workspace_id": "0000000000000000",
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "metadata:WR6NWC8Q83Z0GY7J",
+        "version": "E110C7Q8DNPXZ49M"
+      }
+    ],
+    "conflicts": [],
+    "projects": [
+      {
+        "id": "M09TKA8Y021HA2JE",
+        "workspace_id": "0000000000000000",
+        "key": "compatibility",
+        "name": "compatibility",
+        "prefix": "CMP",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z",
+        "deleted": 0
+      },
+      {
+        "id": "JSGZRM8TR7YETBFX",
+        "workspace_id": "0000000000000000",
+        "key": "aven",
+        "name": "aven",
+        "prefix": "AVN",
+        "created_at": "2026-09-19T14:50:20Z",
+        "updated_at": "2026-09-19T14:50:20Z",
+        "deleted": 0
+      }
+    ],
+    "labels": [
+      {
+        "workspace_id": "0000000000000000",
+        "name": "historical",
+        "created_at": "2026-09-19T14:50:20Z"
+      }
+    ],
+    "task_labels": [
+      {
+        "workspace_id": "0000000000000000",
+        "task_id": "3KVYWE5GXZJY1G8C",
+        "label": "historical"
+      }
+    ],
+    "workspaces": [
+      {
+        "id": "0000000000000000",
+        "name": "default",
+        "key": "default",
+        "created_at": "1970-01-01T00:00:00Z",
+        "updated_at": "1970-01-01T00:00:00Z",
+        "archived": 0
+      }
+    ],
+    "changes": [
+      {
+        "change_id": "YFA44VJYS0V4F3BZ",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 1,
+        "entity_type": "project",
+        "entity_id": "M09TKA8Y021HA2JE",
+        "field": null,
+        "op_type": "create_project",
+        "payload": "{\"created_at\":\"2026-09-19T14:50:20Z\",\"key\":\"compatibility\",\"name\":\"compatibility\",\"prefix\":\"CMP\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 1,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "MZTJSEVTY3NGDMA7",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 2,
+        "entity_type": "metadata_field",
+        "entity_id": "WR6NWC8Q83Z0GY7J",
+        "field": null,
+        "op_type": "create_metadata_field",
+        "payload": "{\"created_at\":\"2026-09-19T14:50:20Z\",\"key\":\"kind\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 2,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "YX53972CGV28DY0S",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 3,
+        "entity_type": "task",
+        "entity_id": "Z3P6H3Z8KYYDFVF9",
+        "field": null,
+        "op_type": "create_task",
+        "payload": "{\"available_at\":\"\",\"created_at\":\"2026-09-19T14:50:20Z\",\"description\":\"\",\"due_on\":\"\",\"is_epic\":\"1\",\"labels\":[],\"metadata\":[{\"field_id\":\"WR6NWC8Q83Z0GY7J\",\"key\":\"kind\",\"value\":\"baseline\"}],\"priority\":\"none\",\"project_id\":\"M09TKA8Y021HA2JE\",\"project_key\":\"compatibility\",\"project_name\":\"compatibility\",\"project_prefix\":\"CMP\",\"source\":\"cli\",\"status\":\"inbox\",\"title\":\"Historical parent\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 3,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "ZF5CQCW4S6P56JH4",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 4,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": null,
+        "op_type": "create_task",
+        "payload": "{\"available_at\":\"\",\"created_at\":\"2026-09-19T14:50:20Z\",\"description\":\"\",\"due_on\":\"\",\"is_epic\":\"0\",\"labels\":[],\"metadata\":[],\"priority\":\"none\",\"project_id\":\"M09TKA8Y021HA2JE\",\"project_key\":\"compatibility\",\"project_name\":\"compatibility\",\"project_prefix\":\"CMP\",\"source\":\"cli\",\"status\":\"inbox\",\"title\":\"Historical child\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 4,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "7PC3A1VRRW41Z59K",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 5,
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": null,
+        "op_type": "create_task",
+        "payload": "{\"available_at\":\"\",\"created_at\":\"2026-09-19T14:50:20Z\",\"description\":\"\",\"due_on\":\"\",\"is_epic\":\"0\",\"labels\":[],\"metadata\":[],\"priority\":\"none\",\"project_id\":\"M09TKA8Y021HA2JE\",\"project_key\":\"compatibility\",\"project_name\":\"compatibility\",\"project_prefix\":\"CMP\",\"source\":\"cli\",\"status\":\"inbox\",\"title\":\"Related task\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 5,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "3GGG4J6RCQ4JRA3D",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 6,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "epics",
+        "op_type": "epic_link_add",
+        "payload": "{\"created_at\":\"2026-09-19T14:50:20Z\",\"epic_task_id\":\"Z3P6H3Z8KYYDFVF9\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 6,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "H6H6CVXCWK56Q08W",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 7,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "related",
+        "op_type": "related_add",
+        "payload": "{\"related_task_id\":\"B40WBMNX180GKMY4\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 7,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "YZCMX9W3X2SRF0PY",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 8,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "dependencies",
+        "op_type": "dependency_add",
+        "payload": "{\"depends_on_task_id\":\"B40WBMNX180GKMY4\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 8,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "J6PAMYGHN5PHF6TP",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 9,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "notes",
+        "op_type": "note_add",
+        "payload": "{\"body\":\"Frozen historical note\",\"created_at\":\"2026-09-19T14:50:20Z\",\"note_id\":\"SFJ34J08ZWMVKCYT\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 9,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "DY9Q8N9ARHN42DY2",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 10,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "description",
+        "op_type": "set_field",
+        "payload": "{\"value\":\"Protocol 18 meaning\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "ZF5CQCW4S6P56JH4",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 10,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "YKRSYQ1P7B71TW4X",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 11,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "status",
+        "op_type": "set_field",
+        "payload": "{\"value\":\"todo\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "ZF5CQCW4S6P56JH4",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 11,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "DQ3VTJ3XM1BE9KE6",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 12,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "priority",
+        "op_type": "set_field",
+        "payload": "{\"value\":\"high\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "ZF5CQCW4S6P56JH4",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 12,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "7XHD6EPKDCED1ZKQ",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 13,
+        "entity_type": "project",
+        "entity_id": "JSGZRM8TR7YETBFX",
+        "field": null,
+        "op_type": "create_project",
+        "payload": "{\"created_at\":\"2026-09-19T14:50:20Z\",\"key\":\"aven\",\"name\":\"aven\",\"prefix\":\"AVN\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 13,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "M7RVKJCME989S8G0",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 14,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": null,
+        "op_type": "create_recurrence_series",
+        "payload": "{\"available_local_time\":\"\",\"created_at\":\"2026-09-19T14:50:20Z\",\"description\":\"\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"initial_status\":\"todo\",\"interval\":1,\"labels\":[],\"metadata\":[],\"priority\":\"none\",\"project_id\":\"JSGZRM8TR7YETBFX\",\"project_key\":\"aven\",\"project_name\":\"aven\",\"project_prefix\":\"AVN\",\"series_id\":\"1F5AVN1HDQTXHSW5\",\"start_on\":\"2026-09-19\",\"state\":\"active\",\"stopped_at\":\"\",\"timezone\":\"UTC\",\"title\":\"Recurring baseline\",\"updated_at\":\"2026-09-19T14:50:20Z\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 14,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "VNBCGVMEFAG33NZG",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 15,
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": null,
+        "op_type": "create_task",
+        "payload": "{\"available_at\":\"2026-09-19T00:00:00Z\",\"available_local_time\":\"\",\"created_at\":\"2026-09-19T00:00:00Z\",\"description\":\"\",\"due_on\":\"2026-09-19\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"interval\":1,\"is_epic\":\"0\",\"labels\":[],\"metadata\":[],\"occurrence_change_id\":\"RPDJNEJTK2CA5Z0G\",\"occurrence_field_version_seed\":\"BCGA7B0Y1R5NZ368\",\"priority\":\"none\",\"project_id\":\"JSGZRM8TR7YETBFX\",\"series_id\":\"1F5AVN1HDQTXHSW5\",\"slot_on\":\"2026-09-19\",\"start_on\":\"2026-09-19\",\"status\":\"todo\",\"task_change_id\":\"VNBCGVMEFAG33NZG\",\"task_field_version_seed\":\"N7DYET7AHY817E1P\",\"task_id\":\"6WDVXQ450VXH70WX\",\"timezone\":\"UTC\",\"title\":\"Recurring baseline\",\"updated_at\":\"2026-09-19T00:00:00Z\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T00:00:00Z",
+        "server_seq": 15,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "RPDJNEJTK2CA5Z0G",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 16,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "projection",
+        "op_type": "project_recurrence_occurrence",
+        "payload": "{\"available_local_time\":\"\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"interval\":1,\"occurrence_change_id\":\"RPDJNEJTK2CA5Z0G\",\"occurrence_field_version_seed\":\"BCGA7B0Y1R5NZ368\",\"projected_at\":\"2026-09-19T00:00:00Z\",\"series_id\":\"1F5AVN1HDQTXHSW5\",\"slot_on\":\"2026-09-19\",\"start_on\":\"2026-09-19\",\"task_change_id\":\"VNBCGVMEFAG33NZG\",\"task_field_version_seed\":\"N7DYET7AHY817E1P\",\"task_id\":\"6WDVXQ450VXH70WX\",\"timezone\":\"UTC\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T00:00:00Z",
+        "server_seq": 16,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "CSX2QWQ01VJ0WQWR",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 17,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": null,
+        "op_type": "update_recurrence_template",
+        "payload": "{\"base_versions\":{\"title\":\"M7RVKJCME989S8G0\"},\"fields\":[[\"title\",\"Updated recurring template\"]],\"labels\":[],\"labels_changed\":false,\"updated_at\":\"2026-09-19T14:50:20Z\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 17,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "NXAQXJ0CVB7V62ZE",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 18,
+        "entity_type": "task",
+        "entity_id": "6WDVXQ450VXH70WX",
+        "field": "status",
+        "op_type": "set_field",
+        "payload": "{\"value\":\"canceled\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "N7DYET7AHY817E1P",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 18,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "T26FJS5WJ11P7BEG",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 19,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "outcome",
+        "op_type": "resolve_recurrence_occurrence",
+        "payload": "{\"available_local_time\":\"\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"interval\":1,\"outcome\":\"skipped\",\"resolved_at\":\"2026-09-19T14:50:20Z\",\"slot_on\":\"2026-09-19\",\"start_on\":\"2026-09-19\",\"successor_task_id\":\"VG30KE1MVW5XASJS\",\"task_id\":\"6WDVXQ450VXH70WX\",\"task_status\":\"canceled\",\"task_status_change_id\":\"NXAQXJ0CVB7V62ZE\",\"timezone\":\"UTC\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 19,
+        "recurrence_task_status_change_id": "NXAQXJ0CVB7V62ZE",
+        "recurrence_successor_task_id": "VG30KE1MVW5XASJS"
+      },
+      {
+        "change_id": "HTQ3P5ZZPJK9H54D",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 20,
+        "entity_type": "task",
+        "entity_id": "VG30KE1MVW5XASJS",
+        "field": null,
+        "op_type": "create_task",
+        "payload": "{\"available_at\":\"2026-09-20T00:00:00Z\",\"available_local_time\":\"\",\"created_at\":\"2026-09-20T00:00:00Z\",\"description\":\"\",\"due_on\":\"2026-09-20\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"interval\":1,\"is_epic\":\"0\",\"labels\":[],\"metadata\":[],\"occurrence_change_id\":\"DHZPH27YBEZ9Z9PY\",\"occurrence_field_version_seed\":\"DGF36PMHAH9TS9DQ\",\"priority\":\"none\",\"project_id\":\"JSGZRM8TR7YETBFX\",\"series_id\":\"1F5AVN1HDQTXHSW5\",\"slot_on\":\"2026-09-20\",\"start_on\":\"2026-09-19\",\"status\":\"todo\",\"task_change_id\":\"HTQ3P5ZZPJK9H54D\",\"task_field_version_seed\":\"RFK3MYK1R5VC1WRY\",\"task_id\":\"VG30KE1MVW5XASJS\",\"timezone\":\"UTC\",\"title\":\"Updated recurring template\",\"updated_at\":\"2026-09-20T00:00:00Z\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-20T00:00:00Z",
+        "server_seq": 20,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "DHZPH27YBEZ9Z9PY",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 21,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "projection",
+        "op_type": "project_recurrence_occurrence",
+        "payload": "{\"available_local_time\":\"\",\"due_policy\":\"same_day\",\"frequency\":\"daily\",\"interval\":1,\"occurrence_change_id\":\"DHZPH27YBEZ9Z9PY\",\"occurrence_field_version_seed\":\"DGF36PMHAH9TS9DQ\",\"projected_at\":\"2026-09-20T00:00:00Z\",\"series_id\":\"1F5AVN1HDQTXHSW5\",\"slot_on\":\"2026-09-20\",\"start_on\":\"2026-09-19\",\"task_change_id\":\"HTQ3P5ZZPJK9H54D\",\"task_field_version_seed\":\"RFK3MYK1R5VC1WRY\",\"task_id\":\"VG30KE1MVW5XASJS\",\"timezone\":\"UTC\",\"weekdays\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-20T00:00:00Z",
+        "server_seq": 21,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "RH2XBJFXK0G8ACTT",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 22,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "state",
+        "op_type": "set_recurrence_state",
+        "payload": "{\"changed_at\":\"2026-09-19T14:50:20Z\",\"state\":\"paused\",\"stopped_at\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "M7RVKJCME989S8G0",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 22,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "JXS351E6EPPGZF43",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 23,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "pause",
+        "op_type": "open_recurrence_pause",
+        "payload": "{\"interval_id\":\"NVJAB0VRHAPDW3JC\",\"paused_at\":\"2026-09-19T14:50:20Z\",\"suspended_slot_on\":\"2026-09-20\",\"suspended_task_id\":\"VG30KE1MVW5XASJS\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 23,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "VJJSDRPZ3FTW3BXW",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 24,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "pause",
+        "op_type": "close_recurrence_pause",
+        "payload": "{\"interval_id\":\"NVJAB0VRHAPDW3JC\",\"paused_at\":\"2026-09-19T14:50:20Z\",\"resumed_at\":\"2026-09-19T14:50:21Z\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 24,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "B5V7F9X590JNY002",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 25,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "state",
+        "op_type": "set_recurrence_state",
+        "payload": "{\"changed_at\":\"2026-09-19T14:50:21Z\",\"state\":\"active\",\"stopped_at\":\"\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "RH2XBJFXK0G8ACTT",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 25,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "26MKNQAGNJJBZ8RF",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 26,
+        "entity_type": "recurrence_series",
+        "entity_id": "1F5AVN1HDQTXHSW5",
+        "field": "state",
+        "op_type": "stop_recurrence_series",
+        "payload": "{\"changed_at\":\"2026-09-19T14:50:20Z\",\"state\":\"stopped\",\"stopped_at\":\"2026-09-19T14:50:20Z\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "B5V7F9X590JNY002",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 26,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "XPD7YX2S2M8R25C8",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 27,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "attachments",
+        "op_type": "attachment_add",
+        "payload": "{\"alt_text\":null,\"attachment_id\":\"B1RFY5JKHCVSPKM2\",\"byte_size\":74,\"created_at\":\"2026-09-19T14:50:20Z\",\"filename\":\"sample.png\",\"height\":2,\"media_type\":\"image/png\",\"sha256\":\"f61eb2acfd02f7a571aa5df0c35ae878fb96d6b9c0eb9c3b0beefa70df111865\",\"width\":2,\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 27,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "PEMTDMBQR16FK61X",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 28,
+        "entity_type": "label",
+        "entity_id": "historical",
+        "field": null,
+        "op_type": "create_label",
+        "payload": "{\"created_at\":\"2026-09-19T14:50:20Z\",\"name\":\"historical\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 28,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "EJNV70XG0S2EMMH7",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 29,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "labels",
+        "op_type": "label_add",
+        "payload": "{\"label\":\"historical\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 29,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "E110C7Q8DNPXZ49M",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 30,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "metadata:WR6NWC8Q83Z0GY7J",
+        "op_type": "set_task_metadata",
+        "payload": "{\"field_id\":\"WR6NWC8Q83Z0GY7J\",\"key\":\"kind\",\"value\":\"child\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 30,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "4TJ76FW73E9Q4FZG",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 31,
+        "entity_type": "metadata_field",
+        "entity_id": "WR6NWC8Q83Z0GY7J",
+        "field": "key",
+        "op_type": "set_metadata_field",
+        "payload": "{\"conflict_resolution\":false,\"key\":\"category\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "MZTJSEVTY3NGDMA7",
+        "created_at": "2026-09-19T14:50:20Z",
+        "server_seq": 31,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "3YWPS6BHFTTFYCJ9",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 32,
+        "entity_type": "task",
+        "entity_id": "3KVYWE5GXZJY1G8C",
+        "field": "title",
+        "op_type": "set_field",
+        "payload": "{\"value\":\"Edited after offline client update\",\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": "ZF5CQCW4S6P56JH4",
+        "created_at": "2026-09-19T14:50:22Z",
+        "server_seq": 32,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      },
+      {
+        "change_id": "SBE7T6BJYMEZW85X",
+        "client_id": "DYRJ020Z6ABA5C9K",
+        "local_seq": 33,
+        "entity_type": "task",
+        "entity_id": "B40WBMNX180GKMY4",
+        "field": "attachments",
+        "op_type": "attachment_add",
+        "payload": "{\"alt_text\":null,\"attachment_id\":\"RD7R966PHNCR24K3\",\"byte_size\":73,\"created_at\":\"2026-09-19T14:50:22Z\",\"filename\":\"new.png\",\"height\":2,\"media_type\":\"image/png\",\"sha256\":\"d17865856cb230323ba5d281361e78889878bbfc11682f28e23b0efba737757c\",\"width\":2,\"workspace_id\":\"0000000000000000\",\"workspace_key\":\"default\"}",
+        "base_version": null,
+        "created_at": "2026-09-19T14:50:22Z",
+        "server_seq": 33,
+        "recurrence_task_status_change_id": null,
+        "recurrence_successor_task_id": null
+      }
+    ],
+    "recurrence_series_labels": [],
+    "recurrence_series_metadata": []
+  }
+}

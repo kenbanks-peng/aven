@@ -16,6 +16,8 @@ use crate::db::{Database, begin_immediate, get_meta, set_meta};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncPersistenceStatus {
     pub pinned_server: Option<String>,
+    pub established_protocol: u32,
+    pub blocked_protocol: Option<u32>,
     pub pending_changes: i64,
     pub pending_attachment_uploads: i64,
     pub pending_attachment_upload_bytes: i64,
@@ -34,6 +36,7 @@ pub struct SyncPersistenceStatus {
 pub struct ClientSyncPage {
     pub request: SyncRequest,
     pub pending: usize,
+    pub(crate) behavior_protocol: u32,
 }
 
 #[derive(Debug)]
@@ -73,6 +76,12 @@ impl Database {
         let status = sync_persistence_status(&mut tx).await?;
         let missing = super::blob::missing_local_blob_counts(&mut tx).await?;
         let facts = crate::api::IosSyncFacts {
+            compatibility_block: status.blocked_protocol.map(|server_protocol| {
+                super::protocol::SyncCompatibilityError {
+                    server_protocol,
+                    client_protocol: super::wire::SYNC_PROTOCOL_VERSION,
+                }
+            }),
             pending_changes: status.pending_changes,
             attachment_uploads: status.pending_attachment_uploads,
             attachment_downloads: missing.count,
@@ -135,14 +144,54 @@ impl Database {
         })
     }
 
+    pub(crate) async fn replica_sync_protocol(&self) -> Result<u32> {
+        let mut conn = self.acquire_reader().await?;
+        super::protocol::replica_protocol(&mut conn).await
+    }
+
+    pub(crate) async fn prepare_sync_discovery(&self, server: &str) -> Result<String> {
+        let mut conn = self.acquire_writer().await?;
+        validate_sync_server(&mut conn, server).await?;
+        super::protocol::replica_protocol(&mut conn).await?;
+        get_meta(&mut conn, "client_id")
+            .await?
+            .context("missing client id")
+    }
+
+    pub(crate) async fn block_sync_protocol(&self, protocol: u32) -> Result<()> {
+        let mut conn = self.acquire_writer().await?;
+        set_meta(&mut conn, "sync_blocked_protocol", &protocol.to_string()).await
+    }
+
     pub async fn prepare_client_sync_page(
         &self,
         server: String,
         push_limit: usize,
         pull_limit: u32,
     ) -> Result<ClientSyncPage> {
+        self.prepare_client_sync_page_at_protocol(server, push_limit, pull_limit, None)
+            .await
+    }
+
+    pub(crate) async fn prepare_client_sync_page_at_protocol(
+        &self,
+        server: String,
+        push_limit: usize,
+        pull_limit: u32,
+        protocol: Option<u32>,
+    ) -> Result<ClientSyncPage> {
         let mut conn = self.acquire_writer().await?;
         validate_sync_server(&mut conn, &server).await?;
+        let behavior_protocol = super::protocol::replica_protocol(&mut conn).await?;
+        let protocol = protocol.unwrap_or(behavior_protocol);
+        super::protocol::validate_behavior_protocol(protocol)?;
+        if protocol < behavior_protocol {
+            return Err(super::protocol::SyncCompatibilityError {
+                server_protocol: protocol,
+                client_protocol: behavior_protocol,
+            }
+            .into());
+        }
         let client_id = get_meta(&mut conn, "client_id")
             .await?
             .context("missing client id")?;
@@ -150,7 +199,7 @@ impl Database {
         let changes = load_unsynced_changes(&mut conn, push_limit.min(MAX_PUSH_BATCH)).await?;
         let request = bound_push_request(
             SyncRequest {
-                protocol_version: Some(super::wire::SYNC_PROTOCOL_VERSION),
+                protocol_version: Some(protocol),
                 client_id,
                 after,
                 pull_limit: Some(pull_limit),
@@ -158,32 +207,51 @@ impl Database {
             },
             MAX_SYNC_REQUEST_BYTES,
         )?;
+        for change in &request.changes {
+            super::protocol::validate_change(protocol, change)?;
+        }
         Ok(ClientSyncPage {
+            behavior_protocol,
             pending: request.changes.len(),
             request,
         })
     }
 
     pub async fn apply_client_sync_page(&self, page: ApplySyncPage) -> Result<usize> {
-        let envelope = super::wire::validate_sync_request_envelope(&page.request)?;
+        self.apply_client_sync_page_with_context(page, None).await
+    }
+
+    pub(crate) async fn apply_client_sync_page_with_context(
+        &self,
+        page: ApplySyncPage,
+        expected_behavior: Option<u32>,
+    ) -> Result<usize> {
+        let protocol = page
+            .request
+            .protocol_version
+            .context("missing selected protocol")?;
+        super::protocol::validate_behavior_protocol(protocol)?;
+        let envelope = super::wire::validate_request_at_protocol(&page.request, protocol)?;
         let request_change_ids = page
             .request
             .changes
             .iter()
             .map(|change| change.change_id.clone())
             .collect::<Vec<_>>();
-        super::wire::validate_sync_response_for_request(
+        super::wire::validate_response_at_protocol(
+            protocol,
             envelope.after,
             envelope.pull_limit,
             &request_change_ids,
             &page.response,
         )?;
         let mut conn = self.acquire_writer().await?;
-        apply_sync_response(&mut conn, page).await
+        apply_sync_response(&mut conn, page, expected_behavior).await
     }
 
     pub async fn persist_server_sync_page(&self, page: ServerSyncPage) -> Result<ServerSyncResult> {
-        self.persist_server_sync_page_inner(page, None).await
+        self.persist_server_sync_page_inner(page, None, super::wire::SYNC_PROTOCOL_VERSION)
+            .await
     }
 
     pub async fn persist_server_sync_page_with_blobs(
@@ -191,7 +259,21 @@ impl Database {
         page: ServerSyncPage,
         blob_dir: &Path,
     ) -> Result<ServerSyncResult> {
-        self.persist_server_sync_page_inner(page, Some(blob_dir))
+        self.persist_server_sync_page_inner(
+            page,
+            Some(blob_dir),
+            super::wire::SYNC_PROTOCOL_VERSION,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn persist_test_protocol_page(
+        &self,
+        request: SyncRequest,
+        active_protocol: u32,
+    ) -> Result<ServerSyncResult> {
+        self.persist_server_sync_page_inner(ServerSyncPage { request }, None, active_protocol)
             .await
     }
 
@@ -199,10 +281,12 @@ impl Database {
         &self,
         page: ServerSyncPage,
         blob_dir: Option<&Path>,
+        active_protocol: u32,
     ) -> Result<ServerSyncResult> {
-        let envelope = super::wire::validate_sync_request_envelope(&page.request)?;
+        let envelope = super::wire::validate_request_at_protocol(&page.request, active_protocol)?;
         for change in &page.request.changes {
-            super::wire::validate_pushed_change(change)?;
+            super::protocol::validate_change(active_protocol, change)?;
+            super::wire::validate_local_change_shape(change)?;
         }
         if blob_dir.is_none()
             && page
@@ -331,6 +415,12 @@ async fn sync_persistence_status(conn: &mut SqliteConnection) -> Result<SyncPers
         .await?;
     Ok(SyncPersistenceStatus {
         pinned_server: get_meta(conn, "sync_server_url").await?,
+        established_protocol: super::protocol::replica_protocol(conn).await?,
+        blocked_protocol: get_meta(conn, "sync_blocked_protocol")
+            .await?
+            .filter(|v| !v.is_empty())
+            .map(|v| v.parse())
+            .transpose()?,
         pending_changes,
         pending_attachment_uploads,
         pending_attachment_upload_bytes,
@@ -346,9 +436,25 @@ async fn sync_persistence_status(conn: &mut SqliteConnection) -> Result<SyncPers
     })
 }
 
-async fn apply_sync_response(conn: &mut SqliteConnection, page: ApplySyncPage) -> Result<usize> {
+async fn apply_sync_response(
+    conn: &mut SqliteConnection,
+    page: ApplySyncPage,
+    expected_behavior: Option<u32>,
+) -> Result<usize> {
     let mut applied = 0;
     let mut tx = begin_immediate(conn).await?;
+    let current_behavior = super::protocol::replica_protocol(&mut tx).await?;
+    if expected_behavior.is_some_and(|expected| expected != current_behavior) {
+        bail!("error stale-sync-page replica-protocol-changed");
+    }
+    let selected = page
+        .request
+        .protocol_version
+        .context("missing selected protocol")?;
+    if selected < current_behavior {
+        bail!("error stale-sync-page replica-protocol-regressed");
+    }
+    super::protocol::establish_protocol(&mut tx, selected).await?;
     let current_cursor = sync_cursor(&mut tx).await?;
     if current_cursor != page.request.after {
         bail!(
@@ -451,6 +557,7 @@ async fn apply_sync_response(conn: &mut SqliteConnection, page: ApplySyncPage) -
     }
 
     set_meta(&mut tx, "sync_last_error", "").await?;
+    set_meta(&mut tx, "sync_blocked_protocol", "").await?;
     set_meta(&mut tx, "sync_last_pushed", &pushed.to_string()).await?;
     set_meta(&mut tx, "sync_last_pulled", &pulled.to_string()).await?;
     set_meta(
@@ -1329,7 +1436,7 @@ mod tests {
             previous_pulled: 0,
         };
 
-        apply_sync_response(&mut conn, page).await.unwrap();
+        apply_sync_response(&mut conn, page, None).await.unwrap();
 
         let state: (i64, String) = sqlx::query_as(
             "SELECT linked, last_change_id FROM task_related_links

@@ -15,10 +15,11 @@ use super::persistence::{ApplySyncPage, ClientSyncPage};
 use super::planner::{
     PendingChange, TransferBudget, TransferObject, plan_change_prefix, plan_transfers,
 };
+use super::protocol::{self, SyncCompatibilityError};
 use super::wire::{
     BlobUploadContract, MAX_BLOB_TRANSFER_BYTES, MAX_BLOB_TRANSFER_OBJECTS, MAX_PULL_BATCH,
     MAX_PUSH_BATCH, MissingBlobsRequest, MissingBlobsResponse, SYNC_PROTOCOL_VERSION, SyncResponse,
-    sync_server_url_is_valid, validate_blob_hashes, validate_sync_response_for_request,
+    sync_server_url_is_valid, validate_blob_hashes,
 };
 use crate::attachments::lifecycle::{ByteCount, LifecyclePolicy};
 use crate::db::Database;
@@ -190,6 +191,9 @@ impl ActivePage {
 
 #[derive(Clone)]
 enum RequestKind {
+    Discovery {
+        protocol: u32,
+    },
     Missing,
     Upload {
         lease_id: String,
@@ -211,6 +215,10 @@ struct OutstandingRequest {
 }
 
 pub struct SyncSession {
+    selected_protocol: Option<u32>,
+    discovery_protocol: u32,
+    discovery_confirming: bool,
+    supported_max: u32,
     database: Database,
     server: String,
     auth_token: Option<String>,
@@ -265,6 +273,10 @@ impl SyncSession {
             bail!("{message}");
         }
         Ok(Self {
+            selected_protocol: None,
+            discovery_protocol: SYNC_PROTOCOL_VERSION,
+            discovery_confirming: false,
+            supported_max: SYNC_PROTOCOL_VERSION,
             database,
             server: server.trim_end_matches('/').to_string(),
             auth_token,
@@ -315,10 +327,26 @@ impl SyncSession {
         if let Some(outstanding) = &self.outstanding {
             return Ok(Some(outstanding.prepared.clone()));
         }
+        if self.selected_protocol.is_none() {
+            let client_id = self.database.prepare_sync_discovery(&self.server).await?;
+            return self.prepare_json_request(
+                "POST",
+                "/sync",
+                &protocol::discovery_request(self.discovery_protocol, client_id),
+                RequestKind::Discovery {
+                    protocol: self.discovery_protocol,
+                },
+            );
+        }
         if self.active.is_none() {
             let page = self
                 .database
-                .prepare_client_sync_page(self.server.clone(), MAX_PUSH_BATCH, MAX_PULL_BATCH)
+                .prepare_client_sync_page_at_protocol(
+                    self.server.clone(),
+                    MAX_PUSH_BATCH,
+                    MAX_PULL_BATCH,
+                    self.selected_protocol,
+                )
                 .await?;
             self.active = Some(ActivePage::new(page)?);
         }
@@ -508,7 +536,27 @@ impl SyncSession {
                 .context("no outstanding sync request")?;
             validate_context(&outstanding.prepared.context, context)?;
         }
+        if let RequestKind::Discovery { protocol: probed } =
+            self.outstanding.as_ref().expect("outstanding request").kind
+        {
+            return self.accept_discovery(probed, response).await;
+        }
         if !(200..300).contains(&response.status) {
+            if response.status == 400
+                && let Some((_, server)) = sync_protocol_versions(sync_http_error_detail(&response))
+            {
+                if (protocol::MAINTAINED_PROTOCOL_BASELINE..=self.supported_max).contains(&server) {
+                    bail!(
+                        "The sync server changed. Sync again to continue. Your local tasks and edits remain saved."
+                    );
+                }
+                self.database.block_sync_protocol(server).await?;
+                return Err(SyncCompatibilityError {
+                    server_protocol: server,
+                    client_protocol: self.supported_max,
+                }
+                .into());
+            }
             bail!("{}", sync_http_error(&response));
         }
         let outstanding = self
@@ -519,6 +567,7 @@ impl SyncSession {
         let request_kind = outstanding.kind.clone();
         let response_bytes = response.body.len();
         match request_kind {
+            RequestKind::Discovery { .. } => unreachable!("discovery handled before metadata"),
             RequestKind::Missing => {
                 let decoded: MissingBlobsResponse = serde_json::from_slice(&response.body)
                     .context("decode missing blobs response")?;
@@ -612,13 +661,16 @@ impl SyncSession {
                 let apply_started = Instant::now();
                 let pulled = self
                     .database
-                    .apply_client_sync_page(ApplySyncPage {
-                        request,
-                        response: decoded,
-                        attempted_at: self.attempted_at.clone(),
-                        previous_pushed: self.summary.pushed,
-                        previous_pulled: self.summary.pulled,
-                    })
+                    .apply_client_sync_page_with_context(
+                        ApplySyncPage {
+                            request,
+                            response: decoded,
+                            attempted_at: self.attempted_at.clone(),
+                            previous_pushed: self.summary.pushed,
+                            previous_pulled: self.summary.pulled,
+                        },
+                        Some(active.page.behavior_protocol),
+                    )
                     .await?;
                 let apply_ms = apply_started.elapsed().as_millis();
                 active.metadata_sent = true;
@@ -706,6 +758,50 @@ impl SyncSession {
             outcome.local_more = self.last_local_more;
             return Ok(outcome);
         }
+        Ok(self.outcome())
+    }
+
+    async fn accept_discovery(
+        &mut self,
+        probed: u32,
+        response: SyncHttpResponse,
+    ) -> Result<SyncPageOutcome> {
+        if (200..300).contains(&response.status) {
+            let decoded: SyncResponse =
+                serde_json::from_slice(&response.body).context("decode sync discovery response")?;
+            protocol::validate_discovery_response(probed, &decoded)?;
+            let established = self.database.replica_sync_protocol().await?;
+            if probed < established {
+                self.database.block_sync_protocol(probed).await?;
+                return Err(SyncCompatibilityError {
+                    server_protocol: probed,
+                    client_protocol: established,
+                }
+                .into());
+            }
+            self.selected_protocol = Some(probed);
+        } else if response.status == 400
+            && let Some((client, server)) =
+                sync_protocol_versions(sync_http_error_detail(&response))
+            && client == probed
+        {
+            if !(protocol::MAINTAINED_PROTOCOL_BASELINE..=self.supported_max).contains(&server) {
+                self.database.block_sync_protocol(server).await?;
+                return Err(SyncCompatibilityError {
+                    server_protocol: server,
+                    client_protocol: self.supported_max,
+                }
+                .into());
+            }
+            if self.discovery_confirming {
+                bail!("sync server changed during compatibility discovery; retry syncing");
+            }
+            self.discovery_protocol = server;
+            self.discovery_confirming = true;
+        } else {
+            bail!("{}", sync_http_error(&response));
+        }
+        self.outstanding = None;
         Ok(self.outcome())
     }
 
@@ -804,15 +900,32 @@ impl SyncSession {
 pub fn classify_pairing_connection_validation_response(
     response: &SyncHttpResponse,
 ) -> PairingConnectionValidationResponse {
+    classify_pairing_at_protocol(response, SYNC_PROTOCOL_VERSION)
+}
+
+fn classify_pairing_at_protocol(
+    response: &SyncHttpResponse,
+    supported_max: u32,
+) -> PairingConnectionValidationResponse {
     match response.status {
         200..=299 => {
             let Ok(decoded) = serde_json::from_slice::<SyncResponse>(&response.body) else {
                 return PairingConnectionValidationResponse::MalformedResponse;
             };
-            if decoded.protocol_version != SYNC_PROTOCOL_VERSION {
+            if !(protocol::MAINTAINED_PROTOCOL_BASELINE..=supported_max)
+                .contains(&decoded.protocol_version)
+            {
                 return PairingConnectionValidationResponse::IncompatibleServer;
             }
-            if validate_sync_response_for_request(0, 1, &[], &decoded).is_err() {
+            if super::wire::validate_response_at_protocol(
+                decoded.protocol_version,
+                0,
+                1,
+                &[],
+                &decoded,
+            )
+            .is_err()
+            {
                 return PairingConnectionValidationResponse::MalformedResponse;
             }
             PairingConnectionValidationResponse::Accepted
@@ -821,7 +934,13 @@ pub fn classify_pairing_connection_validation_response(
         408 | 504 => PairingConnectionValidationResponse::Timeout,
         300..=399 | 404 | 405 | 426 => PairingConnectionValidationResponse::IncompatibleServer,
         400 if sync_protocol_versions(sync_http_error_detail(response)).is_some() => {
-            PairingConnectionValidationResponse::IncompatibleServer
+            let (_, server) =
+                sync_protocol_versions(sync_http_error_detail(response)).expect("checked mismatch");
+            if (protocol::MAINTAINED_PROTOCOL_BASELINE..=supported_max).contains(&server) {
+                PairingConnectionValidationResponse::Accepted
+            } else {
+                PairingConnectionValidationResponse::IncompatibleServer
+            }
         }
         _ => PairingConnectionValidationResponse::ServerFailure,
     }
@@ -829,12 +948,13 @@ pub fn classify_pairing_connection_validation_response(
 
 fn request_timeout(kind: &RequestKind) -> SyncRequestTimeout {
     match kind {
-        RequestKind::Missing | RequestKind::Confirm | RequestKind::Metadata { .. } => {
-            SyncRequestTimeout {
-                attempt_ms: METADATA_ATTEMPT_TIMEOUT_MS,
-                inactivity_ms: METADATA_INACTIVITY_TIMEOUT_MS,
-            }
-        }
+        RequestKind::Discovery { .. }
+        | RequestKind::Missing
+        | RequestKind::Confirm
+        | RequestKind::Metadata { .. } => SyncRequestTimeout {
+            attempt_ms: METADATA_ATTEMPT_TIMEOUT_MS,
+            inactivity_ms: METADATA_INACTIVITY_TIMEOUT_MS,
+        },
         RequestKind::Upload { contract, .. } => blob_request_timeout(contract.byte_size),
         RequestKind::Download { blob } => blob_request_timeout(blob.byte_size),
     }
@@ -957,34 +1077,18 @@ fn sync_http_error(response: &SyncHttpResponse) -> String {
 }
 
 fn sync_protocol_versions(detail: Option<&str>) -> Option<(u32, u32)> {
-    let fields = detail?.strip_prefix("error sync-protocol-unsupported ")?;
-    let mut fields = fields.split_whitespace();
-    let client = fields
-        .next()?
-        .strip_prefix("client=")?
-        .parse::<u32>()
-        .ok()?;
-    let server = fields
-        .next()?
-        .strip_prefix("server=")?
-        .parse::<u32>()
-        .ok()?;
-    if fields.next().is_some() || client == server {
-        return None;
-    }
-    Some((client, server))
+    protocol::protocol_mismatch(detail?)
 }
 
 fn actionable_sync_http_error_detail(detail: &str) -> Option<String> {
     let (client, server) = sync_protocol_versions(Some(detail))?;
-    let action = if client > server {
-        "upgrade the sync server"
-    } else {
-        "upgrade the sync client"
-    };
-    Some(format!(
-        "client and server use incompatible sync protocol versions (client {client}, server {server}); {action}"
-    ))
+    Some(
+        SyncCompatibilityError {
+            server_protocol: server,
+            client_protocol: client,
+        }
+        .to_string(),
+    )
 }
 
 fn gzip_encode(body: &[u8]) -> Result<Vec<u8>> {
@@ -1152,3 +1256,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "compatibility_tests.rs"]
+mod compatibility_tests;

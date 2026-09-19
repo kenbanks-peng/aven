@@ -18,15 +18,17 @@ async fn sync_now_completes_without_daemon() {
     let address = listener.local_addr().unwrap();
     let router = axum::Router::new().route(
         "/sync",
-        axum::routing::post(|| async {
-            axum::Json(serde_json::json!({
-                "protocol_version": aven_core::sync::wire::SYNC_PROTOCOL_VERSION,
-                "cursor": 0,
-                "has_more": false,
-                "push_acks": [],
-                "changes": [],
-            }))
-        }),
+        axum::routing::post(
+            |axum::Json(request): axum::Json<serde_json::Value>| async move {
+                axum::Json(serde_json::json!({
+                    "protocol_version": aven_core::sync::wire::SYNC_PROTOCOL_VERSION,
+                    "cursor": request["after"],
+                    "has_more": false,
+                    "push_acks": [],
+                    "changes": [],
+                }))
+            },
+        ),
     );
     let server_task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();

@@ -368,6 +368,7 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
     MIGRATOR.run(&pool).await?;
     initialize_meta(&pool).await?;
     let mut conn = pool.acquire().await?;
+    crate::sync::protocol::replica_protocol(&mut conn).await?;
     ensure_default_workspace(&mut conn).await?;
     let mut tx = begin_immediate(&mut conn).await?;
     crate::epic_membership::recover(&mut tx, false).await?;
@@ -683,6 +684,17 @@ async fn next_local_seq(conn: &mut SqliteConnection) -> Result<i64> {
     Ok(seq)
 }
 
+async fn serialize_local_change(
+    conn: &mut SqliteConnection,
+    op_type: &str,
+    field: Option<&str>,
+    payload: &Value,
+) -> Result<String> {
+    let protocol = crate::sync::protocol::replica_protocol(conn).await?;
+    crate::sync::protocol::validate_operation(protocol, op_type, field, payload)?;
+    crate::sync::wire::serialize_change_payload(payload)
+}
+
 pub(crate) async fn insert_change(
     conn: &mut SqliteConnection,
     entity_type: &str,
@@ -692,7 +704,7 @@ pub(crate) async fn insert_change(
     payload: Value,
     base_version: Option<&str>,
 ) -> Result<String> {
-    let payload = crate::sync::wire::serialize_change_payload(&payload)?;
+    let payload = serialize_local_change(conn, op_type, field, &payload).await?;
     let change_id = new_id();
     let client_id = get_meta(conn, "client_id")
         .await?
@@ -744,7 +756,7 @@ pub(crate) async fn insert_change_with_identity(
         base_version,
         created_at,
     } = change;
-    let payload = crate::sync::wire::serialize_change_payload(&payload)?;
+    let payload = serialize_local_change(conn, op_type, field, &payload).await?;
     let existing = sqlx::query(
         "SELECT entity_type, entity_id, field, op_type, payload, base_version, created_at
          FROM changes WHERE change_id = ?",

@@ -624,11 +624,12 @@ mod tests {
                 .insert("retry-after", HeaderValue::from_static("0"));
             return response;
         }
+        let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
         (
             StatusCode::OK,
             format!(
-                "{{\"protocol_version\":{},\"cursor\":0,\"has_more\":false,\"push_acks\":[],\"changes\":[]}}",
-                aven_core::sync::wire::SYNC_PROTOCOL_VERSION
+                "{{\"protocol_version\":{},\"cursor\":{},\"has_more\":false,\"push_acks\":[],\"changes\":[]}}",
+                aven_core::sync::wire::SYNC_PROTOCOL_VERSION, request["after"]
             ),
         )
             .into_response()
@@ -729,9 +730,9 @@ mod tests {
             .unwrap();
 
         assert!(summary.complete);
-        assert_eq!(state.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(state.attempts.load(Ordering::SeqCst), 3);
         let bodies = state.bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies.len(), 3);
         assert_eq!(bodies[0], bodies[1]);
     }
 

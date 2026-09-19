@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use aven_core::sync::protocol::{discovery_request, protocol_mismatch};
 use reqwest::{StatusCode, redirect::Policy};
 use serde::Deserialize;
-use serde_json::json;
 
 use crate::config::{self, AppConfig};
 use crate::sync::{self, wire::SYNC_PROTOCOL_VERSION};
@@ -81,6 +81,7 @@ impl CompatibilityResult {
 
 pub(crate) async fn assess_sync_compatibility(
     target: Option<u32>,
+    baseline: Option<u32>,
     server: Option<ConfiguredSyncServer>,
 ) -> CompatibilityResult {
     let Some(server) = server else {
@@ -92,13 +93,19 @@ pub(crate) async fn assess_sync_compatibility(
             reason: CompatibilityFailure::ProtocolMarkerMissing,
         };
     };
-    if target == SYNC_PROTOCOL_VERSION {
+    if target == SYNC_PROTOCOL_VERSION
+        && baseline.unwrap_or(target) <= aven_core::sync::protocol::MAINTAINED_PROTOCOL_BASELINE
+    {
         return CompatibilityResult::NotRequired;
     }
-    probe_server(target, &server).await
+    probe_server(target, baseline.unwrap_or(target), &server).await
 }
 
-async fn probe_server(target: u32, server: &ConfiguredSyncServer) -> CompatibilityResult {
+async fn probe_server(
+    target: u32,
+    baseline: u32,
+    server: &ConfiguredSyncServer,
+) -> CompatibilityResult {
     let client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
@@ -110,13 +117,12 @@ async fn probe_server(target: u32, server: &ConfiguredSyncServer) -> Compatibili
         Ok(client) => client,
         Err(_) => return unverified(target, CompatibilityFailure::Unreachable),
     };
-    let request = client.post(format!("{}/sync", server.url)).json(&json!({
-        "protocol_version": target,
-        "client_id": "aven-update-preflight",
-        "after": i64::MAX,
-        "pull_limit": 1,
-        "changes": [],
-    }));
+    let request = client
+        .post(format!("{}/sync", server.url))
+        .json(&discovery_request(
+            target,
+            "aven-update-preflight".to_string(),
+        ));
     let request = match &server.auth_token {
         Some(token) => request.bearer_auth(token),
         None => request,
@@ -151,7 +157,11 @@ async fn probe_server(target: u32, server: &ConfiguredSyncServer) -> Compatibili
         && let Some((client, server)) = protocol_versions(detail)
         && client == target
     {
-        return CompatibilityResult::Incompatible { target, server };
+        return if (baseline..=target).contains(&server) {
+            CompatibilityResult::Compatible
+        } else {
+            CompatibilityResult::Incompatible { target, server }
+        };
     }
     unverified(target, CompatibilityFailure::UnexpectedResponse)
 }
@@ -177,16 +187,7 @@ async fn read_body_limited(mut response: reqwest::Response) -> Option<Vec<u8>> {
 }
 
 fn protocol_versions(detail: &str) -> Option<(u32, u32)> {
-    let fields = detail
-        .trim()
-        .strip_prefix("error sync-protocol-unsupported ")?;
-    let mut fields = fields.split_whitespace();
-    let client = fields.next()?.strip_prefix("client=")?.parse().ok()?;
-    let server = fields.next()?.strip_prefix("server=")?.parse().ok()?;
-    if fields.next().is_some() || client == server {
-        return None;
-    }
-    Some((client, server))
+    protocol_mismatch(detail)
 }
 
 fn unverified(target: u32, reason: CompatibilityFailure) -> CompatibilityResult {
@@ -242,7 +243,16 @@ mod tests {
         };
 
         assert_eq!(
-            assess_sync_compatibility(Some(target), Some(server)).await,
+            assess_sync_compatibility(
+                Some(target),
+                Some(SYNC_PROTOCOL_VERSION),
+                Some(server.clone())
+            )
+            .await,
+            CompatibilityResult::Compatible,
+        );
+        assert_eq!(
+            assess_sync_compatibility(Some(target), None, Some(server)).await,
             CompatibilityResult::Incompatible {
                 target,
                 server: SYNC_PROTOCOL_VERSION,
@@ -253,7 +263,7 @@ mod tests {
     #[tokio::test]
     async fn absent_server_and_current_protocol_need_no_probe() {
         assert_eq!(
-            assess_sync_compatibility(Some(99), None).await,
+            assess_sync_compatibility(Some(99), None, None).await,
             CompatibilityResult::NotRequired
         );
         let server = ConfiguredSyncServer {
@@ -261,7 +271,7 @@ mod tests {
             auth_token: None,
         };
         assert_eq!(
-            assess_sync_compatibility(Some(SYNC_PROTOCOL_VERSION), Some(server)).await,
+            assess_sync_compatibility(Some(SYNC_PROTOCOL_VERSION), None, Some(server)).await,
             CompatibilityResult::NotRequired
         );
     }

@@ -118,7 +118,7 @@ pub(crate) async fn build_sync_status(
         attachment_downloads: missing.count,
         attachment_download_bytes: missing.bytes,
     };
-    let state = classify_sync_state(SyncStateInput {
+    let mut state = classify_sync_state(SyncStateInput {
         enabled: config.sync.enabled,
         runtime_allowed: config.sync_is_allowed(),
         configured,
@@ -130,7 +130,22 @@ pub(crate) async fn build_sync_status(
             || pending.attachment_downloads > 0,
         ever_succeeded: persistence.last_success.is_some(),
     });
-    let guidance = sync_guidance(state, persistence.conflicts);
+    let mut guidance = sync_guidance(state, persistence.conflicts);
+    if let Some(server_protocol) = persistence.blocked_protocol
+        && config.sync_is_allowed()
+        && config.sync.enabled
+        && configured
+        && server_matches_pin != Some(false)
+    {
+        state = StatusState::Blocked;
+        guidance = vec![
+            aven_core::sync::protocol::SyncCompatibilityError {
+                server_protocol,
+                client_protocol: aven_core::sync::wire::SYNC_PROTOCOL_VERSION,
+            }
+            .to_string(),
+        ];
+    }
 
     Ok(SyncStatusReport {
         version: 1,
