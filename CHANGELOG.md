@@ -5,10 +5,10 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Improve sync compatibility so newer apps can keep working with older supported servers, while preserving offline edits when an update is required.
 - Add an optional dedicated [due-date column](https://aventasks.dev/configuration/#tui-table-columns) to TUI task lists. ([#25](https://github.com/raine/aven/issues/25))
 - Fix: Local edits no longer bypass background sync retry delays when the server is unavailable or incompatible.
 - Fix: Sync rejects contradictory server responses instead of silently losing operation history.
-- Sync checks app and server compatibility before transferring attachments and explains which component needs updating while keeping local edits saved.
 - Aven warns before installing an update that could interrupt sync with an older or unreachable server, and recommends updating the sync server first.
 
 ## v0.1.40 (2026-09-19)
