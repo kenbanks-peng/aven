@@ -2,7 +2,8 @@ use super::super::task_display::{
     description_or_placeholder, labels_display, linked_task_ref_spans,
 };
 use super::super::timestamps::local_timestamp_display;
-use super::{EPIC_MARKER, is_deferred};
+use super::EPIC_MARKER;
+use super::cells::is_deferred;
 use crate::query::TaskListItem;
 use crate::queue::now_seconds;
 use crate::tui::markdown::render_markdown_preview;

@@ -2,6 +2,31 @@ use ratatui::layout::{Constraint, Layout, Rect};
 
 use crate::config::TableColumn;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TaskListAreas {
+    pub(super) table_area: Rect,
+    pub(super) preview_area: Rect,
+}
+
+pub(super) fn task_list_areas(area: Rect) -> TaskListAreas {
+    let preview_height = if area.height >= 32 {
+        12
+    } else if area.height >= 24 {
+        8
+    } else {
+        0
+    };
+    let [table_area, preview_area] = if preview_height > 0 {
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(preview_height)]).areas(area)
+    } else {
+        [area, Rect::default()]
+    };
+    TaskListAreas {
+        table_area,
+        preview_area,
+    }
+}
+
 /// Frame-local content geometry indexed by semantic identity, not display position.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct TableLayout {

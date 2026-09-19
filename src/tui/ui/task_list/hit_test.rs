@@ -1,9 +1,11 @@
 use ratatui::layout::Rect;
-#[cfg(test)]
 use ratatui::widgets::TableState;
 
 use crate::tui::store::TuiStore;
 
+use super::cells::EpicSelectionContext;
+use super::layout::{TableLayout, task_list_areas};
+use super::sizing::{task_list_columns_for_tasks, visible_task_items};
 #[cfg(test)]
 use super::view_model::TaskListView;
 use super::view_model::{TaskListProjection, TaskListRow};
@@ -97,6 +99,79 @@ pub(super) fn task_list_hit(
         task_id,
         viewport_row: candidate.viewport_row,
     })
+}
+
+pub(crate) fn task_at_position(
+    store: &TuiStore,
+    table_state: &TableState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<TaskListHit> {
+    if store.view_state.is_columns() {
+        return super::super::columns::column_task_at_position(
+            store,
+            table_state,
+            area,
+            column,
+            row,
+        );
+    }
+    let table_area = task_list_areas(area).table_area;
+    let viewport_rows = table_area.height.saturating_sub(1) as usize;
+    let projection = TaskListProjection::from_table_state(store, table_state, viewport_rows);
+    let candidate = task_list_hit_in_projection(&projection, table_area, column, row)?;
+    task_list_hit(store, candidate)
+}
+
+pub(crate) fn task_status_at_position(
+    store: &TuiStore,
+    table_state: &TableState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<TaskListHit> {
+    if store.view_state.is_columns() {
+        return None;
+    }
+    let table_area = task_list_areas(area).table_area;
+    let viewport_rows = table_area.height.saturating_sub(1) as usize;
+    let projection = TaskListProjection::from_table_state(store, table_state, viewport_rows);
+    let candidate = task_list_hit_in_projection(&projection, table_area, column, row)?;
+    let status_area = task_list_status_area(store, &projection, table_area, candidate.viewport_row);
+    if column < status_area.x || column >= status_area.x.saturating_add(status_area.width) {
+        return None;
+    }
+    task_list_hit(store, candidate)
+}
+
+pub(super) fn task_list_status_area(
+    store: &TuiStore,
+    projection: &TaskListProjection,
+    table_area: Rect,
+    visual_row: u16,
+) -> Rect {
+    let visible_rows = projection.visible_rows();
+    let visible_tasks = visible_task_items(store, &visible_rows);
+    let epic_selection = EpicSelectionContext::from_selected(
+        projection
+            .selected_task
+            .and_then(|index| store.tasks.get(index)),
+    );
+    let columns =
+        task_list_columns_for_tasks(store, table_area.width < 90, &visible_tasks, epic_selection);
+    let row_area = Rect::new(
+        table_area.x,
+        table_area.y.saturating_add(1).saturating_add(visual_row),
+        table_area.width,
+        1,
+    );
+    TableLayout::resolve(
+        &columns,
+        &store.config().tui.table.columns,
+        table_area.width,
+    )
+    .cell(crate::config::TableColumn::Status, row_area)
 }
 
 #[cfg(test)]
