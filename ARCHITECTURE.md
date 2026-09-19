@@ -305,13 +305,19 @@ SQLite stores synced task data and local UI state. Config files store local rout
 
 ### Change sync compatibility
 
-- Retain the maintained baseline cumulatively. Do not infer a rolling window from software versions or widen baseline contracts by delegating to extensible domain enums.
-- Keep shared operation meanings immutable. A new meaning requires a new operation identity or explicit revision with historical decoding and convergence proof. Never relabel pending operations to emulate compatibility.
-- Add operation and closed-value registrations in `sync/protocol.rs` and the corresponding producer, wire validator, and apply behavior. Local creation, restored history, outgoing pages, incoming pages, and server admission must agree. Full historical wire validation remains separate from the local creation gate so stricter validation does not silently invalidate retained history.
-- Ordinary databases, including permanently local-only ones, start at the maintained baseline. Missing configuration or disabled sync never promotes them to the newest shared behavior. JSON import clears the relationship and validates baseline history; SQLite backups preserve the relationship.
-- Keep `SYNC_PROTOCOL_VERSION`'s literal declaration aligned with the release workflow marker extraction. The baseline marker is separate from the active server marker.
-- Before publishing a protocol-changing server release, matching readers must be publicly available on every supported platform. Release notes and server update instructions must warn that older apps pause sync and retain local work. This workspace cannot verify external mobile-store availability.
-- Use `cargo test -p aven-core --lib sync::` and focused CLI sync/status/update checks. The frozen history in `crates/aven-core/tests/fixtures/sync-protocol-18.json` was generated and replayed using unchanged `v0.1.40`; task receipt-time activity fields are not convergence state. Keep an actual released-server process proof in addition to test-only cutover contracts.
+Read [SYNC_PROTOCOL.md](SYNC_PROTOCOL.md) before changing shared operation contracts
+or protocol constants. It owns the version-addition checklist, baseline retirement
+rules, encoding, standalone/import policy, and required compatibility evidence.
+
+- Preserve historical operation meanings and pending identities. Register new
+  operations and closed values without widening the frozen baseline contract.
+- Keep local creation, restored history, outgoing/incoming pages, and server
+  admission aligned. Core protocol policy lives in `sync/protocol.rs`.
+- Never bump `MAINTAINED_PROTOCOL_BASELINE` automatically with the active version.
+  Retirement needs explicit authorization and a supported transition for existing
+  databases; changing the constant alone can prevent them from opening.
+- Retain unchanged released-server interoperability and historical replay proof,
+  not just tests with illustrative future protocol numbers.
 
 ### Change bounded sync behavior
 
