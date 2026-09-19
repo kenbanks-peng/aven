@@ -738,7 +738,7 @@ async fn update_change_server_seqs_if_missing(
 async fn insert_wire_change(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
     let payload = change.payload.to_string();
     sqlx::query!(
-        "INSERT OR IGNORE INTO changes(change_id, client_id, local_seq, entity_type, entity_id, field,
+        "INSERT INTO changes(change_id, client_id, local_seq, entity_type, entity_id, field,
          op_type, payload, base_version, created_at, server_seq)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         change.change_id,

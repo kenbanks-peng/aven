@@ -71,6 +71,10 @@ absence does not negotiate a default. `SyncResponse.protocol_version` identifies
 the response contract. Server admission checks exact equality with the active
 server protocol on every metadata request.
 
+Across acknowledgements, pulled changes, and retained local history, one server
+sequence belongs to only one operation identity. An unexpected collision must
+reject the page transactionally, not silently omit a history row.
+
 A session discovers compatibility with an authenticated empty `/sync` request
 using a maximal cursor, before ordinary metadata or attachment transfer. A
 supported version learned from a mismatch requires an exact confirmation probe.

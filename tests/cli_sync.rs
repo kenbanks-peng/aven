@@ -239,6 +239,16 @@ fn seed_task_with_pending_push_acks(
     (db, push_acks)
 }
 
+fn acknowledge_local_history(db: &std::path::Path) -> i64 {
+    exec_sql(
+        db,
+        "UPDATE changes SET server_seq = local_seq;
+        INSERT OR REPLACE INTO meta(key, value)
+        SELECT 'sync_cursor', CAST(MAX(server_seq) AS TEXT) FROM changes",
+    );
+    scalar_i64(db, "SELECT MAX(server_seq) FROM changes")
+}
+
 fn assert_task_field_versions(db: &std::path::Path) {
     assert_eq!(scalar_i64(db, "SELECT count(*) FROM field_versions"), 9);
     assert_eq!(
@@ -2444,6 +2454,70 @@ fn sync_client_rejects_duplicate_push_acks() {
 }
 
 #[test]
+fn sync_client_rejects_conflicting_sequence_owners_atomically() {
+    for case in ["ack-pull", "ack-ack", "retained-pull"] {
+        let env = TestEnv::new();
+        let (db, mut acks) =
+            seed_task_with_pending_push_acks(&env, "sequence-owner.sqlite", "local task");
+        assert_eq!(acks.len(), 2);
+        let mut changes = vec![remote_task_change(
+            SYNC_TASK_A_CHANGE_ID,
+            SYNC_TASK_A_ID,
+            "unrelated remote task",
+            1,
+        )];
+        match case {
+            "ack-pull" => acks[0]["server_seq"] = json!(1),
+            "ack-ack" => {
+                acks[1]["server_seq"] = acks[0]["server_seq"].clone();
+                changes.clear();
+            }
+            "retained-pull" => {
+                exec_sql(&db, "UPDATE changes SET server_seq = 1 WHERE local_seq = 1");
+                acks = pending_push_acks(&db, 99);
+            }
+            _ => unreachable!(),
+        }
+        exec_sql(
+            &db,
+            "INSERT INTO meta(key, value) VALUES ('sync_blocked_protocol', '19')",
+        );
+        let queries = [
+            "SELECT * FROM changes ORDER BY change_id",
+            "SELECT * FROM tasks ORDER BY id",
+            "SELECT * FROM projects ORDER BY id",
+            "SELECT * FROM field_versions ORDER BY entity_id, field",
+            "SELECT * FROM meta WHERE key IN ('sync_cursor', 'local_seq', 'sync_established_protocol', 'sync_blocked_protocol') ORDER BY key",
+        ];
+        let before = queries.map(|sql| query_sql_scalar(&db, sql));
+        let cursor = if changes.is_empty() { 0 } else { 1 };
+        let server = start_fake_sync_server(sync_response_with_push_acks(cursor, acks, changes));
+        let error = fail(env.aven(&db, ["sync", "--server", server.url()]));
+        if case == "retained-pull" {
+            contains_all(&error, &["UNIQUE constraint failed: changes.server_seq"]);
+        } else {
+            contains_all(
+                &error,
+                &["error invalid-sync-response", "server-seq-owner-mismatch"],
+            );
+        }
+        assert_eq!(
+            queries.map(|sql| query_sql_scalar(&db, sql)),
+            before,
+            "{case}"
+        );
+        assert_eq!(
+            scalar_i64(
+                &db,
+                "SELECT count(*) FROM tasks WHERE title = 'unrelated remote task'"
+            ),
+            0
+        );
+        server.finish();
+    }
+}
+
+#[test]
 fn sync_client_rejects_non_increasing_server_seq() {
     let env = TestEnv::new();
     let db = env.db("bad-server-seq.sqlite");
@@ -3424,17 +3498,25 @@ fn pulled_attachment_on_deleted_task_does_not_schedule_blob_download() {
     let db = env.db("deleted-task-attachment.sqlite");
     ok(env.aven(&db, ["add", "deleted attachment task", "--project", "app"]));
     let task_id = local_task_id(&db, "deleted attachment task");
-    exec_sql(
-        &db,
-        "UPDATE tasks SET deleted = 1; UPDATE changes SET server_seq = local_seq",
-    );
-    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    exec_sql(&db, "UPDATE tasks SET deleted = 1");
+    let cursor = acknowledge_local_history(&db);
+    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     let output = ok(env.aven(&db, ["sync", "--server", server.url()]));
 
-    contains_all(&output, &["Sync complete", "1 received", "Cursor       1"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("1"));
+    contains_all(
+        &output,
+        &[
+            "Sync complete",
+            "1 received",
+            &format!("Cursor       {}", cursor + 1),
+        ],
+    );
+    assert_eq!(
+        meta_value(&db, "sync_cursor"),
+        Some((cursor + 1).to_string())
+    );
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM blob_inventory"), 0);
     server.finish();
 }
@@ -3448,16 +3530,16 @@ fn download_failure_preserves_applied_metadata_and_cursor() {
     let env = TestEnv::new();
     let db = env.db("download-failure-cursor.sqlite");
     ok(env.aven(&db, ["add", "download failure task", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "download failure task");
     let bytes = png_bytes(2, 2);
     let sha256 = hex::encode(Sha256::digest(&bytes));
-    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
+    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
     change["payload"]["sha256"] = json!(sha256);
     change["payload"]["byte_size"] = json!(bytes.len());
     change["payload"]["width"] = json!(2);
     change["payload"]["height"] = json!(2);
-    let response = sync_response(1, [change]).to_string();
+    let response = sync_response(cursor + 1, [change]).to_string();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake blob server");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = std::thread::spawn(move || {
@@ -3511,7 +3593,10 @@ fn download_failure_preserves_applied_metadata_and_cursor() {
     let error = fail(env.aven(&db, ["sync", "--server", &url]));
 
     contains_all(&error, &["error attachment-blob-remote-invalid"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("1"));
+    assert_eq!(
+        meta_value(&db, "sync_cursor"),
+        Some((cursor + 1).to_string())
+    );
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM task_attachments"), 1);
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM blob_inventory"), 0);
     server.join().expect("fake blob server exits");
@@ -3559,17 +3644,17 @@ fn attachment_metadata_duplicate_add_is_idempotent() {
     let env = TestEnv::new();
     let db = env.db("attachment-idempotent-add.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
     seed_available_blob_for_hash(
         &db,
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
     );
-    let change1 = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
+    let change1 = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
     let mut change2 = change1.clone();
     change2["change_id"] = json!("ATTACHMENTADD002");
-    change2["server_seq"] = json!(2);
-    let server = start_fake_sync_server(sync_response(2, [change1, change2]));
+    change2["server_seq"] = json!(cursor + 2);
+    let server = start_fake_sync_server(sync_response(cursor + 2, [change1, change2]));
 
     ok(env.aven(&db, ["sync", "--server", server.url()]));
 
@@ -3582,24 +3667,24 @@ fn attachment_metadata_duplicate_delete_is_idempotent() {
     let env = TestEnv::new();
     let db = env.db("attachment-idempotent-delete.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
-    let add = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
+    let add = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
     let del1 = remote_attachment_delete(
         "ATTACHMENTRM0001",
         &task_id,
         "7KQ9A1X4MV2P8D6R",
         "2026-01-01T00:00:01Z",
-        2,
+        cursor + 2,
     );
     let del2 = remote_attachment_delete(
         "ATTACHMENTRM0002",
         &task_id,
         "7KQ9A1X4MV2P8D6R",
         "2026-01-01T00:00:02Z",
-        3,
+        cursor + 3,
     );
-    let server = start_fake_sync_server(sync_response(3, [add, del1, del2]));
+    let server = start_fake_sync_server(sync_response(cursor + 3, [add, del1, del2]));
 
     ok(env.aven(&db, ["sync", "--server", server.url()]));
 
@@ -3618,7 +3703,7 @@ fn attachment_metadata_conflict_rolls_back_page_and_cursor() {
     let env = TestEnv::new();
     let db = env.db("attachment-conflict.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
     insert_attachment_row(
         &db,
@@ -3626,13 +3711,13 @@ fn attachment_metadata_conflict_rolls_back_page_and_cursor() {
         "1111111111111111111111111111111111111111111111111111111111111111",
         false,
     );
-    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     let error = fail(env.aven(&db, ["sync", "--server", server.url()]));
 
     contains_all(&error, &["error attachment-identity-conflict"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("0"));
+    assert_eq!(meta_value(&db, "sync_cursor"), Some(cursor.to_string()));
     assert_eq!(
         query_sql_scalar(&db, "SELECT sha256 FROM task_attachments"),
         "1111111111111111111111111111111111111111111111111111111111111111"
@@ -3645,16 +3730,16 @@ fn sync_client_rejects_malformed_attachment_response_before_state_change() {
     let env = TestEnv::new();
     let db = env.db("malformed-attachment-pull.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
-    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
+    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
     change["payload"]["sha256"] = json!("short");
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     let error = fail(env.aven(&db, ["sync", "--server", server.url()]));
 
     contains_all(&error, &["error invalid-sync-change", "invalid-sha256"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("0"));
+    assert_eq!(meta_value(&db, "sync_cursor"), Some(cursor.to_string()));
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM task_attachments"), 0);
     server.finish();
 }
@@ -4156,20 +4241,23 @@ fn attachment_delete_for_missing_attachment_is_idempotent() {
     let env = TestEnv::new();
     let db = env.db("attachment-missing-delete.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
     let change = remote_attachment_delete(
         "ATTACHMENTRM0001",
         &task_id,
         "7KQ9A1X4MV2P8D6R",
         "2026-01-01T00:00:01Z",
-        1,
+        cursor + 1,
     );
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     ok(env.aven(&db, ["sync", "--server", server.url()]));
 
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("1"));
+    assert_eq!(
+        meta_value(&db, "sync_cursor"),
+        Some((cursor + 1).to_string())
+    );
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM task_attachments"), 0);
     server.finish();
 }
@@ -4184,17 +4272,17 @@ fn attachment_add_workspace_mismatch_preserves_state() {
         "INSERT INTO workspaces(id, key, name, created_at, updated_at)
          VALUES ('1111111111111111', 'other', 'other', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
     );
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
-    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
+    let mut change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
     change["payload"]["workspace_id"] = json!("1111111111111111");
     change["payload"]["workspace_key"] = json!("other");
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     let error = fail(env.aven(&db, ["sync", "--server", server.url()]));
 
     contains_all(&error, &["error invalid-task-workspace"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("0"));
+    assert_eq!(meta_value(&db, "sync_cursor"), Some(cursor.to_string()));
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM task_attachments"), 0);
     server.finish();
 }
@@ -4204,7 +4292,7 @@ fn attachment_add_after_delete_does_not_resurrect() {
     let env = TestEnv::new();
     let db = env.db("attachment-add-after-delete.sqlite");
     ok(env.aven(&db, ["add", "target", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task_id = local_task_id(&db, "target");
     insert_attachment_row(
         &db,
@@ -4212,8 +4300,8 @@ fn attachment_add_after_delete_does_not_resurrect() {
         "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
         true,
     );
-    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, 1);
-    let server = start_fake_sync_server(sync_response(1, [change]));
+    let change = remote_attachment_add("ATTACHMENTADD001", &task_id, cursor + 1);
+    let server = start_fake_sync_server(sync_response(cursor + 1, [change]));
 
     ok(env.aven(&db, ["sync", "--server", server.url()]));
 
@@ -4230,23 +4318,23 @@ fn attachment_delete_identity_conflict_rejects_apply() {
     let db = env.db("attachment-delete-conflict.sqlite");
     ok(env.aven(&db, ["add", "target1", "--project", "app"]));
     ok(env.aven(&db, ["add", "target2", "--project", "app"]));
-    exec_sql(&db, "UPDATE changes SET server_seq = local_seq");
+    let cursor = acknowledge_local_history(&db);
     let task1 = local_task_id(&db, "target1");
     let task2 = local_task_id(&db, "target2");
-    let add = remote_attachment_add("ATTACHMENTADD001", &task1, 1);
+    let add = remote_attachment_add("ATTACHMENTADD001", &task1, cursor + 1);
     let del = remote_attachment_delete(
         "ATTACHMENTRM0001",
         &task2,
         "7KQ9A1X4MV2P8D6R",
         "2026-01-01T00:00:01Z",
-        2,
+        cursor + 2,
     );
-    let server = start_fake_sync_server(sync_response(2, [add, del]));
+    let server = start_fake_sync_server(sync_response(cursor + 2, [add, del]));
 
     let error = fail(env.aven(&db, ["sync", "--server", server.url()]));
 
     contains_all(&error, &["error attachment-identity-conflict"]);
-    assert_eq!(meta_value(&db, "sync_cursor").as_deref(), Some("0"));
+    assert_eq!(meta_value(&db, "sync_cursor"), Some(cursor.to_string()));
     assert_eq!(scalar_i64(&db, "SELECT count(*) FROM task_attachments"), 0);
     server.finish();
 }

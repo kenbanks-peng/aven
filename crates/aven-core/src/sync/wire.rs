@@ -1261,6 +1261,28 @@ fn validate_pull_page(after: i64, pull_limit: u32, response: &SyncResponse) -> R
 }
 
 fn validate_push_pull_overlap(response: &SyncResponse) -> Result<()> {
+    let mut sequence_owners = HashMap::new();
+    for (change_id, server_seq) in response
+        .push_acks
+        .iter()
+        .map(|ack| (ack.change_id.as_str(), ack.server_seq))
+        .chain(response.changes.iter().filter_map(|change| {
+            change
+                .server_seq
+                .map(|seq| (change.change_id.as_str(), seq))
+        }))
+    {
+        if let Some(owner) = sequence_owners.insert(server_seq, change_id)
+            && owner != change_id
+        {
+            bail!(
+                "error invalid-sync-response server-seq-owner-mismatch server_seq={} first={} second={}",
+                server_seq,
+                owner,
+                change_id
+            );
+        }
+    }
     let acked = response
         .push_acks
         .iter()

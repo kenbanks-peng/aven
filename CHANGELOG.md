@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: Sync rejects contradictory server responses instead of silently losing operation history.
 - Sync checks app and server compatibility before transferring attachments and explains which component needs updating while keeping local edits saved.
 
 - Aven warns before installing an update that could interrupt sync with an older or unreachable server, and recommends updating the sync server first.
