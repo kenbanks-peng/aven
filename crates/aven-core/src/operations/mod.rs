@@ -3,6 +3,7 @@ pub(crate) use attachments::AttachmentReadFailure;
 pub(crate) mod conflicts;
 mod dependencies;
 mod epics;
+mod labels;
 mod projects;
 pub(crate) mod recurrence;
 mod related;
@@ -29,12 +30,11 @@ pub(crate) use epics::{
     add_task_to_epic_in_transaction, remove_task_from_epic_in_transaction,
     restore_task_to_epic_in_transaction, task_has_epic_children,
 };
-pub(crate) use projects::create_label_operation;
-pub use projects::{
-    LabelDeleteOutcome, LabelOutcome, LabelRenameOutcome, ProjectDeleteOutcome, ProjectMetadata,
-    ProjectOutcome, ProjectRenameOutcome,
-};
-pub(crate) use projects::{insert_project_metadata_change, set_label_name, set_project_metadata};
+pub(crate) use labels::create_label_operation;
+pub(crate) use labels::set_label_name;
+pub use labels::{LabelDeleteOutcome, LabelOutcome, LabelRenameOutcome};
+pub use projects::{ProjectDeleteOutcome, ProjectMetadata, ProjectOutcome, ProjectRenameOutcome};
+pub(crate) use projects::{insert_project_metadata_change, set_project_metadata};
 pub use recurrence::{
     CreateRecurrenceSeriesParams, RecurrenceCreateOutcome, RecurrenceReconcileOutcome,
     RecurrenceResolveOutcome, RecurrenceSeriesDraft, RecurrenceStateOutcome,
