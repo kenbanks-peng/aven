@@ -55,7 +55,7 @@ csi-u
 
 ### Verify in Aven
 
-1. Run `aven tui` inside tmux.
+1. Run `aven` inside tmux.
 2. Press `a` to open the composer.
 3. Focus Description and type a line.
 4. Press plain `Enter` and confirm it inserts a newline.

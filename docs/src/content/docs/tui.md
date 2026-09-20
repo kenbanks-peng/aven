@@ -6,7 +6,7 @@ description: Find, capture, and manage work in the terminal interface.
 The TUI is aven's keyboard-driven interface for managing tasks locally.
 
 ```sh
-aven tui
+aven
 ```
 
 Use it to find work, capture tasks, edit them, and inspect their details. See
@@ -285,7 +285,7 @@ tmux popups:
 
 ```text
 bind C-w display-popup -E -d '#{pane_current_path}' -w 80% -h 80% 'aven tui -p'
-bind C-a display-popup -E -d '#{pane_current_path}' -w 80% -h 80% 'aven tui'
+bind C-a display-popup -E -d '#{pane_current_path}' -w 80% -h 80% 'aven'
 bind t display-popup -E -d '#{pane_current_path}' -w 120 -h 30 'aven tui --add-task-only'
 ```
 

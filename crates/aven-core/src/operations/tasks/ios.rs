@@ -6,7 +6,7 @@ use crate::mutation::set_task_project;
 use crate::refs::get_task_in_workspace;
 use crate::undo::{TaskUndoSnapshot, task_snapshot};
 use crate::workspaces::Workspace;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18,6 +18,10 @@ pub(crate) enum IosTaskMutation {
         status: String,
         expected_version: Option<String>,
     },
+    DeletedState {
+        deleted: bool,
+        expected_version: Option<String>,
+    },
     Snooze {
         available_at: String,
     },
@@ -27,7 +31,7 @@ pub(crate) enum IosTaskMutation {
 }
 
 pub(crate) struct IosTaskMutationOutcome {
-    pub status_version: Option<String>,
+    pub field_version: Option<String>,
     pub before: TaskUndoSnapshot,
     pub after: TaskUndoSnapshot,
     pub changed: bool,
@@ -111,20 +115,21 @@ impl Database {
     ) -> Result<IosTaskMutationOutcome> {
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
-        if matches!(mutation, IosTaskMutation::DetailStatus { .. }) {
+        if !matches!(mutation, IosTaskMutation::DeletedState { .. }) {
             let task = get_task_in_workspace(&mut tx, workspace, task_id).await?;
             if task.deleted {
                 return Err(crate::error::CoreError::not_found("task is deleted").into());
             }
         }
         let before = task_snapshot(&mut tx, &workspace.id, task_id).await?;
-        if before.deleted {
-            bail!("error task-not-found task_id={task_id}");
-        }
         let open = !matches!(before.status.as_str(), "done" | "canceled");
         let update = match mutation {
             IosTaskMutation::DetailStatus { status, .. } => TaskUpdate {
                 status: Some(status.clone()),
+                ..TaskUpdate::default()
+            },
+            IosTaskMutation::DeletedState { deleted, .. } => TaskUpdate {
+                deleted: Some(*deleted),
                 ..TaskUpdate::default()
             },
             IosTaskMutation::Start
@@ -171,14 +176,25 @@ impl Database {
         )
         .await?;
         let after = task_snapshot(&mut tx, &workspace.id, task_id).await?;
-        let status_version = if matches!(mutation, IosTaskMutation::DetailStatus { .. }) {
-            crate::db::field_version(&mut tx, task_id.as_str(), "status").await?
-        } else {
-            None
+        let field_version = match mutation {
+            IosTaskMutation::DetailStatus { .. } => {
+                crate::db::field_version(&mut tx, task_id.as_str(), "status").await?
+            }
+            IosTaskMutation::DeletedState { .. } => {
+                crate::db::field_version(&mut tx, task_id.as_str(), "deleted").await?
+            }
+            _ => None,
         };
+        let affected_attachment_hashes = affected_attachment_hashes.into_iter().collect::<Vec<_>>();
+        crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+            &mut tx,
+            &affected_attachment_hashes,
+            &crate::attachments::lifecycle::SystemClock,
+        )
+        .await?;
         tx.commit().await?;
         Ok(IosTaskMutationOutcome {
-            status_version,
+            field_version,
             before,
             after,
             changed,
@@ -196,16 +212,28 @@ impl Database {
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         let current = task_snapshot(&mut tx, &workspace.id, task_id).await?;
-        if let IosTaskMutation::DetailStatus {
-            expected_version, ..
-        } = mutation
-            && crate::db::field_version(&mut tx, task_id.as_str(), "status").await?
+        let expected_field_version = match mutation {
+            IosTaskMutation::DetailStatus {
+                expected_version, ..
+            } => Some((
+                "status",
+                expected_version,
+                "task status changed after the detail action",
+            )),
+            IosTaskMutation::DeletedState {
+                expected_version, ..
+            } => Some((
+                "deleted",
+                expected_version,
+                "task deletion state changed after the action",
+            )),
+            _ => None,
+        };
+        if let Some((field, expected_version, message)) = expected_field_version
+            && crate::db::field_version(&mut tx, task_id.as_str(), field).await?
                 != *expected_version
         {
-            return Err(crate::error::CoreError::generation_conflict(
-                "task status changed after the detail action",
-            )
-            .into());
+            return Err(crate::error::CoreError::generation_conflict(message).into());
         }
         if current != *expected {
             return Err(crate::error::CoreError::generation_conflict(
@@ -218,6 +246,10 @@ impl Database {
             | IosTaskMutation::Done
             | IosTaskMutation::DetailStatus { .. } => TaskUpdate {
                 status: Some(before.status.clone()),
+                ..TaskUpdate::default()
+            },
+            IosTaskMutation::DeletedState { .. } => TaskUpdate {
+                deleted: Some(before.deleted),
                 ..TaskUpdate::default()
             },
             IosTaskMutation::Snooze { .. } => TaskUpdate {
@@ -238,6 +270,13 @@ impl Database {
             task_id,
             &update,
             &mut affected_attachment_hashes,
+        )
+        .await?;
+        let affected_attachment_hashes = affected_attachment_hashes.into_iter().collect::<Vec<_>>();
+        crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+            &mut tx,
+            &affected_attachment_hashes,
+            &crate::attachments::lifecycle::SystemClock,
         )
         .await?;
         tx.commit().await?;

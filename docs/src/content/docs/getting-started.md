@@ -20,7 +20,7 @@ brew install raine/aven/aven
 ## Open Aven
 
 ```sh
-aven tui
+aven
 ```
 
 Tasks live in a local SQLite database.

@@ -2441,6 +2441,310 @@ async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_histo
 }
 
 #[tokio::test]
+async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("task-deletion.sqlite");
+    let store = Store::open(&path).await.unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let task = store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "Delete from detail".to_string(),
+                description: String::new(),
+                project: "ios".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    let database = Database::open(&path).await.unwrap();
+    let other_workspace = database.create_workspace("Other").await.unwrap();
+
+    assert_eq!(
+        store
+            .set_ios_task_deleted(&other_workspace.id, &task.id, true)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::NotFound
+    );
+
+    let deleted = store
+        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .await
+        .unwrap();
+    assert!(deleted.deleted);
+    assert!(deleted.undo_token.is_some());
+    let repeated = store
+        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .await
+        .unwrap();
+    assert!(repeated.deleted);
+    assert!(repeated.undo_token.is_none());
+
+    let restored = store
+        .set_ios_task_deleted(&workspace.id, &task.id, false)
+        .await
+        .unwrap();
+    assert!(!restored.deleted);
+    store
+        .update_task(
+            &workspace.id,
+            &task.id,
+            UpdateTask {
+                title: Some("Changed after restore".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .undo_ios_task_deletion(restored.undo_token.as_deref().unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::GenerationConflict
+    );
+
+    let deleted_again = store
+        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .await
+        .unwrap();
+    store
+        .undo_ios_task_deletion(deleted_again.undo_token.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .undo_ios_task_deletion(deleted_again.undo_token.as_deref().unwrap())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::GenerationConflict
+    );
+    let detail = store
+        .ios_task_detail(&workspace.id, &task.id)
+        .await
+        .unwrap();
+    assert!(!detail.deleted);
+    assert_eq!(detail.title, "Changed after restore");
+
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    let deleted_changes: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM changes
+         WHERE entity_id = ? AND field = 'deleted' AND op_type = 'set_field'",
+    )
+    .bind(&task.id)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(deleted_changes, 4);
+    let current_version: Option<String> = sqlx::query_scalar(
+        "SELECT version FROM field_versions WHERE entity_id = ? AND field = 'deleted'",
+    )
+    .bind(&task.id)
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert!(current_version.is_some());
+
+    drop(store);
+    let reopened = Store::open(&path).await.unwrap();
+    assert!(
+        !reopened
+            .ios_task_detail(&workspace.id, &task.id)
+            .await
+            .unwrap()
+            .deleted
+    );
+}
+
+#[tokio::test]
+async fn ios_task_deletion_syncs_delete_and_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_path = directory.path().join("deletion-first.sqlite");
+    let second_path = directory.path().join("deletion-second.sqlite");
+    let server = Database::open(&directory.path().join("deletion-server.sqlite"))
+        .await
+        .unwrap();
+    let first = Store::open(&first_path).await.unwrap();
+    let workspace = first.resolve_workspace("default").await.unwrap();
+    let task = first
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "Synchronized deletion".to_string(),
+                description: String::new(),
+                project: "ios".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+
+    first
+        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .await
+        .unwrap();
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+    let second = Store::open(&second_path).await.unwrap();
+    assert!(
+        second
+            .ios_task_detail(&workspace.id, &task.id)
+            .await
+            .unwrap()
+            .deleted
+    );
+
+    first
+        .set_ios_task_deleted(&workspace.id, &task.id, false)
+        .await
+        .unwrap();
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+    assert!(
+        !second
+            .ios_task_detail(&workspace.id, &task.id)
+            .await
+            .unwrap()
+            .deleted
+    );
+}
+
+#[tokio::test]
+async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("task-deletion-guards.sqlite");
+    let store = Store::open(&path).await.unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let task = store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "Guarded deletion".to_string(),
+                description: String::new(),
+                project: "ios".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    let sha = "a".repeat(64);
+    let mut connection =
+        SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO task_attachments(
+             workspace_id, attachment_id, task_id, sha256, byte_size, media_type,
+             width, height, created_at, deleted
+         ) VALUES (?, 'ATTACHMENT000001', ?, ?, 1, 'image/png', 1, 1,
+                   '2026-09-01T10:00:00Z', 0)",
+    )
+    .bind(&workspace.id)
+    .bind(&task.id)
+    .bind(&sha)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO blob_lifecycle(sha256, unreferenced_at) VALUES (?, NULL)")
+        .bind(&sha)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO conflicts(
+             workspace_id, entity_type, entity_id, task_id, field, local_value,
+             remote_value, remote_change_id, variant_a, variant_b, created_at
+         ) VALUES (?, 'task', ?, ?, 'deleted', '0', '1', 'remote-delete',
+                   'local-delete', 'remote-delete', '2026-09-01T10:00:00Z')",
+    )
+    .bind(&workspace.id)
+    .bind(&task.id)
+    .bind(&task.id)
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .set_ios_task_deleted(&workspace.id, &task.id, true)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::OpenConflict
+    );
+    sqlx::query("DELETE FROM conflicts WHERE workspace_id = ? AND entity_id = ?")
+        .bind(&workspace.id)
+        .bind(&task.id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+
+    let deleted = store
+        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .await
+        .unwrap();
+    let unreferenced_at: Option<String> =
+        sqlx::query_scalar("SELECT unreferenced_at FROM blob_lifecycle WHERE sha256 = ?")
+            .bind(&sha)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert!(unreferenced_at.is_some());
+    store
+        .undo_ios_task_deletion(deleted.undo_token.as_deref().unwrap())
+        .await
+        .unwrap();
+    let unreferenced_at: Option<String> =
+        sqlx::query_scalar("SELECT unreferenced_at FROM blob_lifecycle WHERE sha256 = ?")
+            .bind(&sha)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+    assert!(unreferenced_at.is_none());
+
+    let recurrence = store
+        .create_recurrence_series(&workspace.id, daily_series("protected recurrence"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .set_ios_task_deleted(&workspace.id, &recurrence.task.id, true)
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+    assert!(
+        !store
+            .ios_task_detail(&workspace.id, &recurrence.task.id)
+            .await
+            .unwrap()
+            .deleted
+    );
+}
+
+#[tokio::test]
 async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_undo() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("detail-status.sqlite");
