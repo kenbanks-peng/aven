@@ -1,0 +1,254 @@
+use std::io::{self, Write};
+use std::sync::Mutex;
+
+use anyhow::{Context, Result};
+use crossterm::Command;
+use crossterm::event::{
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::terminal::supports_keyboard_enhancement;
+#[cfg(not(test))]
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum KeyboardEnhancementMode {
+    Kitty,
+    ModifyOtherKeys,
+}
+
+#[derive(Default)]
+pub(super) struct KeyboardEnhancementState {
+    pub(super) mode: Option<KeyboardEnhancementMode>,
+}
+
+impl KeyboardEnhancementState {
+    pub(super) fn enable(
+        &mut self,
+        mode: KeyboardEnhancementMode,
+        writer: &mut impl Write,
+    ) -> io::Result<()> {
+        match mode {
+            KeyboardEnhancementMode::Kitty => crossterm::execute!(
+                writer,
+                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            )?,
+            KeyboardEnhancementMode::ModifyOtherKeys => {
+                crossterm::execute!(writer, SetModifyOtherKeys(true))?
+            }
+        }
+        self.mode = Some(mode);
+        Ok(())
+    }
+
+    pub(super) fn disable(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        let Some(mode) = self.mode else {
+            return Ok(());
+        };
+        match mode {
+            KeyboardEnhancementMode::Kitty => {
+                crossterm::execute!(writer, PopKeyboardEnhancementFlags)?
+            }
+            KeyboardEnhancementMode::ModifyOtherKeys => {
+                crossterm::execute!(writer, SetModifyOtherKeys(false))?
+            }
+        }
+        self.mode = None;
+        Ok(())
+    }
+}
+
+struct SetModifyOtherKeys(bool);
+
+impl Command for SetModifyOtherKeys {
+    fn write_ansi(&self, writer: &mut impl std::fmt::Write) -> std::fmt::Result {
+        writer.write_str(if self.0 { "\x1b[>4;2m" } else { "\x1b[>4m" })
+    }
+}
+
+static KEYBOARD_ENHANCEMENT: Mutex<KeyboardEnhancementState> =
+    Mutex::new(KeyboardEnhancementState { mode: None });
+
+fn keyboard_enhancement() -> io::Result<std::sync::MutexGuard<'static, KeyboardEnhancementState>> {
+    KEYBOARD_ENHANCEMENT
+        .lock()
+        .map_err(|_| io::Error::other("keyboard enhancement state lock is poisoned"))
+}
+
+fn detected_keyboard_enhancement() -> Option<KeyboardEnhancementMode> {
+    if matches!(supports_keyboard_enhancement(), Ok(true)) {
+        Some(KeyboardEnhancementMode::Kitty)
+    } else if cfg!(unix) {
+        Some(KeyboardEnhancementMode::ModifyOtherKeys)
+    } else {
+        None
+    }
+}
+
+pub(crate) struct KeyboardEnhancementGuard {
+    active: bool,
+}
+
+impl KeyboardEnhancementGuard {
+    pub(crate) fn enable() -> Result<Self> {
+        let Some(mode) = detected_keyboard_enhancement() else {
+            return Ok(Self { active: false });
+        };
+        keyboard_enhancement()?
+            .enable(mode, &mut io::stdout())
+            .context("enable terminal keyboard enhancements")?;
+        Ok(Self { active: true })
+    }
+
+    pub(crate) fn disable(&mut self) -> Result<()> {
+        if self.active {
+            keyboard_enhancement()?
+                .disable(&mut io::stdout())
+                .context("disable terminal keyboard enhancements")?;
+            self.active = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for KeyboardEnhancementGuard {
+    fn drop(&mut self) {
+        let _ = self.disable();
+    }
+}
+
+pub(crate) trait TerminalTransition {
+    fn suspend(&mut self) -> Result<()>;
+    fn restore(&mut self) -> Result<()>;
+}
+
+pub(crate) struct SuspendedTerminal<'a, T: TerminalTransition> {
+    transition: &'a mut T,
+    restore_attempted: bool,
+}
+
+impl<'a, T: TerminalTransition> SuspendedTerminal<'a, T> {
+    pub(crate) fn suspend(transition: &'a mut T) -> Result<Self> {
+        if let Err(error) = transition.suspend() {
+            let restore_error = transition.restore().err();
+            return match restore_error {
+                Some(restore_error) => Err(error.context(format!(
+                    "terminal restoration after suspension failure also failed: {restore_error:#}"
+                ))),
+                None => Err(error),
+            };
+        }
+        Ok(Self {
+            transition,
+            restore_attempted: false,
+        })
+    }
+
+    pub(crate) fn restore(&mut self) -> Result<()> {
+        if self.restore_attempted {
+            return Ok(());
+        }
+        self.restore_attempted = true;
+        self.transition.restore()
+    }
+}
+
+impl<T: TerminalTransition> Drop for SuspendedTerminal<'_, T> {
+    fn drop(&mut self) {
+        if !self.restore_attempted {
+            self.restore_attempted = true;
+            let _ = self.transition.restore();
+        }
+    }
+}
+
+pub(super) fn run_while_terminal_suspended<T, F, R>(transition: &mut T, operation: F) -> Result<R>
+where
+    T: TerminalTransition,
+    F: FnOnce() -> Result<R>,
+{
+    let mut suspended = SuspendedTerminal::suspend(transition)?;
+    let result = operation();
+    suspended.restore()?;
+    result
+}
+
+pub(crate) struct SystemTerminalTransition {
+    keyboard_mode: Option<KeyboardEnhancementMode>,
+    mouse_capture: bool,
+    bracketed_paste: bool,
+}
+
+impl SystemTerminalTransition {
+    pub(crate) fn new(mouse_capture: bool) -> Self {
+        Self {
+            keyboard_mode: None,
+            mouse_capture,
+            bracketed_paste: true,
+        }
+    }
+}
+
+#[cfg(not(test))]
+impl TerminalTransition for SystemTerminalTransition {
+    fn suspend(&mut self) -> Result<()> {
+        use crossterm::cursor::Show;
+        use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+
+        self.keyboard_mode = {
+            let mut state = keyboard_enhancement()?;
+            let mode = state.mode;
+            state
+                .disable(&mut io::stdout())
+                .context("suspend terminal keyboard enhancements")?;
+            mode
+        };
+        let mut stdout = io::stdout();
+        if self.bracketed_paste {
+            crossterm::execute!(stdout, DisableBracketedPaste)?;
+        }
+        if self.mouse_capture {
+            crossterm::execute!(stdout, DisableMouseCapture)?;
+        }
+        crossterm::execute!(stdout, Show, LeaveAlternateScreen)?;
+        stdout.flush()?;
+        disable_raw_mode()?;
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        use crossterm::cursor::Hide;
+        use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
+
+        crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
+        enable_raw_mode()?;
+        if let Some(mode) = self.keyboard_mode.take() {
+            keyboard_enhancement()?
+                .enable(mode, &mut io::stdout())
+                .context("resume terminal keyboard enhancements")?;
+        }
+        let mut stdout = io::stdout();
+        if self.bracketed_paste {
+            crossterm::execute!(stdout, EnableBracketedPaste)?;
+        }
+        if self.mouse_capture {
+            crossterm::execute!(stdout, EnableMouseCapture)?;
+        }
+        crossterm::execute!(stdout, Hide)?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl TerminalTransition for SystemTerminalTransition {
+    fn suspend(&mut self) -> Result<()> {
+        let _ = (self.keyboard_mode, self.mouse_capture, self.bracketed_paste);
+        Ok(())
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
