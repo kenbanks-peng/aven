@@ -5,9 +5,6 @@ mod terminal;
 mod viewer;
 
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
 pub(crate) use clipboard::clipboard_text_for_test;
 pub(crate) use clipboard::{
     ClipboardImage, copy_to_clipboard, read_clipboard_image, read_clipboard_text,

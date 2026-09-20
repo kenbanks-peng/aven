@@ -240,3 +240,257 @@ pub(super) fn validate(config: &TuiConfig) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::AppConfig;
+    use super::super::test_support::load_config;
+    use super::*;
+
+    #[test]
+    fn default_columns_cover_every_status_once() {
+        let config = AppConfig::default();
+
+        config.validate().unwrap();
+        assert_eq!(
+            config
+                .tui
+                .columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Inbox", "Backlog", "Todo", "Active", "Done"]
+        );
+    }
+
+    #[test]
+    fn sidebar_views_default_to_existing_order() {
+        let expected = vec![
+            SidebarView::Queue,
+            SidebarView::Ready,
+            SidebarView::Blocked,
+            SidebarView::Overdue,
+            SidebarView::All,
+            SidebarView::Open,
+            SidebarView::Inbox,
+            SidebarView::Active,
+            SidebarView::Backlog,
+            SidebarView::Todo,
+            SidebarView::Upcoming,
+            SidebarView::Done,
+            SidebarView::Conflicts,
+            SidebarView::Epics,
+            SidebarView::Recurring,
+            SidebarView::RecentActions,
+            SidebarView::Search,
+        ];
+
+        assert_eq!(AppConfig::default().tui.sidebar.views, expected);
+        assert_eq!(load_config("{}\n").unwrap().tui.sidebar.views, expected);
+        assert_eq!(
+            load_config("tui:\n  sidebar: {}\n")
+                .unwrap()
+                .tui
+                .sidebar
+                .views,
+            expected
+        );
+    }
+
+    #[test]
+    fn sidebar_views_load_in_configured_order_and_support_empty_lists() {
+        let configured =
+            load_config("tui:\n  sidebar:\n    views: [search, recent_actions, queue]\n").unwrap();
+        assert_eq!(
+            configured.tui.sidebar.views,
+            [
+                SidebarView::Search,
+                SidebarView::RecentActions,
+                SidebarView::Queue,
+            ]
+        );
+
+        let empty = load_config("tui:\n  sidebar:\n    views: []\n").unwrap();
+        assert!(empty.tui.sidebar.views.is_empty());
+    }
+
+    #[test]
+    fn sidebar_views_reject_duplicates() {
+        let error = load_config("tui:\n  sidebar:\n    views: [queue, done, queue]\n").unwrap_err();
+
+        assert!(format!("{error:#}").contains("tui.sidebar.views contains duplicate view Queue"));
+    }
+
+    #[test]
+    fn sidebar_views_reject_unknown_names() {
+        let error = load_config("tui:\n  sidebar:\n    views: [queue, someday]\n").unwrap_err();
+
+        assert!(format!("{error:#}").contains("unknown variant `someday`"));
+    }
+
+    #[test]
+    fn table_columns_default_and_round_trip() {
+        for yaml in ["{}", "tui: {}", "tui:\n  table: {}"] {
+            assert_eq!(
+                load_config(yaml).unwrap().tui.table.columns,
+                TableColumn::DEFAULT
+            );
+        }
+        let config = load_config("tui:\n  table:\n    columns: [status, priority, ref]").unwrap();
+        assert_eq!(
+            config.tui.table.columns,
+            [TableColumn::Status, TableColumn::Priority, TableColumn::Ref]
+        );
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            load_config(&text).unwrap().tui.table.columns,
+            config.tui.table.columns
+        );
+        assert_eq!(config.tui.columns, default_task_columns());
+    }
+
+    #[test]
+    fn compact_status_defaults_off_and_loads_under_the_table_settings() {
+        for yaml in ["{}", "tui: {}", "tui:\n  table: {}"] {
+            assert!(!load_config(yaml).unwrap().tui.table.compact_status);
+        }
+        assert!(!TaskTableConfig::default().compact_status);
+
+        let config = load_config("tui:\n  table:\n    compact_status: true\n").unwrap();
+        assert!(config.tui.table.compact_status);
+        assert_eq!(config.tui.table.columns, default_table_columns());
+
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert!(load_config(&text).unwrap().tui.table.compact_status);
+    }
+
+    #[test]
+    fn due_column_is_opt_in_and_independent_of_the_time_column() {
+        assert!(!default_table_columns().contains(&TableColumn::Due));
+
+        let config = load_config("tui:\n  table:\n    columns: [title, due]").unwrap();
+        assert_eq!(
+            config.tui.table.columns,
+            [TableColumn::Title, TableColumn::Due]
+        );
+        assert_eq!(TableColumn::Due.name(), "due");
+
+        let text = serde_yaml::to_string(&config).unwrap();
+        assert_eq!(
+            load_config(&text).unwrap().tui.table.columns,
+            config.tui.table.columns
+        );
+
+        let with_time = load_config("tui:\n  table:\n    columns: [title, due, time]").unwrap();
+        assert_eq!(
+            with_time.tui.table.columns,
+            [TableColumn::Title, TableColumn::Due, TableColumn::Time]
+        );
+    }
+
+    #[test]
+    fn table_columns_reject_empty_duplicate_and_unknown_columns() {
+        for (columns, expected) in [
+            ("[]", "tui.table.columns must include at least one column"),
+            (
+                "[ref, title, labels, metadata, project, status, priority, ref]",
+                "tui.table.columns contains duplicate column ref",
+            ),
+            (
+                "[title, due, due]",
+                "tui.table.columns contains duplicate column due",
+            ),
+            ("[robot]", "unknown variant `robot`"),
+        ] {
+            let error =
+                load_config(&format!("tui:\n  table:\n    columns: {columns}")).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn table_columns_reject_legacy_column_order_instead_of_ignoring_it() {
+        let error = load_config(
+                "tui:\n  table:\n    column_order: [ref, title, labels, metadata, project, status, priority, time]",
+            )
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("unknown field `column_order`"),
+            "{message}"
+        );
+        assert!(message.contains("columns"), "{message}");
+    }
+
+    #[test]
+    fn custom_columns_load_in_configured_order() {
+        let config = load_config(
+                "tui:\n  columns:\n    - name: Work\n      statuses: [active, todo]\n    - name: Later\n      statuses: [inbox, backlog]\n    - name: Closed\n      statuses: [done, canceled]\n",
+            )
+            .unwrap();
+
+        assert_eq!(config.tui.columns[0].name, "Work");
+        assert_eq!(config.tui.columns[0].statuses, ["active", "todo"]);
+    }
+
+    #[test]
+    fn empty_config_uses_default_columns() {
+        assert_eq!(load_config("{}\n").unwrap().tui.columns.len(), 5);
+    }
+
+    #[test]
+    fn column_config_rejects_missing_statuses() {
+        let error =
+            load_config("tui:\n  columns:\n    - name: Current\n      statuses: [active, todo]\n")
+                .unwrap_err();
+
+        assert!(format!("{error:#}").contains("missing column statuses"));
+    }
+
+    #[test]
+    fn column_config_rejects_duplicate_statuses() {
+        let error = load_config(
+                "tui:\n  columns:\n    - name: One\n      statuses: [inbox, backlog, todo, active, done, canceled]\n    - name: Two\n      statuses: [active]\n",
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("duplicate column status active"));
+    }
+
+    #[test]
+    fn column_config_rejects_unknown_statuses() {
+        let error = load_config(
+                "tui:\n  columns:\n    - name: One\n      statuses: [inbox, backlog, todo, active, done, canceled, parked]\n",
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("unknown column status parked"));
+    }
+
+    #[test]
+    fn column_config_rejects_empty_columns_and_names() {
+        let empty = load_config("tui:\n  columns: []\n").unwrap_err();
+        assert!(format!("{empty:#}").contains("requires at least one column"));
+
+        let unnamed = load_config(
+                "tui:\n  columns:\n    - name: '  '\n      statuses: [inbox, backlog, todo, active, done, canceled]\n",
+            )
+            .unwrap_err();
+        assert!(format!("{unnamed:#}").contains("column name must not be blank"));
+
+        let no_statuses =
+            load_config("tui:\n  columns:\n    - name: Empty\n      statuses: []\n").unwrap_err();
+        assert!(format!("{no_statuses:#}").contains("must include at least one status"));
+    }
+
+    #[test]
+    fn default_columns_round_trip() {
+        let config = AppConfig::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let loaded: AppConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        loaded.validate().unwrap();
+        assert_eq!(loaded.tui.columns, config.tui.columns);
+    }
+}

@@ -11,8 +11,11 @@ use crate::ids::WorkspaceId;
 
 mod custom_commands;
 mod paths;
+#[cfg(test)]
+mod test_support;
 mod tui;
 
+pub(crate) use custom_commands::DEFAULT_CUSTOM_COMMAND_TIMEOUT_SECONDS;
 pub use custom_commands::{
     CustomTuiCommandConfig, CustomTuiCommandExecution, CustomTuiCommandSuccess,
     CustomTuiCommandTarget,
@@ -22,19 +25,10 @@ pub use paths::{
     resolve_blob_dir, resolve_db_path, resolve_sync_server,
 };
 pub(crate) use paths::{expand_tilde_from, resolve_sync_server_from};
-#[cfg(test)]
-pub use tui::TaskTableConfig;
 pub use tui::{SidebarView, TableColumn, TaskColumnConfig, TuiConfig};
-
-#[cfg(test)]
-use paths::resolve_db_path_from;
-#[cfg(test)]
-use tui::{default_table_columns, default_task_columns};
 
 const DEFAULT_WAKE_ADDR: &str = "127.0.0.1:47631";
 const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
-pub(crate) const DEFAULT_CUSTOM_COMMAND_TIMEOUT_SECONDS: u64 = 300;
-pub(crate) const MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS: u64 = 86_400;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {

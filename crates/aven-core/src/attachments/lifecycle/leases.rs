@@ -40,3 +40,49 @@ pub async fn release_lease(conn: &mut SqliteConnection, lease_id: &str) -> Resul
         .await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::super::test_support::TestClock;
+    use super::super::*;
+    use super::*;
+    use crate::attachments::storage::{object_path, upsert_inventory_available};
+    use crate::db::open_db;
+
+    #[tokio::test]
+    async fn lease_protects_expired_unreferenced_blob_until_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = open_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        upsert_inventory_available(&mut conn, hash, 4, "image/png")
+            .await
+            .unwrap();
+        let path = object_path(&blob_dir, hash).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"blob").unwrap();
+        let clock = TestClock::at("2026-07-10T00:00:00Z");
+        reconcile_liveness(&mut conn, &clock).await.unwrap();
+        clock.advance(chrono::Duration::days(8));
+        let lease = acquire_lease(&mut conn, hash, "backup", &clock)
+            .await
+            .unwrap();
+        let policy = LifecyclePolicy::default();
+        let blocked = prune(&mut conn, &blob_dir, policy, true, &clock)
+            .await
+            .unwrap();
+        assert_eq!(blocked.pruned.count, 0);
+        assert!(path.exists());
+
+        release_lease(&mut conn, &lease).await.unwrap();
+        let pruned = prune(&mut conn, &blob_dir, policy, true, &clock)
+            .await
+            .unwrap();
+        assert_eq!(pruned.pruned.count, 1);
+        assert!(!path.exists());
+    }
+}

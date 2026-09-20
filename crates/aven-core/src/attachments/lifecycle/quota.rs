@@ -166,3 +166,66 @@ pub async fn ensure_local_capacity(
     tx.commit().await?;
     Ok(Some(reservation_id))
 }
+
+#[cfg(test)]
+mod tests {
+
+    use super::super::test_support::TestClock;
+    use super::super::*;
+    use super::*;
+    use crate::attachments::storage::upsert_inventory_available;
+    use crate::db::open_db;
+
+    #[tokio::test]
+    async fn quota_is_unique_by_hash_and_reservations_are_workspace_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = open_db(&temp.path().join("test.sqlite")).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let clock = TestClock::at("2026-07-01T00:00:00Z");
+        let first = reserve_upload(&mut conn, "workspace-a", hash, 8, 8, &clock)
+            .await
+            .unwrap();
+        assert!(first.is_some());
+        let replacement = reserve_upload(&mut conn, "workspace-a", hash, 8, 8, &clock)
+            .await
+            .unwrap();
+        assert!(replacement.is_some());
+        let other = reserve_upload(&mut conn, "workspace-b", hash, 8, 8, &clock)
+            .await
+            .unwrap();
+        assert!(other.is_some());
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM blob_upload_reservations")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn local_quota_boundary_is_hash_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = open_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let existing = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let new_hash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        upsert_inventory_available(&mut conn, existing, 8, "image/png")
+            .await
+            .unwrap();
+        let clock = TestClock::at("2026-07-01T00:00:00Z");
+        let policy = LifecyclePolicy {
+            quota_bytes: 8,
+            ..LifecyclePolicy::default()
+        };
+
+        ensure_local_capacity(&mut conn, &blob_dir, existing, 8, policy, &clock)
+            .await
+            .unwrap();
+        let error = ensure_local_capacity(&mut conn, &blob_dir, new_hash, 1, policy, &clock)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "error attachment-quota-exceeded");
+    }
+}

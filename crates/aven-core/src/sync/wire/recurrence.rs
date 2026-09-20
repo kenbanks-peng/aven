@@ -383,3 +383,72 @@ fn validate_local_time(value: &str) -> Result<NaiveTime> {
     NaiveTime::parse_from_str(value, "%H:%M:%S")
         .context("error invalid-sync-change recurrence-local-time")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{make_change_wire, test_workspace};
+    use super::super::validate_pushed_change;
+    use crate::change_log::{ChangePayload, op_type};
+    use crate::recurrence::{
+        RecurrenceDuePolicy, RecurrenceRule, RecurrenceSchedule, RecurrenceSeriesId,
+        derive_occurrence_identity,
+    };
+    use chrono::NaiveDate;
+
+    #[test]
+    fn recurrence_projection_rejects_nondeterministic_change_timestamp() {
+        let workspace = test_workspace();
+        let series_id: RecurrenceSeriesId = "AAAAAAAAAAAAAAAA".parse().unwrap();
+        let schedule = RecurrenceSchedule::new(
+            RecurrenceRule::daily(),
+            "UTC".parse().unwrap(),
+            "2026-07-20".parse().unwrap(),
+            None,
+            RecurrenceDuePolicy::SameDay,
+        );
+        let slot_on: NaiveDate = "2026-07-20".parse().unwrap();
+        let identity =
+            derive_occurrence_identity(&workspace.id, &series_id, &schedule, slot_on).unwrap();
+        let payload = ChangePayload::workspace(&workspace)
+            .set("series_id", series_id.as_str())
+            .set("slot_on", slot_on.to_string())
+            .set("task_id", identity.task_id.as_str())
+            .set("projected_at", &identity.occurrence_link.projected_at)
+            .set("task_change_id", &identity.task_change_id)
+            .set("occurrence_change_id", &identity.occurrence_change_id)
+            .set(
+                "task_field_version_seed",
+                &identity.field_version_seeds.task,
+            )
+            .set(
+                "occurrence_field_version_seed",
+                &identity.field_version_seeds.occurrence,
+            )
+            .set("frequency", "daily")
+            .set("interval", 1)
+            .set("weekdays", "")
+            .set("timezone", "UTC")
+            .set("start_on", "2026-07-20")
+            .set("available_local_time", "")
+            .set("due_policy", "same_day")
+            .into_value();
+        let mut change = make_change_wire(
+            op_type::PROJECT_RECURRENCE_OCCURRENCE,
+            "recurrence_series",
+            series_id.as_str(),
+            payload,
+        );
+        change.change_id = identity.occurrence_change_id;
+        change.field = Some("projection".to_string());
+        change.created_at = identity.occurrence_link.projected_at;
+        validate_pushed_change(&change).unwrap();
+
+        change.created_at = "2026-07-20T00:00:01Z".to_string();
+        assert!(
+            validate_pushed_change(&change)
+                .unwrap_err()
+                .to_string()
+                .contains("recurrence-deterministic-mismatch")
+        );
+    }
+}

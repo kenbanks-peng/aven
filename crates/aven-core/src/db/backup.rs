@@ -225,3 +225,129 @@ fn prune_migration_backups(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Database, begin_immediate, get_meta, set_meta};
+    use super::*;
+
+    #[tokio::test]
+    async fn in_process_backup_captures_wal_and_replaces_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.sqlite");
+        let backup = temp.path().join("backup.sqlite");
+        let database = Database::open(&source).await.unwrap();
+        let mut writer = database.acquire_writer().await.unwrap();
+        let mut tx = begin_immediate(&mut writer).await.unwrap();
+        set_meta(&mut tx, "backup-test", "first").await.unwrap();
+        tx.commit().await.unwrap();
+        drop(writer);
+        assert!(wal_path(&source).exists());
+
+        fs::write(&backup, b"existing destination").unwrap();
+        backup_database(&source, &backup).await.unwrap();
+        let mut backup_conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&backup)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_meta(&mut backup_conn, "backup-test")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("first")
+        );
+        drop(backup_conn);
+
+        let mut writer = database.acquire_writer().await.unwrap();
+        set_meta(&mut writer, "backup-test", "second")
+            .await
+            .unwrap();
+        drop(writer);
+        backup_database(&source, &backup).await.unwrap();
+        let mut backup_conn = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&backup)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_meta(&mut backup_conn, "backup-test")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("second")
+        );
+    }
+
+    #[tokio::test]
+    async fn in_process_backup_rejects_missing_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let backup = temp.path().join("backup.sqlite");
+        let error = backup_database(&temp.path().join("missing.sqlite"), &backup)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("could not open source"));
+        assert!(!backup.exists());
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_sidecars_and_preserves_safety_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.sqlite");
+        let source = temp.path().join("source.sqlite");
+        let target_database = Database::open(&target).await.unwrap();
+        let source_database = Database::open(&source).await.unwrap();
+        let mut target_writer = target_database.acquire_writer().await.unwrap();
+        set_meta(&mut target_writer, "restore-test", "target")
+            .await
+            .unwrap();
+        drop(target_writer);
+        let mut source_writer = source_database.acquire_writer().await.unwrap();
+        set_meta(&mut source_writer, "restore-test", "source")
+            .await
+            .unwrap();
+        drop(source_writer);
+        target_database.pool.close().await;
+        source_database.pool.close().await;
+        fs::write(wal_path(&target), b"stale wal").unwrap();
+        fs::write(shm_path(&target), b"stale shm").unwrap();
+
+        let safety = restore_database_file(&target, &source).await.unwrap();
+        assert!(!wal_path(&target).exists());
+        assert!(!shm_path(&target).exists());
+
+        let mut restored = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&target)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_meta(&mut restored, "restore-test")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("source")
+        );
+        let mut preserved = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new()
+                .filename(&safety)
+                .read_only(true),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get_meta(&mut preserved, "restore-test")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("target")
+        );
+    }
+}

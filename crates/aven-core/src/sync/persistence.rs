@@ -5,9 +5,6 @@ mod changes;
 mod client;
 mod server;
 mod status;
-#[cfg(test)]
-mod tests;
-
 use blobs::{
     apply_server_blob_reference, collect_attachment_liveness_hashes,
     ensure_attachment_blobs_admitted, prepare_server_blobs,
@@ -17,8 +14,6 @@ use changes::{
     load_existing_change_ids, reconcile_acknowledged_epic_memberships, reconcile_epic_change,
     update_change_server_seq, update_change_server_seqs_if_missing, verify_existing_change,
 };
-#[cfg(test)]
-use client::{apply_sync_response, bound_push_request};
 use server::assign_server_sequences;
 use status::sync_persistence_status;
 

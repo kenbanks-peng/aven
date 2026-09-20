@@ -4,8 +4,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use sqlx::SqliteConnection;
 
-use super::super::wire::{AttachmentAddPayload, ChangeWire};
 use crate::change_log::op_type;
+use crate::sync::wire::{AttachmentAddPayload, ChangeWire};
 
 pub(super) async fn apply_server_blob_reference(
     conn: &mut SqliteConnection,
@@ -187,7 +187,7 @@ pub(super) async fn prepare_server_blobs(
 async fn validate_server_blob_before_writer(
     conn: &mut SqliteConnection,
     blob_dir: &Path,
-    contract: &super::super::wire::BlobUploadContract,
+    contract: &crate::sync::wire::BlobUploadContract,
 ) -> Result<()> {
     let Some(row) = crate::attachments::storage::blob_inventory_row(conn, &contract.sha256).await?
     else {
@@ -218,7 +218,7 @@ async fn validate_server_blob_before_writer(
 
 fn validate_server_blob_inventory(
     row: &crate::types::BlobInventoryRow,
-    contract: &super::super::wire::BlobUploadContract,
+    contract: &crate::sync::wire::BlobUploadContract,
 ) -> Result<()> {
     if !row.available {
         bail!("error attachment-blob-missing");
@@ -272,4 +272,306 @@ pub(super) async fn ensure_attachment_blobs_admitted(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::io::Cursor;
+    use std::time::Duration;
+
+    use image::{DynamicImage, ImageFormat};
+
+    use super::super::{ServerSyncPage, assign_server_sequences};
+    use super::*;
+    use crate::attachments::storage::{object_path, sha256_hex, upsert_inventory_available};
+    use crate::change_log::op_type;
+    use crate::db::Database;
+    use crate::sync::wire::{ChangeWire, SYNC_PROTOCOL_VERSION, SyncRequest};
+    use serde_json::json;
+
+    async fn corrupt_attachment_page() -> (
+        tempfile::TempDir,
+        Database,
+        std::path::PathBuf,
+        ServerSyncPage,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let database = Database::open(&temp.path().join("server.sqlite"))
+            .await
+            .unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let expected = b"expected";
+        let sha256 = sha256_hex(expected);
+        {
+            let mut conn = database.acquire_writer().await.unwrap();
+            upsert_inventory_available(&mut conn, &sha256, expected.len() as i64, "image/png")
+                .await
+                .unwrap();
+        }
+        let path = object_path(&blob_dir, &sha256).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"corrupt!").unwrap();
+        let change = ChangeWire {
+            change_id: "0123456789ABCDEF".to_string(),
+            client_id: "client-a".to_string(),
+            local_seq: 1,
+            entity_type: "task".to_string(),
+            entity_id: "0123456789ABCDE0".to_string(),
+            field: Some("attachments".to_string()),
+            op_type: op_type::ATTACHMENT_ADD.to_string(),
+            payload: json!({
+                "workspace_id": "0000000000000000",
+                "workspace_key": "default",
+                "attachment_id": "7KQ9A1X4MV2P8D6R",
+                "sha256": sha256,
+                "byte_size": expected.len(),
+                "media_type": "image/png",
+                "filename": "photo.png",
+                "alt_text": "photo",
+                "width": 1,
+                "height": 1,
+                "created_at": "2026-01-01T00:00:00Z"
+            }),
+            base_version: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            server_seq: None,
+        };
+        let page = ServerSyncPage {
+            request: SyncRequest {
+                protocol_version: Some(SYNC_PROTOCOL_VERSION),
+                client_id: "client-a".to_string(),
+                after: 0,
+                pull_limit: Some(100),
+                changes: vec![change],
+            },
+        };
+        (temp, database, blob_dir, page)
+    }
+
+    fn page_for_contract(contract: &crate::sync::wire::BlobUploadContract) -> ServerSyncPage {
+        let change = ChangeWire {
+            change_id: "0123456789ABCDEF".to_string(),
+            client_id: "client-a".to_string(),
+            local_seq: 1,
+            entity_type: "task".to_string(),
+            entity_id: "0123456789ABCDE0".to_string(),
+            field: Some("attachments".to_string()),
+            op_type: op_type::ATTACHMENT_ADD.to_string(),
+            payload: json!({
+                "workspace_id": contract.workspace_id,
+                "workspace_key": "default",
+                "attachment_id": "7KQ9A1X4MV2P8D6R",
+                "sha256": contract.sha256,
+                "byte_size": contract.byte_size,
+                "media_type": contract.media_type,
+                "filename": "photo.png",
+                "alt_text": "photo",
+                "width": contract.width,
+                "height": contract.height,
+                "created_at": "2026-01-01T00:00:00Z"
+            }),
+            base_version: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            server_seq: None,
+        };
+        ServerSyncPage {
+            request: SyncRequest {
+                protocol_version: Some(SYNC_PROTOCOL_VERSION),
+                client_id: "client-a".to_string(),
+                after: 0,
+                pull_limit: Some(100),
+                changes: vec![change],
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_server_blob_is_rejected_before_writer_acquisition() {
+        let (_temp, database, blob_dir, page) = corrupt_attachment_page().await;
+        let writer = database.acquire_writer().await.unwrap();
+        let task = tokio::spawn({
+            let database = database.clone();
+            async move {
+                database
+                    .persist_server_sync_page_with_blobs(page, &blob_dir)
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            task.is_finished(),
+            "corrupt content validation should not wait for the writer gate"
+        );
+        drop(writer);
+        let error = task.await.unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("attachment-blob-content-mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_is_rechecked_after_blob_preparation() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = Database::open(&temp.path().join("server.sqlite"))
+            .await
+            .unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let mut encoded = Cursor::new(Vec::new());
+        DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut encoded, ImageFormat::Png)
+            .unwrap();
+        let bytes = encoded.into_inner();
+        let contract = crate::sync::wire::BlobUploadContract {
+            workspace_id: "0000000000000000".to_string(),
+            sha256: sha256_hex(&bytes),
+            byte_size: bytes.len() as i64,
+            media_type: "image/png".to_string(),
+            width: 1,
+            height: 1,
+        };
+        database
+            .store_server_blob(
+                &blob_dir,
+                crate::attachments::lifecycle::LifecyclePolicy::default(),
+                &contract,
+                bytes,
+            )
+            .await
+            .unwrap();
+        let page = page_for_contract(&contract);
+        {
+            let mut reader = database.acquire_reader().await.unwrap();
+            prepare_server_blobs(&mut reader, &blob_dir, &page.request.changes)
+                .await
+                .unwrap();
+        }
+        {
+            let mut writer = database.acquire_writer().await.unwrap();
+            sqlx::query("DELETE FROM blob_upload_reservations")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+        }
+        let mut writer = database.acquire_writer().await.unwrap();
+        let error = assign_server_sequences(&mut writer, page.request.changes, Some(&blob_dir))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("attachment-blob-unreserved"));
+        let accepted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM changes")
+            .fetch_one(&mut *writer)
+            .await
+            .unwrap();
+        assert_eq!(accepted, 0);
+    }
+
+    #[tokio::test]
+    async fn server_task_deletion_operations_reconcile_attachment_liveness() {
+        let (_temp, mut conn) = crate::test_support::test_conn().await;
+        for (index, operation) in [op_type::SET_FIELD, op_type::RESOLVE_FIELD]
+            .into_iter()
+            .enumerate()
+        {
+            let task_id = format!("BBBBBBBBBBBBBBB{index}");
+            let attachment_id = format!("CCCCCCCCCCCCCCC{index}");
+            let sha256 = format!("{index:064x}");
+            upsert_inventory_available(&mut conn, &sha256, 1, "image/png")
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO blob_lifecycle(sha256, unreferenced_at) VALUES (?, NULL)")
+                .bind(&sha256)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO server_blob_references(
+                   workspace_id, attachment_id, task_id, sha256, byte_size, deleted
+                 ) VALUES ('0000000000000000', ?, ?, ?, 1, 0)",
+            )
+            .bind(attachment_id)
+            .bind(&task_id)
+            .bind(&sha256)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+
+            let deletion_change = |value: &str| ChangeWire {
+                change_id: format!("AAAAAAAAAAAAAA{index}{value}"),
+                client_id: "client".to_string(),
+                local_seq: 1,
+                entity_type: "task".to_string(),
+                entity_id: task_id.clone(),
+                field: Some("deleted".to_string()),
+                op_type: operation.to_string(),
+                payload: json!({
+                    "workspace_id": "0000000000000000",
+                    "workspace_key": "default",
+                    "value": value,
+                }),
+                base_version: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                server_seq: None,
+            };
+
+            let mut affected_hashes = HashSet::new();
+            apply_server_blob_reference(&mut conn, &deletion_change("1"), &mut affected_hashes)
+                .await
+                .unwrap();
+            let affected_hashes = affected_hashes.into_iter().collect::<Vec<_>>();
+            crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+                &mut conn,
+                &affected_hashes,
+                &crate::attachments::lifecycle::SystemClock,
+            )
+            .await
+            .unwrap();
+            let deleted: bool = sqlx::query_scalar(
+                "SELECT deleted FROM server_task_tombstones
+                 WHERE workspace_id = '0000000000000000' AND task_id = ?",
+            )
+            .bind(&task_id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            let unreferenced_at: Option<String> =
+                sqlx::query_scalar("SELECT unreferenced_at FROM blob_lifecycle WHERE sha256 = ?")
+                    .bind(&sha256)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .unwrap();
+            assert!(deleted, "{operation} must apply live-to-deleted state");
+            assert!(unreferenced_at.is_some());
+
+            let mut affected_hashes = HashSet::new();
+            apply_server_blob_reference(&mut conn, &deletion_change("0"), &mut affected_hashes)
+                .await
+                .unwrap();
+            let affected_hashes = affected_hashes.into_iter().collect::<Vec<_>>();
+            crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+                &mut conn,
+                &affected_hashes,
+                &crate::attachments::lifecycle::SystemClock,
+            )
+            .await
+            .unwrap();
+            let deleted: bool = sqlx::query_scalar(
+                "SELECT deleted FROM server_task_tombstones
+                 WHERE workspace_id = '0000000000000000' AND task_id = ?",
+            )
+            .bind(&task_id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            let unreferenced_at: Option<String> =
+                sqlx::query_scalar("SELECT unreferenced_at FROM blob_lifecycle WHERE sha256 = ?")
+                    .bind(&sha256)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .unwrap();
+            assert!(!deleted, "{operation} must apply deleted-to-live state");
+            assert_eq!(unreferenced_at, None);
+        }
+    }
 }

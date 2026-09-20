@@ -232,3 +232,27 @@ fn paint_heading(text: &str) -> String {
 fn paint(text: &str, style: Style) -> String {
     format!("{}{}{}", style.render(), text, style.render_reset())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_rows_align_to_each_section_longest_command() {
+        let commands = ["add", "command-name-that-exceeds-fixed-width"];
+        let width = help_row_width(commands);
+        let mut rendered = String::new();
+
+        for command in commands {
+            render_row(&mut rendered, command, command, "description", width);
+        }
+
+        let rows = rendered.lines().collect::<Vec<_>>();
+        let description_columns = rows
+            .iter()
+            .map(|row| row.find("description").unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(description_columns[0], description_columns[1]);
+        assert!(rows[1].contains("command-name-that-exceeds-fixed-width  description"));
+    }
+}

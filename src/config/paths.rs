@@ -126,3 +126,135 @@ pub(crate) fn resolve_sync_server_from(
     }
     bail!("error sync-server-required hint=\"pass --server or configure sync.server_url\"")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_server_resolution_uses_flag_environment_then_config() {
+        let mut config = AppConfig::default();
+        config.sync.server_url = Some("https://configured.example.test".to_string());
+
+        assert_eq!(
+            resolve_sync_server_from(
+                Some("https://explicit.example.test"),
+                Some("https://environment.example.test"),
+                &config,
+            )
+            .unwrap(),
+            "https://explicit.example.test"
+        );
+        assert_eq!(
+            resolve_sync_server_from(None, Some("https://environment.example.test"), &config)
+                .unwrap(),
+            "https://environment.example.test"
+        );
+        assert_eq!(
+            resolve_sync_server_from(None, None, &config).unwrap(),
+            "https://configured.example.test"
+        );
+    }
+
+    #[test]
+    fn tilde_paths_expand_from_home() {
+        let home = dirs::home_dir().expect("home directory");
+
+        assert_eq!(
+            expand_tilde(Path::new("~/work")).unwrap(),
+            home.join("work")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("~someone/work")).unwrap(),
+            PathBuf::from("~someone/work")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("relative/work")).unwrap(),
+            PathBuf::from("relative/work")
+        );
+    }
+
+    #[test]
+    fn debug_database_resolution_requires_an_explicit_path() {
+        let config = AppConfig::default();
+        let error = resolve_db_path_from(None, None, None, &config, true).unwrap_err();
+
+        assert!(format!("{error:#}").contains("debug-database-required"));
+    }
+
+    #[test]
+    fn debug_database_resolution_uses_dev_environment_path() {
+        let config = AppConfig::default();
+        let dev_db = PathBuf::from("/tmp/aven-dev.sqlite");
+
+        assert_eq!(
+            resolve_db_path_from(None, None, Some(dev_db.clone()), &config, true).unwrap(),
+            dev_db
+        );
+    }
+
+    #[test]
+    fn debug_database_resolution_prefers_dev_environment_path() {
+        let config = AppConfig::default();
+        let dev_db = PathBuf::from("/tmp/aven-dev.sqlite");
+        let env_db = PathBuf::from("/tmp/aven-env.sqlite");
+
+        assert_eq!(
+            resolve_db_path_from(None, Some(env_db), Some(dev_db.clone()), &config, true,).unwrap(),
+            dev_db
+        );
+    }
+
+    #[test]
+    fn database_flag_overrides_debug_environment_path() {
+        let config = AppConfig::default();
+        let dev_db = Some(PathBuf::from("/tmp/aven-dev.sqlite"));
+        let flag_db = PathBuf::from("/tmp/aven-flag.sqlite");
+
+        assert_eq!(
+            resolve_db_path_from(Some(flag_db.clone()), None, dev_db, &config, true).unwrap(),
+            flag_db
+        );
+    }
+
+    #[test]
+    fn release_database_resolution_ignores_dev_environment_path() {
+        let mut config = AppConfig::default();
+        config.local.db_path = Some(PathBuf::from("/tmp/configured.sqlite"));
+
+        assert_eq!(
+            resolve_db_path_from(
+                None,
+                None,
+                Some(PathBuf::from("/tmp/aven-dev.sqlite")),
+                &config,
+                false,
+            )
+            .unwrap(),
+            PathBuf::from("/tmp/configured.sqlite")
+        );
+    }
+
+    #[test]
+    fn resolves_blob_dir_from_db_path_and_config() {
+        let db_path = PathBuf::from("/tmp/aven/db.sqlite");
+        let config = AppConfig::default();
+        assert_eq!(
+            resolve_blob_dir(&db_path, &config).unwrap(),
+            PathBuf::from("/tmp/aven/db.sqlite.blobs")
+        );
+
+        let mut config = AppConfig::default();
+        config.local.blob_dir = Some(PathBuf::from("blobs"));
+        assert_eq!(
+            resolve_blob_dir(&db_path, &config).unwrap(),
+            PathBuf::from("/tmp/aven/blobs")
+        );
+
+        config.local.blob_dir = Some(PathBuf::from("/var/aven/blobs"));
+        assert_eq!(
+            resolve_blob_dir(&db_path, &config).unwrap(),
+            PathBuf::from("/var/aven/blobs")
+        );
+    }
+}

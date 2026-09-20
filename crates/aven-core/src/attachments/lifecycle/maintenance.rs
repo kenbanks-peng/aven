@@ -384,3 +384,145 @@ pub fn prune_preview_cache(blob_dir: &Path, quota: u64) -> Result<ByteCount> {
     }
     Ok(removed)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::Duration;
+
+    use sqlx::Connection as _;
+    use sqlx::SqliteConnection;
+    use sqlx::sqlite::SqliteConnectOptions;
+
+    use super::super::test_support::{TestClock, insert_attachment, insert_task};
+    use super::super::*;
+    use super::*;
+    use crate::attachments::storage::{object_path, upsert_inventory_available};
+    use crate::db::{begin_immediate, open_db};
+
+    #[tokio::test]
+    async fn concurrent_attach_wins_prune_recheck() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = open_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let hash = "abababababababababababababababababababababababababababababababab";
+        upsert_inventory_available(&mut conn, hash, 4, "image/png")
+            .await
+            .unwrap();
+        insert_task(&mut conn, "0000000000000003").await;
+        let path = object_path(&blob_dir, hash).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"blob").unwrap();
+        let clock = TestClock::at("2026-07-01T00:00:00Z");
+        reconcile_liveness(&mut conn, &clock).await.unwrap();
+        clock.advance(chrono::Duration::days(8));
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .busy_timeout(Duration::from_secs(5));
+        let prune_conn = SqliteConnection::connect_with(&options).await.unwrap();
+
+        let mut tx = begin_immediate(&mut conn).await.unwrap();
+        insert_attachment(&mut tx, "0000000000000013", "0000000000000003", hash, false).await;
+        let prune_dir = blob_dir.clone();
+        let prune_clock = clock.clone();
+        let pruning = tokio::spawn(async move {
+            let mut prune_conn = prune_conn;
+            prune(
+                &mut prune_conn,
+                &prune_dir,
+                LifecyclePolicy::default(),
+                true,
+                &prune_clock,
+            )
+            .await
+            .unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tx.commit().await.unwrap();
+
+        let summary = pruning.await.unwrap();
+        assert_eq!(summary.pruned.count, 0);
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn interrupted_atomic_create_object_is_reconciled_after_grace() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = open_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let hash = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+        let path = object_path(&blob_dir, hash).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"orphan").unwrap();
+        let clock = TestClock::at("2030-07-01T00:00:00Z");
+        let policy = LifecyclePolicy {
+            grace: Duration::ZERO,
+            ..LifecyclePolicy::default()
+        };
+
+        prune(&mut conn, &blob_dir, policy, true, &clock)
+            .await
+            .unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn orphan_traversal_obeys_limit_and_resumes_between_steps() {
+        let temp = tempfile::tempdir().unwrap();
+        let pool = open_db(&temp.path().join("test.sqlite")).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        for digit in ['6', '7', '8', '9', 'a'] {
+            let hash = digit.to_string().repeat(64);
+            let path = object_path(&blob_dir, &hash).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"orphan").unwrap();
+        }
+        let clock = TestClock::at("2030-07-01T00:00:00Z");
+        let policy = LifecyclePolicy {
+            grace: Duration::ZERO,
+            maintenance_limit: 2,
+            ..LifecyclePolicy::default()
+        };
+
+        prune(&mut conn, &blob_dir, policy, true, &clock)
+            .await
+            .unwrap();
+        let after_one = fs::read_dir(staging_dir(&blob_dir)).unwrap().count();
+        assert!(after_one >= 3);
+
+        for _ in 0..4 {
+            prune(&mut conn, &blob_dir, policy, true, &clock)
+                .await
+                .unwrap();
+        }
+        assert_eq!(fs::read_dir(staging_dir(&blob_dir)).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn interrupted_trash_move_restores_available_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("test.sqlite");
+        let pool = open_db(&db_path).await.unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        let blob_dir = temp.path().join("blobs");
+        let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        upsert_inventory_available(&mut conn, hash, 4, "image/png")
+            .await
+            .unwrap();
+        let source = object_path(&blob_dir, hash).unwrap();
+        let trash = trash_dir(&blob_dir).join(hash);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(trash.parent().unwrap()).unwrap();
+        fs::write(&source, b"blob").unwrap();
+        fs::rename(&source, &trash).unwrap();
+
+        reconcile_trash(&mut conn, &blob_dir).await.unwrap();
+        assert!(source.exists());
+        assert!(!trash.exists());
+    }
+}

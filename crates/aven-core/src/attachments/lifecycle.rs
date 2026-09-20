@@ -12,7 +12,7 @@ mod maintenance;
 mod quota;
 mod report;
 #[cfg(test)]
-mod tests;
+mod test_support;
 
 pub const DEFAULT_LOCAL_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const DEFAULT_ORIGINAL_QUOTA_BYTES: i64 = 10 * 1024 * 1024 * 1024;
@@ -96,8 +96,8 @@ fn staging_dir(blob_dir: &Path) -> PathBuf {
 pub use leases::{acquire_lease, release_lease};
 pub use liveness::reconcile_liveness;
 pub(crate) use liveness::reconcile_liveness_for_hashes_in_transaction;
-pub use maintenance::{prune, prune_preview_cache};
 #[cfg(test)]
-pub(crate) use maintenance::{reconcile_missing_objects, reconcile_trash};
+pub(crate) use maintenance::reconcile_missing_objects;
+pub use maintenance::{prune, prune_preview_cache};
 pub use quota::{ensure_local_capacity, release_reservation, reserve_upload};
 pub use report::lifecycle_report;

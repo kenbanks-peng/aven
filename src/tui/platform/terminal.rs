@@ -252,3 +252,102 @@ impl TerminalTransition for SystemTerminalTransition {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+
+    use anyhow::Result;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeEditorTransition {
+        suspended: usize,
+        restored: usize,
+    }
+
+    impl TerminalTransition for FakeEditorTransition {
+        fn suspend(&mut self) -> Result<()> {
+            self.suspended += 1;
+            Ok(())
+        }
+
+        fn restore(&mut self) -> Result<()> {
+            self.restored += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn external_editor_operation_restores_terminal_after_success_and_failure() {
+        for result in [Ok("edited"), Err(anyhow::anyhow!("editor failed"))] {
+            let mut transition = FakeEditorTransition::default();
+            let failed = result.is_err();
+            let actual = run_while_terminal_suspended(&mut transition, || result);
+
+            assert_eq!(actual.is_err(), failed);
+            assert_eq!(transition.suspended, 1);
+            assert_eq!(transition.restored, 1);
+        }
+    }
+
+    #[test]
+    fn kitty_keyboard_enhancement_pushes_and_pops_state() {
+        let mut state = KeyboardEnhancementState::default();
+        let mut output = Vec::new();
+
+        state
+            .enable(KeyboardEnhancementMode::Kitty, &mut output)
+            .unwrap();
+        assert_eq!(state.mode, Some(KeyboardEnhancementMode::Kitty));
+        state.disable(&mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[>1u\x1b[<1u");
+        assert_eq!(state.mode, None);
+    }
+
+    #[test]
+    fn failed_restore_keeps_keyboard_state_available_for_retry() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut state = KeyboardEnhancementState::default();
+        let mut output = Vec::new();
+        state
+            .enable(KeyboardEnhancementMode::Kitty, &mut output)
+            .unwrap();
+
+        assert!(state.disable(&mut FailingWriter).is_err());
+        assert_eq!(state.mode, Some(KeyboardEnhancementMode::Kitty));
+        state.disable(&mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[>1u\x1b[<1u");
+        assert_eq!(state.mode, None);
+    }
+
+    #[test]
+    fn modify_other_keys_enhancement_restores_terminal_mode() {
+        let mut state = KeyboardEnhancementState::default();
+        let mut output = Vec::new();
+
+        state
+            .enable(KeyboardEnhancementMode::ModifyOtherKeys, &mut output)
+            .unwrap();
+        assert_eq!(state.mode, Some(KeyboardEnhancementMode::ModifyOtherKeys));
+        state.disable(&mut output).unwrap();
+        state.disable(&mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[>4;2m\x1b[>4m");
+        assert_eq!(state.mode, None);
+    }
+}

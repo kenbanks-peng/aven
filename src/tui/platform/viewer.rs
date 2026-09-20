@@ -120,3 +120,63 @@ pub(crate) fn open_url_in_default_browser(url: &str) -> Result<()> {
 pub(crate) fn browser_url_for_test() -> Option<String> {
     TEST_BROWSER_URL.with(|opened| opened.borrow().clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_platform_default_image_viewer_commands() {
+        let path = Path::new("/tmp/attachment image.png");
+        assert_eq!(
+            default_image_viewer_command(OperatingSystem::Macos, path),
+            ViewerCommand {
+                program: "open",
+                args: vec![path.as_os_str().to_owned()],
+            }
+        );
+        assert_eq!(
+            default_image_viewer_command(OperatingSystem::Linux, path),
+            ViewerCommand {
+                program: "xdg-open",
+                args: vec![path.as_os_str().to_owned()],
+            }
+        );
+        assert_eq!(
+            default_image_viewer_command(OperatingSystem::Windows, path),
+            ViewerCommand {
+                program: "rundll32.exe",
+                args: vec![
+                    "url.dll,FileProtocolHandler".into(),
+                    path.as_os_str().to_owned(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn selects_platform_default_browser_commands() {
+        let url = "https://aven.raine.dev/recurring-tasks/";
+        assert_eq!(
+            default_browser_command(OperatingSystem::Macos, url),
+            ViewerCommand {
+                program: "open",
+                args: vec![url.into()],
+            }
+        );
+        assert_eq!(
+            default_browser_command(OperatingSystem::Linux, url),
+            ViewerCommand {
+                program: "xdg-open",
+                args: vec![url.into()],
+            }
+        );
+        assert_eq!(
+            default_browser_command(OperatingSystem::Windows, url),
+            ViewerCommand {
+                program: "rundll32.exe",
+                args: vec!["url.dll,FileProtocolHandler".into(), url.into()],
+            }
+        );
+    }
+}

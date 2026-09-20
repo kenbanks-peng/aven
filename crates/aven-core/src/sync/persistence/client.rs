@@ -138,14 +138,14 @@ impl Database {
             .protocol_version
             .context("missing selected protocol")?;
         super::super::protocol::validate_behavior_protocol(protocol)?;
-        let envelope = super::super::wire::validate_request_at_protocol(&page.request, protocol)?;
+        let envelope = crate::sync::wire::validate_request_at_protocol(&page.request, protocol)?;
         let request_change_ids = page
             .request
             .changes
             .iter()
             .map(|change| change.change_id.clone())
             .collect::<Vec<_>>();
-        super::super::wire::validate_response_at_protocol(
+        crate::sync::wire::validate_response_at_protocol(
             protocol,
             envelope.after,
             envelope.pull_limit,
@@ -361,4 +361,214 @@ pub(super) async fn apply_sync_response(
     .await?;
     tx.commit().await?;
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::ApplySyncPage;
+    use super::*;
+    use crate::change_log::op_type;
+    use crate::db::set_meta;
+    use crate::sync::wire::{
+        ChangeWire, MAX_PUSH_BATCH, MAX_SYNC_REQUEST_BYTES, PushAck, SYNC_PROTOCOL_VERSION,
+        SyncRequest, SyncResponse,
+    };
+    use serde_json::json;
+
+    fn budget_request() -> SyncRequest {
+        SyncRequest {
+            protocol_version: Some(SYNC_PROTOCOL_VERSION),
+            client_id: "budget-client\"\n".to_string(),
+            after: i64::MAX,
+            pull_limit: Some(crate::sync::wire::MAX_PULL_BATCH),
+            changes: (0..3)
+                .map(|index| ChangeWire {
+                    change_id: format!("AAAAAAAAAAAAAAA{index}"),
+                    client_id: "budget-client".to_string(),
+                    local_seq: index + 1,
+                    entity_type: "task".to_string(),
+                    entity_id: "BBBBBBBBBBBBBBB0".to_string(),
+                    field: Some("description".to_string()),
+                    op_type: op_type::SET_FIELD.to_string(),
+                    payload: json!({
+                        "workspace_id": "0000000000000000",
+                        "workspace_key": "default",
+                        "value": "quoted \"text\"\n雪".repeat(8),
+                    }),
+                    base_version: None,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    server_seq: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn push_byte_budget_selects_exact_ordered_prefix() {
+        let request = budget_request();
+        for change in &request.changes {
+            crate::sync::wire::validate_pushed_change(change).unwrap();
+        }
+        let mut prefix = request.clone();
+        prefix.changes.truncate(2);
+        let limit = serde_json::to_vec(&prefix).unwrap().len();
+        let selected = bound_push_request(request.clone(), limit).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&selected).unwrap(),
+            serde_json::to_vec(&prefix).unwrap()
+        );
+        let selected = bound_push_request(request, limit - 1).unwrap();
+        assert_eq!(selected.changes.len(), 1);
+        assert_eq!(selected.changes[0].local_seq, 1);
+        assert!(serde_json::to_vec(&selected).unwrap().len() < limit);
+    }
+
+    #[test]
+    fn push_byte_budget_rejects_unfit_first_change_and_envelope() {
+        let mut request = budget_request();
+        request.changes.truncate(1);
+        let limit = serde_json::to_vec(&request).unwrap().len();
+        assert_eq!(
+            bound_push_request(request.clone(), limit)
+                .unwrap()
+                .changes
+                .len(),
+            1
+        );
+        assert!(
+            bound_push_request(request.clone(), limit - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("sync-change-exceeds-request-budget")
+        );
+        request.changes.clear();
+        let limit = serde_json::to_vec(&request).unwrap().len();
+        assert!(
+            bound_push_request(request.clone(), limit)
+                .unwrap()
+                .changes
+                .is_empty()
+        );
+        assert!(
+            bound_push_request(request, limit - 1)
+                .unwrap_err()
+                .to_string()
+                .contains("sync-request-envelope-too-large")
+        );
+    }
+
+    #[test]
+    fn push_byte_budget_does_not_skip_a_change_that_does_not_fit() {
+        let mut request = budget_request();
+        let mut prefix = request.clone();
+        prefix.changes.truncate(2);
+        let limit = serde_json::to_vec(&prefix).unwrap().len();
+        request.changes[1].payload["value"] = json!("middle".repeat(limit));
+        let selected = bound_push_request(request, limit).unwrap();
+        assert_eq!(selected.changes.len(), 1);
+        assert_eq!(selected.changes[0].local_seq, 1);
+    }
+
+    #[test]
+    fn push_byte_budget_preserves_count_bound() {
+        let mut request = budget_request();
+        request.changes = vec![request.changes[0].clone(); MAX_PUSH_BATCH + 1];
+        let selected = bound_push_request(request, MAX_SYNC_REQUEST_BYTES).unwrap();
+        assert_eq!(selected.changes.len(), MAX_PUSH_BATCH);
+    }
+
+    #[tokio::test]
+    async fn related_comparison_observes_push_acknowledgement_first() {
+        let (_temp, mut conn) = crate::test_support::test_conn().await;
+        let workspace = crate::workspaces::Workspace::default();
+        let project = crate::projects::create_project(&mut conn, &workspace, "related-ack")
+            .await
+            .unwrap();
+        let task_id: crate::ids::TaskId = "AAAA000000000001".parse().unwrap();
+        let related_task_id: crate::ids::TaskId = "BBBB000000000002".parse().unwrap();
+        for id in [&task_id, &related_task_id] {
+            sqlx::query(
+                "INSERT INTO tasks(id, workspace_id, title, description, project_id, status, priority, created_at, updated_at)
+                 VALUES (?, ?, 'task', '', ?, 'todo', 'none', 't', 't')",
+            )
+            .bind(id)
+            .bind(&workspace.id)
+            .bind(&project.id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        }
+        let local = crate::operations::set_task_related_link_in_transaction(
+            &mut conn,
+            &workspace,
+            &task_id,
+            &related_task_id,
+            true,
+        )
+        .await
+        .unwrap();
+        let local_change_id = local.change_id.unwrap();
+        set_meta(&mut conn, "sync_cursor", "3").await.unwrap();
+
+        let remote = ChangeWire {
+            change_id: "CCCC000000000003".to_string(),
+            client_id: "remote".to_string(),
+            local_seq: 1,
+            entity_type: "task".to_string(),
+            entity_id: task_id.to_string(),
+            field: Some("related".to_string()),
+            op_type: op_type::RELATED_REMOVE.to_string(),
+            payload: json!({
+                "workspace_id": workspace.id,
+                "workspace_key": workspace.key,
+                "related_task_id": related_task_id,
+            }),
+            base_version: None,
+            created_at: "2026-08-22T00:00:00Z".to_string(),
+            server_seq: Some(4),
+        };
+        let page = ApplySyncPage {
+            request: SyncRequest {
+                protocol_version: Some(SYNC_PROTOCOL_VERSION),
+                client_id: "local".to_string(),
+                after: 3,
+                pull_limit: Some(100),
+                changes: Vec::new(),
+            },
+            response: SyncResponse {
+                protocol_version: SYNC_PROTOCOL_VERSION,
+                cursor: 4,
+                has_more: false,
+                push_acks: vec![PushAck {
+                    change_id: local_change_id.clone(),
+                    server_seq: 5,
+                }],
+                changes: vec![remote],
+            },
+            attempted_at: "2026-08-22T00:00:01Z".to_string(),
+            previous_pushed: 0,
+            previous_pulled: 0,
+        };
+
+        apply_sync_response(&mut conn, page, None).await.unwrap();
+
+        let state: (i64, String) = sqlx::query_as(
+            "SELECT linked, last_change_id FROM task_related_links
+             WHERE workspace_id = ? AND task_a_id = ? AND task_b_id = ?",
+        )
+        .bind(&workspace.id)
+        .bind(&task_id)
+        .bind(&related_task_id)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(state, (1, local_change_id.clone()));
+        let acknowledged: Option<i64> =
+            sqlx::query_scalar("SELECT server_seq FROM changes WHERE change_id = ?")
+                .bind(local_change_id)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        assert_eq!(acknowledged, Some(5));
+    }
 }

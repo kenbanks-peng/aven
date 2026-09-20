@@ -357,3 +357,213 @@ pub(super) fn validate_recurrence_metadata(change: &ChangeWire) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::{make_change_wire, test_workspace};
+    use super::super::validate_pushed_change;
+    use crate::change_log::{ChangePayload, op_type};
+
+    #[test]
+    fn constructed_create_task_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("title", "test task")
+            .set("description", "a description")
+            .set("project_id", "1111111111111111")
+            .set("project_key", "app")
+            .set("project_name", "App")
+            .set("project_prefix", "APP")
+            .set("status", "inbox")
+            .set("priority", "none")
+            .set("created_at", "2026-06-01T00:00:00Z")
+            .into_value();
+        let change = make_change_wire(op_type::CREATE_TASK, "task", "BBBBBBBBBBBBBBBB", payload);
+        validate_pushed_change(&change)
+            .expect("create_task payload built with ChangePayload should be wire-valid");
+    }
+
+    #[test]
+    fn constructed_create_project_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("key", "app")
+            .set("name", "App")
+            .set("prefix", "APP")
+            .set("created_at", "2026-06-01T00:00:00Z")
+            .into_value();
+        let change = make_change_wire(
+            op_type::CREATE_PROJECT,
+            "project",
+            "1111111111111111",
+            payload,
+        );
+        validate_pushed_change(&change)
+            .expect("create_project payload built with ChangePayload should be wire-valid");
+    }
+
+    #[test]
+    fn project_changes_reject_invalid_project_ids() {
+        let ws = test_workspace();
+        let project_payload = ChangePayload::workspace(&ws)
+            .set("key", "app")
+            .set("name", "App")
+            .set("prefix", "APP")
+            .set("created_at", "2026-06-01T00:00:00Z")
+            .into_value();
+        let create_project = make_change_wire(
+            op_type::CREATE_PROJECT,
+            "project",
+            "invalid",
+            project_payload,
+        );
+        assert_eq!(
+            validate_pushed_change(&create_project)
+                .unwrap_err()
+                .to_string(),
+            "error invalid-sync-change entity_id invalid-id"
+        );
+
+        let task_payload = ChangePayload::workspace(&ws)
+            .set("title", "test task")
+            .set("project_id", "invalid")
+            .set("project_key", "app")
+            .set("project_name", "App")
+            .set("project_prefix", "APP")
+            .set("created_at", "2026-06-01T00:00:00Z")
+            .into_value();
+        let create_task = make_change_wire(
+            op_type::CREATE_TASK,
+            "task",
+            "BBBBBBBBBBBBBBBB",
+            task_payload,
+        );
+        assert_eq!(
+            validate_pushed_change(&create_task)
+                .unwrap_err()
+                .to_string(),
+            "error invalid-sync-change project_id invalid-id"
+        );
+
+        let field_payload = ChangePayload::workspace(&ws)
+            .set("value", "invalid")
+            .set("project_id", "invalid")
+            .set("project_key", "app")
+            .set("project_name", "App")
+            .set("project_prefix", "APP")
+            .into_value();
+        let mut set_field = make_change_wire(
+            op_type::SET_FIELD,
+            "task",
+            "BBBBBBBBBBBBBBBB",
+            field_payload,
+        );
+        set_field.field = Some("project".to_string());
+        assert_eq!(
+            validate_pushed_change(&set_field).unwrap_err().to_string(),
+            "error invalid-sync-change project_id invalid-id"
+        );
+    }
+
+    #[test]
+    fn constructed_label_add_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("label", "bug")
+            .into_value();
+        let mut change = make_change_wire(op_type::LABEL_ADD, "task", "BBBBBBBBBBBBBBBB", payload);
+        change.field = Some("labels".to_string());
+        validate_pushed_change(&change)
+            .expect("label_add payload built with ChangePayload should be wire-valid");
+    }
+
+    #[test]
+    fn constructed_label_administration_payloads_pass_wire_validation() {
+        let ws = test_workspace();
+        let rename = make_change_wire(
+            op_type::SET_LABEL_NAME,
+            "label",
+            "old",
+            ChangePayload::workspace(&ws)
+                .set("name", "old")
+                .set("new_name", "new")
+                .set("renamed_at", "2026-06-01T00:00:00Z")
+                .into_value(),
+        );
+        validate_pushed_change(&rename).unwrap();
+
+        let restore = make_change_wire(
+            op_type::LABEL_RESTORE,
+            "label",
+            "new",
+            ChangePayload::workspace(&ws)
+                .set("name", "new")
+                .set("created_at", "2026-06-01T00:00:00Z")
+                .set("task_ids", ["BBBBBBBBBBBBBBBB"])
+                .set("series_ids", ["CCCCCCCCCCCCCCCC"])
+                .set("restored_at", "2026-06-01T00:00:01Z")
+                .into_value(),
+        );
+        validate_pushed_change(&restore).unwrap();
+    }
+
+    #[test]
+    fn constructed_dependency_add_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("depends_on_task_id", "CCCCCCCCCCCCCCCC")
+            .into_value();
+        let mut change =
+            make_change_wire(op_type::DEPENDENCY_ADD, "task", "BBBBBBBBBBBBBBBB", payload);
+        change.field = Some("dependencies".to_string());
+        validate_pushed_change(&change)
+            .expect("dependency_add payload built with ChangePayload should be wire-valid");
+    }
+
+    #[test]
+    fn related_payload_validation_requires_distinct_task_endpoints() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("related_task_id", "CCCCCCCCCCCCCCCC")
+            .into_value();
+        let mut change =
+            make_change_wire(op_type::RELATED_ADD, "task", "BBBBBBBBBBBBBBBB", payload);
+        change.field = Some("related".to_string());
+        validate_pushed_change(&change)
+            .expect("related_add payload built with ChangePayload should be wire-valid");
+
+        change.payload["related_task_id"] = serde_json::json!("BBBBBBBBBBBBBBBB");
+        assert_eq!(
+            validate_pushed_change(&change).unwrap_err().to_string(),
+            "error invalid-sync-change related-self"
+        );
+    }
+
+    #[test]
+    fn constructed_note_edit_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("note_id", "DDDDDDDDDDDDDDDD")
+            .set("body", "corrected note body")
+            .set("edited_at", "2026-06-01T01:00:00Z")
+            .into_value();
+        let mut change = make_change_wire(op_type::NOTE_EDIT, "task", "BBBBBBBBBBBBBBBB", payload);
+        change.field = Some("notes".to_string());
+        validate_pushed_change(&change)
+            .expect("note_edit payload built with ChangePayload should be wire-valid");
+    }
+
+    #[test]
+    fn constructed_note_add_payload_passes_wire_validation() {
+        let ws = test_workspace();
+        let payload = ChangePayload::workspace(&ws)
+            .set("note_id", "DDDDDDDDDDDDDDDD")
+            .set("body", "note body")
+            .set("created_at", "2026-06-01T00:00:00Z")
+            .into_value();
+        let mut change = make_change_wire(op_type::NOTE_ADD, "task", "BBBBBBBBBBBBBBBB", payload);
+        change.field = Some("notes".to_string());
+        validate_pushed_change(&change)
+            .expect("note_add payload built with ChangePayload should be wire-valid");
+    }
+}

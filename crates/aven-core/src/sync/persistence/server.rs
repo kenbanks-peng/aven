@@ -14,7 +14,7 @@ use crate::sync::wire::{ChangeRow, ChangeWire, PushAck};
 
 impl Database {
     pub async fn persist_server_sync_page(&self, page: ServerSyncPage) -> Result<ServerSyncResult> {
-        self.persist_server_sync_page_inner(page, None, super::super::wire::SYNC_PROTOCOL_VERSION)
+        self.persist_server_sync_page_inner(page, None, crate::sync::wire::SYNC_PROTOCOL_VERSION)
             .await
     }
 
@@ -26,7 +26,7 @@ impl Database {
         self.persist_server_sync_page_inner(
             page,
             Some(blob_dir),
-            super::super::wire::SYNC_PROTOCOL_VERSION,
+            crate::sync::wire::SYNC_PROTOCOL_VERSION,
         )
         .await
     }
@@ -48,10 +48,10 @@ impl Database {
         active_protocol: u32,
     ) -> Result<ServerSyncResult> {
         let envelope =
-            super::super::wire::validate_request_at_protocol(&page.request, active_protocol)?;
+            crate::sync::wire::validate_request_at_protocol(&page.request, active_protocol)?;
         for change in &page.request.changes {
             super::super::protocol::validate_change(active_protocol, change)?;
-            super::super::wire::validate_local_change_shape(change)?;
+            crate::sync::wire::validate_local_change_shape(change)?;
         }
         if blob_dir.is_none()
             && page

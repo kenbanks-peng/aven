@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub(crate) const DEFAULT_CUSTOM_COMMAND_TIMEOUT_SECONDS: u64 = 300;
+pub(super) const MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS: u64 = 86_400;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CustomTuiCommandConfig {
     pub name: String,
@@ -176,12 +179,12 @@ pub(super) fn validate(commands: &[CustomTuiCommandConfig]) -> Result<()> {
             }
         }
         if let Some(timeout_seconds) = command.timeout_seconds
-            && !(1..=super::MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS).contains(&timeout_seconds)
+            && !(1..=MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS).contains(&timeout_seconds)
         {
             bail!(
                 "custom command {} timeout_seconds must be between 1 and {}",
                 command.name,
-                super::MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS
+                MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS
             );
         }
         if command.execution == CustomTuiCommandExecution::Background
@@ -209,4 +212,256 @@ pub(super) fn validate(commands: &[CustomTuiCommandConfig]) -> Result<()> {
     }
     crate::tui::validate_custom_command_keys(commands)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::super::test_support::load_config;
+    use super::*;
+
+    #[test]
+    fn custom_tui_commands_deserialize_and_validate() {
+        let config = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      aliases: [custom-dispatch]\n      description: Dispatch selected task\n      program: ~/bin/dispatch\n      args: [--tmux]\n      keys: [z d, D]\n      detail_keys: [z D]\n      requires: selected-task\n      execution: wait\n      on_success: quit\n",
+            )
+            .unwrap();
+        let command = &config.tui.commands[0];
+
+        assert_eq!(command.name, "dispatch");
+        assert_eq!(command.aliases, ["custom-dispatch"]);
+        assert_eq!(command.args, ["--tmux"]);
+        assert_eq!(command.keys, ["z d", "D"]);
+        assert_eq!(command.detail_keys.as_ref().unwrap(), &["z D".to_string()]);
+        assert_eq!(command.target, CustomTuiCommandTarget::Focused);
+        assert_eq!(command.execution, CustomTuiCommandExecution::Wait);
+        assert_eq!(command.on_success, CustomTuiCommandSuccess::Quit);
+
+        let terminal = load_config(
+                "tui:\n  commands:\n    - name: agent\n      description: Interactive agent\n      program: agent\n      execution: terminal\n      on_success: refresh-and-quit\n",
+            )
+            .unwrap();
+        assert_eq!(
+            terminal.tui.commands[0].execution,
+            CustomTuiCommandExecution::Terminal
+        );
+        assert_eq!(
+            terminal.tui.commands[0].on_success,
+            CustomTuiCommandSuccess::RefreshAndQuit
+        );
+    }
+
+    #[test]
+    fn custom_tui_command_static_execution_settings_deserialize_with_compatible_defaults() {
+        let configured = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      cwd: ~/code/tools\n      env:\n        PROFILE: staging\n        NO_COLOR: '1'\n      timeout_seconds: 30\n",
+            )
+            .unwrap();
+        let command = &configured.tui.commands[0];
+        assert_eq!(command.cwd.as_deref(), Some(Path::new("~/code/tools")));
+        assert_eq!(command.env["PROFILE"], "staging");
+        assert_eq!(command.env["NO_COLOR"], "1");
+        assert_eq!(command.timeout_seconds, Some(30));
+
+        let defaulted = load_config(
+                "tui:\n  commands:\n    - name: defaulted\n      description: Defaulted\n      program: dispatch\n",
+            )
+            .unwrap();
+        let command = &defaulted.tui.commands[0];
+        assert_eq!(command.cwd, None);
+        assert!(command.env.is_empty());
+        assert_eq!(command.timeout_seconds, None);
+    }
+
+    #[test]
+    fn custom_tui_commands_validate_timeout_bounds() {
+        for value in [0, MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS + 1] {
+            let yaml = format!(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      timeout_seconds: {value}\n"
+            );
+            let error = load_config(&yaml).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("timeout_seconds must be between 1 and 86400"));
+        }
+
+        let yaml = format!(
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      execution: background\n      timeout_seconds: {}\n",
+            MAX_CUSTOM_COMMAND_TIMEOUT_SECONDS
+        );
+        assert!(load_config(&yaml).is_ok());
+    }
+
+    #[test]
+    fn custom_tui_commands_reject_invalid_environment_without_exposing_values() {
+        for (environment, expected) in [
+            ("        '': value\n", "invalid environment variable name"),
+            (
+                "        BAD=NAME: value\n",
+                "invalid environment variable name",
+            ),
+            (
+                "        \"BAD\\u0000NAME\": value\n",
+                "invalid environment variable name",
+            ),
+            (
+                "        SAFE_NAME: \"secret-marker\\u0000suffix\"\n",
+                "environment variable \"SAFE_NAME\" contains a NUL byte",
+            ),
+        ] {
+            let yaml = format!(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      env:\n{environment}"
+            );
+            let error = load_config(&yaml).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("secret-marker"), "{message}");
+            assert!(!message.contains("suffix"), "{message}");
+        }
+    }
+
+    #[test]
+    fn custom_tui_commands_reject_unknown_fields_with_the_typo_location() {
+        let error = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      timeot_seconds: 30\n",
+            )
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(
+            message.contains("unknown field `timeot_seconds`"),
+            "{message}"
+        );
+        assert!(message.contains("tui.commands[0]"), "{message}");
+        assert!(message.contains("line 6"), "{message}");
+    }
+
+    #[test]
+    fn custom_tui_command_target_policies_and_legacy_requirements_are_compatible() {
+        for (field, expected) in [
+            ("target: none", CustomTuiCommandTarget::None),
+            ("target: focused", CustomTuiCommandTarget::Focused),
+            ("target: marked", CustomTuiCommandTarget::Marked),
+            (
+                "target: marked-or-focused",
+                CustomTuiCommandTarget::MarkedOrFocused,
+            ),
+            ("requires: none", CustomTuiCommandTarget::None),
+            ("requires: selected-task", CustomTuiCommandTarget::Focused),
+        ] {
+            let yaml = format!(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      {field}\n"
+            );
+            let config = load_config(&yaml).unwrap();
+            assert_eq!(config.tui.commands[0].target, expected, "{field}");
+        }
+
+        let defaulted = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n",
+            )
+            .unwrap();
+        assert_eq!(
+            defaulted.tui.commands[0].target,
+            CustomTuiCommandTarget::Focused
+        );
+    }
+
+    #[test]
+    fn custom_tui_commands_reject_target_with_legacy_requires() {
+        let error = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      target: marked\n      requires: selected-task\n",
+            )
+            .unwrap_err();
+
+        assert!(format!("{error:#}").contains("cannot supply both target and requires"));
+    }
+
+    #[test]
+    fn custom_tui_commands_serialize_target_policy() {
+        let config = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      requires: none\n",
+            )
+            .unwrap();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+
+        assert!(yaml.contains("target: none"));
+        assert!(!yaml.contains("requires:"));
+    }
+
+    #[test]
+    fn custom_tui_commands_reject_invalid_names_and_collisions() {
+        for yaml in [
+            "tui:\n  commands:\n    - name: ':dispatch'\n      description: Dispatch\n      program: dispatch\n",
+            "tui:\n  commands:\n    - name: quit\n      description: Dispatch\n      program: dispatch\n",
+            "tui:\n  commands:\n    - name: dispatch\n      aliases: [dispatch]\n      description: Dispatch\n      program: dispatch\n",
+            "tui:\n  commands:\n    - name: dispatch\n      aliases: [same]\n      description: Dispatch\n      program: dispatch\n    - name: other\n      aliases: [same]\n      description: Other\n      program: other\n",
+        ] {
+            assert!(load_config(yaml).is_err(), "accepted {yaml}");
+        }
+    }
+
+    #[test]
+    fn custom_tui_command_success_policies_deserialize() {
+        for (value, expected) in [
+            ("stay", CustomTuiCommandSuccess::Stay),
+            ("refresh", CustomTuiCommandSuccess::Refresh),
+            ("quit", CustomTuiCommandSuccess::Quit),
+            ("refresh-and-quit", CustomTuiCommandSuccess::RefreshAndQuit),
+        ] {
+            let yaml = format!(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      on_success: {value}\n"
+            );
+            let config = load_config(&yaml).unwrap();
+            assert_eq!(config.tui.commands[0].on_success, expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn custom_tui_commands_reject_blank_fields_and_non_stay_background_policies() {
+        for yaml in [
+            "tui:\n  commands:\n    - name: dispatch\n      description: '  '\n      program: dispatch\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: ''\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      execution: background\n      on_success: refresh\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      execution: background\n      on_success: quit\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      execution: background\n      on_success: refresh-and-quit\n",
+        ] {
+            assert!(load_config(yaml).is_err(), "accepted {yaml}");
+        }
+
+        let stay = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      execution: background\n      on_success: stay\n",
+            )
+            .unwrap();
+        assert_eq!(
+            stay.tui.commands[0].on_success,
+            CustomTuiCommandSuccess::Stay
+        );
+    }
+
+    #[test]
+    fn custom_tui_commands_validate_contextual_keybindings() {
+        let inherited = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z d]\n",
+            )
+            .unwrap();
+        assert_eq!(inherited.tui.commands[0].detail_keys, None);
+
+        let detail_disabled = load_config(
+                "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z d]\n      detail_keys: []\n",
+            )
+            .unwrap();
+        assert_eq!(detail_disabled.tui.commands[0].detail_keys, Some(vec![]));
+
+        for yaml in [
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [q]\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: ['']\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [Esc]\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z unknown]\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z d a b c]\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z d]\n      detail_keys: [s]\n",
+            "tui:\n  commands:\n    - name: dispatch\n      description: Dispatch\n      program: dispatch\n      keys: [z d]\n    - name: other\n      description: Other\n      program: other\n      keys: [z d]\n",
+        ] {
+            assert!(load_config(yaml).is_err(), "accepted {yaml}");
+        }
+    }
 }

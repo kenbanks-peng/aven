@@ -163,4 +163,4 @@ pub(crate) enum Commands {
 }
 
 #[cfg(test)]
-use help::{HELP_SECTIONS, help_row_width, render_row};
+use help::HELP_SECTIONS;

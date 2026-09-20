@@ -193,3 +193,170 @@ pub(crate) fn recurrence_pause_interval_from_row(
 fn optional_text(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlx::Connection as _;
+    use sqlx::SqliteConnection;
+
+    use super::*;
+    use crate::recurrence::{RecurrenceOutcome, RecurrenceProjectionState};
+
+    #[tokio::test]
+    async fn task_from_row_maps_empty_dates_to_absence() {
+        let mut conn = SqliteConnection::connect(":memory:")
+            .await
+            .expect("open db");
+        let row = sqlx::query(
+            "SELECT 'TASK000000000001' AS id,
+                        '0000000000000000' AS workspace_id,
+                        'optional dates' AS title,
+                        '' AS description,
+                        '0000000000000001' AS project_id,
+                        'app' AS project_key,
+                        'APP' AS project_prefix,
+                        'todo' AS status,
+                        'none' AS priority,
+                        'unknown' AS source,
+                        't' AS created_at,
+                        't' AS updated_at,
+                        't' AS queue_activity_at,
+                        '' AS available_at,
+                        '' AS due_on,
+                        0 AS deleted,
+                        0 AS is_epic",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("row");
+
+        let task = task_from_row(&row).unwrap();
+
+        assert_eq!(task.available_at, None);
+        assert_eq!(task.due_on, None);
+    }
+
+    #[test]
+    fn task_date_boundary_preserves_present_values() {
+        assert_eq!(
+            optional_task_date("2099-01-01T00:00:00Z".to_string()).as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            optional_task_date("2099-01-01".to_string()).as_deref(),
+            Some("2099-01-01")
+        );
+    }
+
+    #[tokio::test]
+    async fn task_from_row_rejects_invalid_status_and_priority() {
+        let mut conn = SqliteConnection::connect(":memory:")
+            .await
+            .expect("open db");
+        let row = sqlx::query(
+            "SELECT 'TASK000000000001' AS id,
+                        '0000000000000000' AS workspace_id,
+                        'bad status' AS title,
+                        '' AS description,
+                        '0000000000000001' AS project_id,
+                        'app' AS project_key,
+                        'APP' AS project_prefix,
+                        'blocked' AS status,
+                        'none' AS priority,
+                        'unknown' AS source,
+                        't' AS created_at,
+                        't' AS updated_at,
+                        't' AS queue_activity_at,
+                        0 AS deleted,
+                        0 AS is_epic",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("row");
+        assert_eq!(
+            task_from_row(&row).unwrap_err().to_string(),
+            "error invalid-status input=blocked choices=inbox,backlog,todo,active,done,canceled"
+        );
+
+        let row = sqlx::query(
+            "SELECT 'TASK000000000001' AS id,
+                        '0000000000000000' AS workspace_id,
+                        'bad priority' AS title,
+                        '' AS description,
+                        '0000000000000001' AS project_id,
+                        'app' AS project_key,
+                        'APP' AS project_prefix,
+                        'inbox' AS status,
+                        'soon' AS priority,
+                        't' AS created_at,
+                        't' AS updated_at,
+                        't' AS queue_activity_at,
+                        0 AS deleted,
+                        0 AS is_epic",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("row");
+        assert_eq!(
+            task_from_row(&row).unwrap_err().to_string(),
+            "error invalid-priority input=soon choices=none,low,medium,high,urgent"
+        );
+    }
+
+    #[tokio::test]
+    async fn recurrence_rows_map_through_validated_domain_types() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        let series_row = sqlx::query(
+            "SELECT '0000000000000000' AS workspace_id,
+                        '7KQ9A1X4MV2P8D6R' AS id, 'journal' AS title, '' AS description,
+                        '7KQ9A1X4MV2P8D6S' AS project_id, 'high' AS priority,
+                        'todo' AS initial_status, 'weekly' AS frequency, 2 AS interval,
+                        'mon,fri' AS weekdays, 'Europe/Stockholm' AS timezone,
+                        '2026-07-20' AS start_on, '09:30:00' AS available_local_time,
+                        'same_day' AS due_policy, 'active' AS state, '' AS stopped_at,
+                        'created' AS created_at, 'updated' AS updated_at, 0 AS deleted",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+        let series = recurrence_series_from_row(&series_row).unwrap();
+        assert_eq!(series.id.as_str(), "7KQ9A1X4MV2P8D6R");
+        assert_eq!(series.rule.interval(), 2);
+        assert_eq!(series.available_local_time.unwrap().to_string(), "09:30:00");
+
+        let occurrence_row = sqlx::query(
+            "SELECT '0000000000000000' AS workspace_id,
+                        '7KQ9A1X4MV2P8D6R' AS series_id, '2026-07-20' AS slot_on,
+                        '7KQ9A1X4MV2P8D6T' AS task_id, 'completed' AS outcome,
+                        'resolved' AS resolved_at, 'change' AS outcome_change_id,
+                        'resolved' AS projection_state, '' AS archived_at",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+        let occurrence = recurrence_occurrence_from_row(&occurrence_row).unwrap();
+        assert_eq!(
+            occurrence.task_id.as_ref().map(|task_id| task_id.as_str()),
+            Some("7KQ9A1X4MV2P8D6T")
+        );
+        assert_eq!(occurrence.outcome, Some(RecurrenceOutcome::Completed));
+        assert_eq!(
+            occurrence.projection_state,
+            RecurrenceProjectionState::Resolved
+        );
+
+        let invalid_row = sqlx::query(
+            "SELECT '0000000000000000' AS workspace_id,
+                        '7KQ9A1X4MV2P8D6R' AS id, 'journal' AS title, '' AS description,
+                        '7KQ9A1X4MV2P8D6S' AS project_id, 'none' AS priority,
+                        'todo' AS initial_status, 'weekly' AS frequency, 1 AS interval,
+                        'fri,mon' AS weekdays, 'UTC' AS timezone, '2026-07-20' AS start_on,
+                        '' AS available_local_time, 'none' AS due_policy, 'active' AS state,
+                        '' AS stopped_at, 't' AS created_at, 't' AS updated_at, 0 AS deleted",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+        assert!(recurrence_series_from_row(&invalid_row).is_err());
+    }
+}

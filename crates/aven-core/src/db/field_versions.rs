@@ -131,3 +131,54 @@ pub(crate) async fn conflict_exists(
     )
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn field_versions_support_task_and_recurrence_series_identity() {
+        let (_temp, mut conn) = crate::test_support::test_conn().await;
+        sqlx::query(
+                "INSERT INTO tasks(id, title, description, project_id, status, priority, created_at, updated_at)
+                 VALUES ('7KQ9A1X4MV2P8D6T', 'task', '', '7KQ9A1X4MV2P8D6S', 'todo', 'none', 't', 't')",
+            )
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        set_field_version(&mut conn, "7KQ9A1X4MV2P8D6T", "title", "task-version")
+            .await
+            .unwrap();
+        set_entity_field_version(
+            &mut conn,
+            &crate::workspaces::default_workspace_id(),
+            MutableEntityType::RecurrenceSeries,
+            "7KQ9A1X4MV2P8D6R",
+            "title",
+            "series-version",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            field_version(&mut conn, "7KQ9A1X4MV2P8D6T", "title")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("task-version")
+        );
+        assert_eq!(
+            entity_field_version(
+                &mut conn,
+                &crate::workspaces::default_workspace_id(),
+                MutableEntityType::RecurrenceSeries,
+                "7KQ9A1X4MV2P8D6R",
+                "title",
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+            Some("series-version")
+        );
+    }
+}

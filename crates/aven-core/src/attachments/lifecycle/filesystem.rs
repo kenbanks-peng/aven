@@ -221,3 +221,103 @@ pub(super) async fn restore_trashed_files(files: Vec<(PathBuf, PathBuf)>) {
     })
     .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    use std::io;
+
+    #[tokio::test]
+    async fn unavailable_directory_releases_cursor_owned_by_lexical_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let scan_root = temp.path().join("scan");
+        let lexical_root = temp.path().join("anchor").join("..").join("scan");
+        fs::create_dir_all(temp.path().join("anchor")).unwrap();
+        fs::create_dir_all(&scan_root).unwrap();
+        fs::write(scan_root.join("first"), b"first").unwrap();
+        fs::write(scan_root.join("second"), b"second").unwrap();
+        let canonical_root = fs::canonicalize(&lexical_root).unwrap();
+
+        scan_directory_page(lexical_root.clone(), 1).await.unwrap();
+        assert!(
+            DIRECTORY_CURSORS
+                .lock()
+                .unwrap()
+                .contains_key(&lexical_root)
+        );
+
+        fs::remove_dir_all(&scan_root).unwrap();
+        let _ = scan_directory_page(lexical_root.clone(), 1).await;
+
+        let cursors = DIRECTORY_CURSORS.lock().unwrap();
+        assert!(!cursors.contains_key(&lexical_root));
+        assert!(!cursors.contains_key(&canonical_root));
+    }
+
+    #[tokio::test]
+    async fn directory_iteration_error_releases_cursor_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("scan");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("first"), b"first").unwrap();
+        fs::write(dir.join("second"), b"second").unwrap();
+
+        scan_directory_page(dir.clone(), 1).await.unwrap();
+        assert!(DIRECTORY_CURSORS.lock().unwrap().contains_key(&dir));
+
+        let result = scan_directory_page_with(dir.clone(), 1, |_| {
+            Err(io::Error::other("injected directory iteration failure"))
+        })
+        .await;
+        assert!(result.as_ref().is_err_and(|error| {
+            error
+                .to_string()
+                .contains("injected directory iteration failure")
+        }));
+        assert!(!DIRECTORY_CURSORS.lock().unwrap().contains_key(&dir));
+    }
+
+    #[test]
+    fn file_move_copies_atomically_when_hard_links_are_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"attachment").unwrap();
+
+        let moved = move_file_without_replacing_with(&source, &target, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "injected hard-link failure",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(moved, FileMove::Moved);
+        assert!(!source.exists());
+        assert_eq!(fs::read(target).unwrap(), b"attachment");
+    }
+
+    #[test]
+    fn file_move_copy_fallback_does_not_replace_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&target, b"target").unwrap();
+
+        let moved = move_file_without_replacing_with(&source, &target, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "injected hard-link failure",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(moved, FileMove::TargetExists);
+        assert_eq!(fs::read(source).unwrap(), b"source");
+        assert_eq!(fs::read(target).unwrap(), b"target");
+    }
+}

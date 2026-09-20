@@ -305,3 +305,108 @@ fn validate_push_pull_overlap(response: &SyncResponse) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_pull_limit_has_default_and_bounds() {
+        assert_eq!(request_pull_limit(None).unwrap(), MAX_PULL_BATCH);
+        assert!(request_pull_limit(Some(MAX_PULL_BATCH)).is_ok());
+        assert_eq!(
+            request_pull_limit(Some(0)).unwrap_err().to_string(),
+            "error sync-pull-limit-out-of-range min=1 max=512 got=0"
+        );
+        assert_eq!(
+            request_pull_limit(Some(MAX_PULL_BATCH + 1))
+                .unwrap_err()
+                .to_string(),
+            "error sync-pull-limit-out-of-range min=1 max=512 got=513"
+        );
+    }
+
+    #[test]
+    fn request_envelope_rejects_negative_cursor_and_oversized_push_batch() {
+        let request = SyncRequest {
+            protocol_version: Some(SYNC_PROTOCOL_VERSION),
+            client_id: "test-client".to_string(),
+            after: -1,
+            pull_limit: Some(MAX_PULL_BATCH),
+            changes: Vec::new(),
+        };
+        assert_eq!(
+            validate_sync_request_envelope(&request)
+                .unwrap_err()
+                .to_string(),
+            "error sync-after-out-of-range min=0 got=-1"
+        );
+
+        let request = SyncRequest {
+            protocol_version: Some(SYNC_PROTOCOL_VERSION),
+            client_id: "test-client".to_string(),
+            after: 0,
+            pull_limit: Some(MAX_PULL_BATCH),
+            changes: vec![
+                ChangeWire {
+                    change_id: "AAAAAAAAAAAAAAA0".to_string(),
+                    client_id: "client".to_string(),
+                    local_seq: 1,
+                    entity_type: "task".to_string(),
+                    entity_id: "BBBBBBBBBBBBBBBB".to_string(),
+                    field: None,
+                    op_type: "create_task".to_string(),
+                    payload: serde_json::json!({"title":"oops","project_id":"0000000000000000","project_key":"app","project_name":"app","project_prefix":"APP","workspace_id":"0000000000000000","workspace_key":"default","created_at":"2026-01-01T00:00:00Z"}),
+                    base_version: None,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    server_seq: None,
+                };
+                MAX_PUSH_BATCH + 1
+            ],
+        };
+        assert_eq!(
+            validate_sync_request_envelope(&request)
+                .unwrap_err()
+                .to_string(),
+            "error sync-push-too-large limit=256 got=257"
+        );
+    }
+
+    #[test]
+    fn response_validation_respects_request_pull_limit() {
+        let response = SyncResponse {
+            protocol_version: SYNC_PROTOCOL_VERSION,
+            cursor: 1,
+            has_more: false,
+            push_acks: vec![],
+            changes: vec![
+                ChangeWire {
+                    change_id: "AAAAAAAAAAAAAAA1".to_string(),
+                    client_id: "client".to_string(),
+                    local_seq: 1,
+                    entity_type: "task".to_string(),
+                    entity_id: "BBBBBBBBBBBBBBBB".to_string(),
+                    field: None,
+                    op_type: "create_task".to_string(),
+                    payload: serde_json::json!({
+                        "title":"one",
+                        "project_id":"0000000000000000",
+                        "project_key":"app",
+                        "project_name":"app",
+                        "project_prefix":"APP",
+                    }),
+                    base_version: None,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    server_seq: Some(1),
+                };
+                MAX_PULL_BATCH as usize + 1
+            ],
+        };
+        assert_eq!(
+            validate_sync_response_for_request(0, MAX_PULL_BATCH, &[], &response)
+                .unwrap_err()
+                .to_string(),
+            "error invalid-sync-response pull-too-large limit=512 got=513"
+        );
+    }
+}
