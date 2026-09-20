@@ -1,0 +1,632 @@
+use super::creation::append_created_label_undo_commands;
+use super::{TaskMutationOutcome, TaskMutationReport, TaskOutcome, TaskUpdate, TaskUpdateOutcome};
+use crate::change_log::{ChangeEntity, ChangePayload, append_change, op_type};
+use crate::choices::{TaskPriority, TaskStatus};
+use crate::db::{Database, begin_immediate};
+use crate::ids::{TaskId, WorkspaceId, now};
+use crate::labels::{
+    CreatedLabel, resolve_labels_in_workspace, resolve_or_create_labels_in_workspace,
+};
+use crate::mutation::{set_task_field, set_task_project};
+use crate::operations::{RecurrenceStructuralMutation, RecurrenceTaskMutation};
+use crate::projects::resolve_or_create_project_in_workspace;
+use crate::refs::get_task_in_workspace;
+use crate::types::Task;
+use crate::undo::{
+    TaskUndoSnapshot, UndoCommand, UndoContext, UndoPayload, record_tui_undo, task_snapshot,
+};
+use crate::workspaces::Workspace;
+use anyhow::{Result, bail};
+use sqlx::SqliteConnection;
+use std::collections::BTreeSet;
+use tracing::info;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TaskMutationDetail {
+    Report,
+    Compact,
+}
+
+struct TaskMutationExecutionOutcome {
+    task: Task,
+    before: Option<TaskUndoSnapshot>,
+    after: Option<TaskUndoSnapshot>,
+    changed: bool,
+}
+
+impl Database {
+    pub async fn update_task(
+        &self,
+        workspace: &Workspace,
+        task_id: &TaskId,
+        update: TaskUpdate,
+    ) -> Result<TaskUpdateOutcome> {
+        let outcomes = self
+            .mutate_tasks_owned(
+                workspace,
+                vec![(task_id.clone(), update)],
+                UndoContext::None,
+                TaskMutationDetail::Compact,
+            )
+            .await?;
+        let outcome = outcomes.into_iter().next().unwrap();
+        Ok(TaskUpdateOutcome {
+            task: outcome.task,
+            changed: outcome.changed,
+        })
+    }
+
+    pub async fn update_tasks(
+        &self,
+        workspace: &Workspace,
+        updates: Vec<(TaskId, TaskUpdate)>,
+    ) -> Result<Vec<TaskUpdateOutcome>> {
+        Ok(self
+            .mutate_tasks_owned(
+                workspace,
+                updates,
+                UndoContext::None,
+                TaskMutationDetail::Compact,
+            )
+            .await?
+            .into_iter()
+            .map(|outcome| TaskUpdateOutcome {
+                task: outcome.task,
+                changed: outcome.changed,
+            })
+            .collect())
+    }
+
+    pub async fn mutate_tasks(
+        &self,
+        workspace: &Workspace,
+        updates: Vec<(TaskId, TaskUpdate)>,
+        undo: UndoContext,
+    ) -> Result<TaskMutationReport> {
+        let outcomes = self
+            .mutate_tasks_owned(workspace, updates, undo, TaskMutationDetail::Report)
+            .await?;
+        Ok(TaskMutationReport {
+            outcomes: outcomes
+                .into_iter()
+                .map(|outcome| TaskMutationOutcome {
+                    task: outcome.task,
+                    before: outcome.before.expect("report mutation before snapshot"),
+                    after: outcome.after.expect("report mutation after snapshot"),
+                    changed: outcome.changed,
+                })
+                .collect(),
+        })
+    }
+
+    async fn mutate_tasks_owned(
+        &self,
+        workspace: &Workspace,
+        updates: Vec<(TaskId, TaskUpdate)>,
+        undo: UndoContext,
+        detail: TaskMutationDetail,
+    ) -> Result<Vec<TaskMutationExecutionOutcome>> {
+        for (_, update) in &updates {
+            validate_task_update(update)?;
+        }
+        if updates.is_empty() {
+            return Ok(Vec::new());
+        }
+        if detail == TaskMutationDetail::Compact && !matches!(&undo, UndoContext::None) {
+            bail!("compact task mutations cannot record undo");
+        }
+
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = begin_immediate(&mut conn).await?;
+        let mut outcomes = Vec::with_capacity(updates.len());
+        let mut affected_attachment_hashes = BTreeSet::new();
+        let mut undo_commands = Vec::new();
+        let mut created_labels = Vec::new();
+        for (task_id, update) in &updates {
+            let before =
+                if detail == TaskMutationDetail::Report || task_update_requires_snapshot(update) {
+                    Some(task_snapshot(&mut tx, &workspace.id, task_id).await?)
+                } else {
+                    None
+                };
+            let update = match before.as_ref() {
+                Some(before) => materialize_task_update(update, before)?,
+                None => update.clone(),
+            };
+            let (changed, task_created_labels) = apply_task_update(
+                &mut tx,
+                workspace,
+                task_id,
+                &update,
+                &mut affected_attachment_hashes,
+            )
+            .await?;
+            created_labels.extend(task_created_labels);
+            let task = get_task_in_workspace(&mut tx, workspace, task_id).await?;
+            let after = if detail == TaskMutationDetail::Report {
+                Some(task_snapshot(&mut tx, &workspace.id, task_id).await?)
+            } else {
+                None
+            };
+            if let (Some(before), Some(after)) = (&before, &after) {
+                append_task_undo_commands(task_id, before, after, &mut undo_commands);
+            }
+            outcomes.push(TaskMutationExecutionOutcome {
+                task,
+                changed,
+                before,
+                after,
+            });
+        }
+        let affected_attachment_hashes = affected_attachment_hashes.into_iter().collect::<Vec<_>>();
+        crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+            &mut tx,
+            &affected_attachment_hashes,
+            &crate::attachments::lifecycle::SystemClock,
+        )
+        .await?;
+        let changed_count = outcomes.iter().filter(|outcome| outcome.changed).count();
+        append_created_label_undo_commands(&mut undo_commands, &created_labels);
+        if let Some(summary) = undo.task_mutation_summary(changed_count) {
+            record_tui_undo(
+                &mut tx,
+                &workspace.id,
+                &summary,
+                UndoPayload {
+                    commands: undo_commands,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
+
+        for outcome in &outcomes {
+            info!(task_id = %outcome.task.id, changed = outcome.changed, "task updated");
+        }
+        Ok(outcomes)
+    }
+
+    pub async fn set_task_deleted(
+        &self,
+        workspace: &Workspace,
+        task_id: &TaskId,
+        deleted: bool,
+    ) -> Result<TaskOutcome> {
+        let outcome = self
+            .update_task(
+                workspace,
+                task_id,
+                TaskUpdate {
+                    deleted: Some(deleted),
+                    ..TaskUpdate::default()
+                },
+            )
+            .await?;
+        Ok(TaskOutcome {
+            task: outcome.task,
+            create_change_id: None,
+            attachment_change_ids: Vec::new(),
+            undo_snapshot: None,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn update_task(
+    conn: &mut SqliteConnection,
+    workspace: &Workspace,
+    task_id: &crate::ids::TaskId,
+    update: TaskUpdate,
+) -> Result<TaskUpdateOutcome> {
+    validate_task_update(&update)?;
+    let mut tx = begin_immediate(conn).await?;
+    let mut affected_attachment_hashes = BTreeSet::new();
+    let (changed, _) = apply_task_update(
+        &mut tx,
+        workspace,
+        task_id,
+        &update,
+        &mut affected_attachment_hashes,
+    )
+    .await?;
+    let affected_attachment_hashes = affected_attachment_hashes.into_iter().collect::<Vec<_>>();
+    crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
+        &mut tx,
+        &affected_attachment_hashes,
+        &crate::attachments::lifecycle::SystemClock,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(TaskUpdateOutcome {
+        task: get_task_in_workspace(conn, workspace, task_id).await?,
+        changed,
+    })
+}
+
+fn append_task_undo_commands(
+    task_id: &TaskId,
+    before_snapshot: &TaskUndoSnapshot,
+    after_snapshot: &TaskUndoSnapshot,
+    commands: &mut Vec<UndoCommand>,
+) {
+    let before = before_snapshot;
+    let after = after_snapshot;
+    let fields = [
+        ("title", before.title.as_str(), after.title.as_str()),
+        (
+            "description",
+            before.description.as_str(),
+            after.description.as_str(),
+        ),
+        (
+            "project",
+            before.project_id.as_str(),
+            after.project_id.as_str(),
+        ),
+        ("status", before.status.as_str(), after.status.as_str()),
+        (
+            "priority",
+            before.priority.as_str(),
+            after.priority.as_str(),
+        ),
+        (
+            "available_at",
+            before.available_at.as_str(),
+            after.available_at.as_str(),
+        ),
+        ("due_on", before.due_on.as_str(), after.due_on.as_str()),
+    ];
+    for (field, before, after) in fields {
+        if before != after {
+            commands.push(UndoCommand::SetTaskField {
+                task_id: task_id.clone(),
+                field: field.to_string(),
+                before: before.to_string(),
+                after: after.to_string(),
+                queue_activity_before: (before_snapshot.queue_activity_at
+                    != after_snapshot.queue_activity_at)
+                    .then(|| before_snapshot.queue_activity_at.clone()),
+                queue_activity_after: (before_snapshot.queue_activity_at
+                    != after_snapshot.queue_activity_at)
+                    .then(|| after_snapshot.queue_activity_at.clone()),
+            });
+        }
+    }
+    let before_deleted = if before.deleted { "1" } else { "0" };
+    let after_deleted = if after.deleted { "1" } else { "0" };
+    if before_deleted != after_deleted {
+        commands.push(UndoCommand::SetTaskField {
+            task_id: task_id.clone(),
+            field: "deleted".to_string(),
+            before: before_deleted.to_string(),
+            after: after_deleted.to_string(),
+            queue_activity_before: (before.queue_activity_at != after.queue_activity_at)
+                .then(|| before.queue_activity_at.clone()),
+            queue_activity_after: (before.queue_activity_at != after.queue_activity_at)
+                .then(|| after.queue_activity_at.clone()),
+        });
+    }
+    let before_is_epic = if before.is_epic { "1" } else { "0" };
+    let after_is_epic = if after.is_epic { "1" } else { "0" };
+    if before_is_epic != after_is_epic {
+        commands.push(UndoCommand::SetTaskField {
+            task_id: task_id.clone(),
+            field: "is_epic".to_string(),
+            before: before_is_epic.to_string(),
+            after: after_is_epic.to_string(),
+            queue_activity_before: None,
+            queue_activity_after: None,
+        });
+    }
+    if before.labels != after.labels {
+        commands.push(UndoCommand::SetTaskLabels {
+            task_id: task_id.clone(),
+            before: before.labels.clone(),
+            after: after.labels.clone(),
+        });
+    }
+    let metadata_fields = before
+        .metadata
+        .keys()
+        .chain(after.metadata.keys())
+        .collect::<BTreeSet<_>>();
+    for field_id in metadata_fields {
+        let before_value = before.metadata.get(field_id);
+        let after_value = after.metadata.get(field_id);
+        if before_value != after_value {
+            commands.push(UndoCommand::SetTaskMetadata {
+                task_id: task_id.clone(),
+                field_id: field_id
+                    .parse()
+                    .expect("task snapshots contain valid metadata field IDs"),
+                before: before_value.cloned(),
+                after: after_value.cloned(),
+            });
+        }
+    }
+}
+
+fn cycled_priority(priority: TaskPriority, reverse: bool) -> TaskPriority {
+    let index = TaskPriority::ALL
+        .iter()
+        .position(|candidate| *candidate == priority)
+        .unwrap_or(0);
+    let next = if reverse {
+        (index + TaskPriority::ALL.len() - 1) % TaskPriority::ALL.len()
+    } else {
+        (index + 1) % TaskPriority::ALL.len()
+    };
+    TaskPriority::ALL[next]
+}
+
+fn task_update_requires_snapshot(update: &TaskUpdate) -> bool {
+    update.cycle_priority.is_some() || update.label_selection.is_some()
+}
+
+fn materialize_task_update(update: &TaskUpdate, before: &TaskUndoSnapshot) -> Result<TaskUpdate> {
+    let mut update = update.clone();
+    if let Some(reverse) = update.cycle_priority.take() {
+        let priority = TaskPriority::parse(&before.priority)?;
+        update.priority = Some(cycled_priority(priority, reverse).to_string());
+    }
+    if let Some(selection) = update.label_selection.take() {
+        let selected = selection.selected.iter().cloned().collect::<BTreeSet<_>>();
+        let partial = selection.partial.iter().cloned().collect::<BTreeSet<_>>();
+        update.add_labels = selection
+            .selected
+            .into_iter()
+            .filter(|label| !before.labels.contains(label))
+            .collect();
+        update.remove_labels = before
+            .labels
+            .iter()
+            .filter(|label| !selected.contains(label.as_str()) && !partial.contains(label.as_str()))
+            .cloned()
+            .collect();
+    }
+    Ok(update)
+}
+
+pub(super) fn validate_task_update(update: &TaskUpdate) -> Result<()> {
+    crate::metadata::validate_metadata_update(&update.set_metadata, &update.remove_metadata)?;
+    if update.priority.is_some() && update.cycle_priority.is_some() {
+        bail!("error invalid-task-update priority and priority cycle are mutually exclusive");
+    }
+    if update.label_selection.is_some()
+        && (!update.add_labels.is_empty() || !update.remove_labels.is_empty())
+    {
+        bail!("error invalid-task-update label selection and label deltas are mutually exclusive");
+    }
+    if let Some(status) = update.status.as_deref() {
+        TaskStatus::parse(status)?;
+    }
+    if let Some(priority) = update.priority.as_deref() {
+        TaskPriority::parse(priority)?;
+    }
+    if let Some(Some(available_at)) = update.available_at.as_ref() {
+        crate::time_validation::validate_available_at_value(available_at)?;
+    }
+    if let Some(Some(due_on)) = update.due_on.as_ref() {
+        crate::time_validation::validate_due_on_value(due_on)?;
+    }
+    Ok(())
+}
+
+pub(super) async fn apply_task_update(
+    conn: &mut SqliteConnection,
+    workspace: &Workspace,
+    task_id: &crate::ids::TaskId,
+    update: &TaskUpdate,
+    affected_attachment_hashes: &mut BTreeSet<String>,
+) -> Result<(bool, Vec<CreatedLabel>)> {
+    let created_labels = if update.create_missing_labels {
+        resolve_or_create_labels_in_workspace(conn, workspace, &update.add_labels)
+            .await?
+            .created
+    } else {
+        Vec::new()
+    };
+    let promote_inbox = if update
+        .status
+        .as_deref()
+        .is_none_or(|status| status == TaskStatus::Inbox.as_str())
+        && update.priority.as_deref().is_some_and(|priority| {
+            TaskPriority::parse(priority).is_ok_and(TaskPriority::promotes_inbox_to_todo)
+        }) {
+        get_task_in_workspace(conn, workspace, task_id)
+            .await?
+            .status
+            == TaskStatus::Inbox
+    } else {
+        false
+    };
+    let mut changed = false;
+    if let Some(title) = update.title.as_deref() {
+        changed |= update_task_field(conn, workspace, task_id, "title", title).await?;
+    }
+    if let Some(description) = update.description.as_deref() {
+        changed |= update_task_field(conn, workspace, task_id, "description", description).await?;
+    }
+    if let Some(project) = update.project.as_deref() {
+        let project = resolve_or_create_project_in_workspace(conn, &workspace.id, project).await?;
+        changed |= set_task_project(conn, workspace, task_id, &project).await?;
+    }
+    if promote_inbox {
+        changed |= update_task_field(conn, workspace, task_id, "status", "todo").await?;
+    } else if let Some(status) = update.status.as_deref() {
+        changed |= update_task_field(conn, workspace, task_id, "status", status).await?;
+    }
+    if let Some(priority) = update.priority.as_deref() {
+        changed |= update_task_field(conn, workspace, task_id, "priority", priority).await?;
+    }
+    if let Some(available_at) = update.available_at.as_ref() {
+        changed |= update_task_field(
+            conn,
+            workspace,
+            task_id,
+            "available_at",
+            available_at.as_deref().unwrap_or(""),
+        )
+        .await?;
+    }
+    if let Some(due_on) = update.due_on.as_ref() {
+        changed |= update_task_field(
+            conn,
+            workspace,
+            task_id,
+            "due_on",
+            due_on.as_deref().unwrap_or(""),
+        )
+        .await?;
+    }
+    if update.deleted.is_some() {
+        let attachment_hashes: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT sha256 FROM task_attachments
+             WHERE workspace_id = ? AND task_id = ?",
+        )
+        .bind(&workspace.id)
+        .bind(task_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        affected_attachment_hashes.extend(attachment_hashes);
+    }
+    if let Some(deleted) = update.deleted {
+        changed |= update_task_field(
+            conn,
+            workspace,
+            task_id,
+            "deleted",
+            if deleted { "1" } else { "0" },
+        )
+        .await?;
+    }
+    if let Some(is_epic) = update.is_epic {
+        if !is_epic {
+            let task = get_task_in_workspace(conn, workspace, task_id).await?;
+            if crate::operations::epics::task_has_epic_children(conn, &task.workspace_id, task_id)
+                .await?
+            {
+                bail!("error epic-has-children task_id={task_id}");
+            }
+        }
+        changed |= update_task_field(
+            conn,
+            workspace,
+            task_id,
+            "is_epic",
+            if is_epic { "1" } else { "0" },
+        )
+        .await?;
+    }
+    changed |= update_task_labels_in_workspace(
+        conn,
+        &workspace.id,
+        task_id,
+        &update.add_labels,
+        &update.remove_labels,
+    )
+    .await?;
+    for (id, key) in &update.require_metadata_fields {
+        crate::metadata::require_metadata_field(conn, &workspace.id, id, key).await?;
+    }
+    crate::metadata::validate_task_metadata_result(
+        conn,
+        &workspace.id,
+        task_id,
+        &update.set_metadata,
+        &update.remove_metadata,
+    )
+    .await?;
+    for input in &update.set_metadata {
+        changed |= crate::metadata::set_task_metadata(conn, workspace, task_id, input).await?;
+    }
+    for key in &update.remove_metadata {
+        changed |= crate::metadata::remove_task_metadata(conn, workspace, task_id, key).await?;
+    }
+    Ok((changed, created_labels))
+}
+
+pub(crate) async fn update_task_field(
+    conn: &mut SqliteConnection,
+    workspace: &Workspace,
+    task_id: &crate::ids::TaskId,
+    field: &str,
+    value: &str,
+) -> Result<bool> {
+    set_task_field(conn, workspace, task_id, field, value).await
+}
+
+pub async fn update_task_labels_in_workspace(
+    conn: &mut SqliteConnection,
+    workspace_id: &WorkspaceId,
+    task_id: &crate::ids::TaskId,
+    add_labels: &[String],
+    remove_labels: &[String],
+) -> Result<bool> {
+    let mutation_at = now();
+    let workspace = crate::workspaces::workspace_for_id(conn, workspace_id).await?;
+    crate::operations::route_recurrence_task_mutation(
+        conn,
+        &workspace,
+        task_id,
+        RecurrenceTaskMutation::Structural(RecurrenceStructuralMutation::Labels),
+        &mutation_at,
+    )
+    .await?;
+    let mut changed = false;
+    for label in resolve_labels_in_workspace(conn, &workspace.id, add_labels).await? {
+        let rows_affected = sqlx::query(
+            "INSERT OR IGNORE INTO task_labels(workspace_id, task_id, label) VALUES (?, ?, ?)",
+        )
+        .bind(&workspace.id)
+        .bind(task_id)
+        .bind(&label)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if rows_affected > 0 {
+            append_change(
+                conn,
+                ChangeEntity::Task,
+                task_id,
+                Some("labels"),
+                op_type::LABEL_ADD,
+                ChangePayload::workspace(&workspace).set("label", label),
+            )
+            .await?;
+            changed = true;
+        }
+    }
+    for label in resolve_labels_in_workspace(conn, &workspace.id, remove_labels).await? {
+        let rows_affected = sqlx::query(
+            "DELETE FROM task_labels WHERE workspace_id = ? AND task_id = ? AND label = ?",
+        )
+        .bind(&workspace.id)
+        .bind(task_id)
+        .bind(&label)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if rows_affected > 0 {
+            append_change(
+                conn,
+                ChangeEntity::Task,
+                task_id,
+                Some("labels"),
+                op_type::LABEL_REMOVE,
+                ChangePayload::workspace(&workspace).set("label", label),
+            )
+            .await?;
+            changed = true;
+        }
+    }
+    if changed {
+        info!(
+            task_id = %task_id,
+            added = add_labels.len(),
+            removed = remove_labels.len(),
+            "task labels changed"
+        );
+    }
+    Ok(changed)
+}
