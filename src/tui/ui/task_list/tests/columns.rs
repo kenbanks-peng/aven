@@ -2,15 +2,19 @@ use super::super::layout::TableLayout;
 use super::super::sizing::*;
 use super::*;
 use crate::tui::widgets::priority_icon;
+use unicode_width::UnicodeWidthStr;
 
 #[tokio::test]
 async fn ref_header_aligns_with_task_refs() {
-    let store = test_store_with_tasks(vec![task_list_item("Aligned ref")]).await;
+    let mut store = test_store_with_tasks(vec![task_list_item("Aligned ref")]).await;
+    store.view_state.query = TaskQuery::All;
     let buffer = render_task_list_buffer(&store, 80, 4);
     let header = text_in_cell(&buffer, Rect::new(0, 0, 80, 1));
     let task = text_in_cell(&buffer, Rect::new(0, 1, 80, 1));
+    let header_prefix = header.split_once("REF").unwrap().0;
+    let task_prefix = task.split_once("APP-").unwrap().0;
 
-    assert_eq!(header.find("REF"), task.find("APP-"));
+    assert_eq!(header_prefix.width(), task_prefix.width());
 }
 
 #[tokio::test]
