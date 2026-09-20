@@ -1,7 +1,5 @@
-use super::super::cells::*;
 use super::super::layout::TableLayout;
 use super::super::sizing::*;
-use super::super::table::*;
 use super::*;
 use crate::tui::widgets::priority_icon;
 
@@ -534,7 +532,11 @@ async fn due_column_leaves_undated_tasks_blank() {
     let buffer = render_task_list_buffer(&store, area.width, area.height);
     let due = model.layout.cell(TableColumn::Due, area);
     assert_eq!(text_in_cell(&buffer, due).trim(), "DUE");
-    assert!(text_in_cell(&buffer, Rect { y: 1, ..due }).trim().is_empty());
+    assert!(
+        text_in_cell(&buffer, Rect { y: 1, ..due })
+            .trim()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
