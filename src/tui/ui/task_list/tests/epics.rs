@@ -1,8 +1,6 @@
-use super::super::cells::*;
 use super::super::layout::TableLayout;
 use super::super::preview::task_preview_lines;
 use super::super::sizing::*;
-use super::super::table::*;
 use super::*;
 use crate::tui::theme::{FG, FG_MUTED, RED, YELLOW};
 use chrono::TimeZone;
@@ -321,7 +319,10 @@ fn epic_time_column_uses_subtree_activity_and_respects_due_order() {
         .timestamp();
     parent.task.due_on = Some("2026-06-23".to_string());
 
-    assert_eq!(epic_activity_cell(&parent, now, false, true).to_string(), "1d");
+    assert_eq!(
+        epic_activity_cell(&parent, now, false, true).to_string(),
+        "1d"
+    );
     assert_eq!(
         epic_activity_cell(&parent, now, true, true).to_string(),
         task_time_cell(&parent, now, TaskListRenderMode::Epics, true, true).to_string()
