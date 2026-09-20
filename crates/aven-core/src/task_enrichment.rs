@@ -1,9 +1,7 @@
-use crate::attachments::AttachmentBytesState;
 use crate::ids::{TaskId, WorkspaceId};
 use crate::metadata::TaskMetadataValue;
 use std::collections::{HashMap, HashSet};
 
-use crate::query::fragments;
 use crate::query::{
     AttachmentMetadata, EpicRollup, RecentActionItem, TaskDependencyLink, TaskNote,
     TaskRecurrenceSummary,
@@ -12,6 +10,11 @@ use crate::refs::DisplayRefContext;
 use anyhow::Result;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
+
+mod attachments;
+mod dependencies;
+mod epics;
+mod notes;
 
 const SQLITE_BIND_CHUNK_SIZE: usize = 900;
 
@@ -90,15 +93,15 @@ async fn load_task_enrichment_with_detail(
     let (notes_by_task, task_ids_with_notes, attachments_by_task, metadata_by_task) =
         if include_detail {
             (
-                notes_for_tasks(conn, workspace_id, task_ids).await?,
+                notes::notes_for_tasks(conn, workspace_id, task_ids).await?,
                 HashSet::new(),
-                attachments_for_tasks(conn, workspace_id, task_ids).await?,
+                attachments::attachments_for_tasks(conn, workspace_id, task_ids).await?,
                 crate::metadata::metadata_by_task_ids(conn, workspace_id, task_ids).await?,
             )
         } else {
             (
                 HashMap::new(),
-                task_ids_with_notes(conn, workspace_id, task_ids).await?,
+                notes::task_ids_with_notes(conn, workspace_id, task_ids).await?,
                 HashMap::new(),
                 HashMap::new(),
             )
@@ -114,7 +117,7 @@ async fn load_task_enrichment_with_detail(
             })
             .collect()
     } else {
-        live_attachment_counts_for_tasks(conn, workspace_id, task_ids).await?
+        attachments::live_attachment_counts_for_tasks(conn, workspace_id, task_ids).await?
     };
     let activity_by_task = if include_activity {
         crate::query::task_activity_for_tasks_in_workspace(conn, workspace_id, task_ids).await?
@@ -122,7 +125,7 @@ async fn load_task_enrichment_with_detail(
         HashMap::new()
     };
     let epic_children_by_task =
-        epic_children_for_tasks(conn, workspace_id, task_ids, display_refs).await?;
+        epics::epic_children_for_tasks(conn, workspace_id, task_ids, display_refs).await?;
     let epic_child_dependencies_by_task = if include_detail {
         let child_ids = epic_children_by_task
             .values()
@@ -131,7 +134,14 @@ async fn load_task_enrichment_with_detail(
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        dependency_links_for_tasks(conn, workspace_id, &child_ids, false, display_refs).await?
+        dependencies::dependency_links_for_tasks(
+            conn,
+            workspace_id,
+            &child_ids,
+            false,
+            display_refs,
+        )
+        .await?
     } else {
         HashMap::new()
     };
@@ -144,14 +154,19 @@ async fn load_task_enrichment_with_detail(
         metadata_by_task,
         activity_by_task,
         conflicted_task_ids: tasks_with_unresolved_conflicts(conn, workspace_id, task_ids).await?,
-        unresolved_blocker_counts_by_task: unresolved_blocker_counts_for_tasks(
+        unresolved_blocker_counts_by_task: dependencies::unresolved_blocker_counts_for_tasks(
             conn,
             workspace_id,
             task_ids,
         )
         .await?,
-        dependent_counts_by_task: dependent_counts_for_tasks(conn, workspace_id, task_ids).await?,
-        depends_on_by_task: dependency_links_for_tasks(
+        dependent_counts_by_task: dependencies::dependent_counts_for_tasks(
+            conn,
+            workspace_id,
+            task_ids,
+        )
+        .await?,
+        depends_on_by_task: dependencies::dependency_links_for_tasks(
             conn,
             workspace_id,
             task_ids,
@@ -159,7 +174,7 @@ async fn load_task_enrichment_with_detail(
             display_refs,
         )
         .await?,
-        blocks_by_task: dependency_links_for_tasks(
+        blocks_by_task: dependencies::dependency_links_for_tasks(
             conn,
             workspace_id,
             task_ids,
@@ -175,180 +190,18 @@ async fn load_task_enrichment_with_detail(
         },
         epic_children_by_task,
         epic_child_dependencies_by_task,
-        epic_parent_by_task: epic_parents_for_tasks(conn, workspace_id, task_ids, display_refs)
-            .await?,
-        epic_rollups_by_task: epic_rollups_for_tasks(conn, workspace_id, task_ids).await?,
+        epic_parent_by_task: epics::epic_parents_for_tasks(
+            conn,
+            workspace_id,
+            task_ids,
+            display_refs,
+        )
+        .await?,
+        epic_rollups_by_task: epics::epic_rollups_for_tasks(conn, workspace_id, task_ids).await?,
         recurrence_by_task: crate::query::task_recurrence_summaries(conn, workspace_id, task_ids)
             .await?,
     })
 }
-
-async fn live_attachment_counts_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, u32>> {
-    let mut counts = HashMap::new();
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT task_id, count(*) AS attachment_count FROM task_attachments
-             WHERE deleted = 0 AND workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND task_id IN (");
-        let mut separated = query.separated(", ");
-        for task_id in chunk {
-            separated.push_bind(task_id);
-        }
-        query.push(") GROUP BY task_id");
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let count = row.get::<i64, _>("attachment_count");
-            counts.insert(
-                row.get("task_id"),
-                count.clamp(0, i64::from(u32::MAX)) as u32,
-            );
-        }
-    }
-    Ok(counts)
-}
-
-async fn attachments_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, Vec<AttachmentMetadata>>> {
-    let mut attachments_by_task = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(attachments_by_task);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT ta.attachment_id, ta.task_id, ta.sha256, ta.media_type, ta.byte_size,
-                    ta.filename, ta.alt_text, ta.width, ta.height, ta.created_at,
-                    ta.deleted, ta.deleted_at,
-                    CASE WHEN bi.sha256 IS NULL THEN 0 ELSE 1 END AS has_inventory,
-                    COALESCE(bi.available, 0) AS has_blob
-             FROM task_attachments ta
-             LEFT JOIN blob_inventory bi ON bi.sha256 = ta.sha256
-             WHERE ta.workspace_id =",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND ta.task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(") AND ta.deleted = 0 ORDER BY ta.task_id, ta.created_at, ta.attachment_id");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let task_id: TaskId = row.get("task_id");
-            let has_blob = row.get::<i64, _>("has_blob") != 0;
-            let bytes_state = if has_blob {
-                AttachmentBytesState::Present
-            } else if row.get::<i64, _>("has_inventory") != 0 {
-                AttachmentBytesState::Unavailable
-            } else {
-                AttachmentBytesState::PendingDownload
-            };
-            attachments_by_task
-                .entry(task_id.clone())
-                .or_insert_with(Vec::new)
-                .push(AttachmentMetadata {
-                    attachment_id: row.get("attachment_id"),
-                    task_id: task_id.to_string(),
-                    sha256: row.get("sha256"),
-                    media_type: row.get("media_type"),
-                    byte_size: row.get("byte_size"),
-                    filename: row.get("filename"),
-                    alt_text: row.get("alt_text"),
-                    width: row.get("width"),
-                    height: row.get("height"),
-                    created_at: row.get("created_at"),
-                    deleted: row.get::<i64, _>("deleted") != 0,
-                    deleted_at: row.get("deleted_at"),
-                    bytes_state,
-                    has_blob,
-                });
-        }
-    }
-    Ok(attachments_by_task)
-}
-
-async fn notes_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, Vec<TaskNote>>> {
-    let mut notes_by_task = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(notes_by_task);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT task_id, id, body, created_at FROM notes WHERE workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(") ORDER BY task_id, created_at DESC, id DESC");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let task_id: TaskId = row.get("task_id");
-            let note = TaskNote {
-                id: row.get("id"),
-                body: row.get("body"),
-                created_at: row.get("created_at"),
-            };
-            notes_by_task
-                .entry(task_id)
-                .or_insert_with(Vec::new)
-                .push(note);
-        }
-    }
-    Ok(notes_by_task)
-}
-
-async fn task_ids_with_notes(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashSet<TaskId>> {
-    let mut task_ids_with_notes = HashSet::new();
-    if task_ids.is_empty() {
-        return Ok(task_ids_with_notes);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT DISTINCT task_id
-             FROM notes WHERE workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(")");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            task_ids_with_notes.insert(row.get("task_id"));
-        }
-    }
-    Ok(task_ids_with_notes)
-}
-
 pub(crate) async fn labels_for_tasks(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
@@ -404,7 +257,6 @@ fn dependency_link_from_row(
         unresolved: row.get::<i64, _>("unresolved") != 0,
     }
 }
-
 async fn tasks_with_unresolved_conflicts(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
@@ -437,354 +289,13 @@ async fn tasks_with_unresolved_conflicts(
     }
     Ok(conflicted)
 }
-
-async fn unresolved_blocker_counts_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, i64>> {
-    let mut counts = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(counts);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT d.task_id, COUNT(*) AS blockers
-             FROM task_dependencies d
-             JOIN tasks blocker
-              ON blocker.workspace_id = d.workspace_id AND blocker.id = d.depends_on_task_id
-             WHERE d.workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND d.task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(format!(
-            ") AND {} GROUP BY d.task_id",
-            fragments::open_task_clause("blocker"),
-        ));
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            counts.insert(row.get("task_id"), row.get::<i64, _>("blockers"));
-        }
-    }
-    Ok(counts)
-}
-
-async fn dependent_counts_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, i64>> {
-    let mut counts = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(counts);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT d.depends_on_task_id, COUNT(*) AS dependents
-             FROM task_dependencies d
-             JOIN tasks blocker
-              ON blocker.workspace_id = d.workspace_id AND blocker.id = d.depends_on_task_id
-             JOIN tasks dependent
-              ON dependent.workspace_id = d.workspace_id AND dependent.id = d.task_id
-             WHERE d.workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND d.depends_on_task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(format!(
-            ") AND {} AND {} GROUP BY d.depends_on_task_id",
-            fragments::open_task_clause("blocker"),
-            fragments::open_task_clause("dependent"),
-        ));
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            counts.insert(
-                row.get("depends_on_task_id"),
-                row.get::<i64, _>("dependents"),
-            );
-        }
-    }
-    Ok(counts)
-}
-
-async fn dependency_links_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-    blocks_only: bool,
-    display_refs: &DisplayRefContext,
-) -> Result<HashMap<TaskId, Vec<TaskDependencyLink>>> {
-    let mut links = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(links);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let initial = if blocks_only {
-            format!(
-                "SELECT d.depends_on_task_id AS source_task_id,
-                        t.id, t.title, t.status, t.priority, p.key AS project_key, p.prefix AS project_prefix,
-                        d.created_at AS dependency_created_at,
-                        CASE
-                            WHEN {}
-                             AND {}
-                            THEN 1 ELSE 0
-                        END AS unresolved
-                 FROM task_dependencies d
-                 JOIN tasks blocker
-                  ON blocker.workspace_id = d.workspace_id AND blocker.id = d.depends_on_task_id
-                 JOIN tasks t
-                  ON t.workspace_id = d.workspace_id AND t.id = d.task_id
-                 JOIN projects p
-                  ON p.workspace_id = t.workspace_id AND p.id = t.project_id
-                 WHERE d.workspace_id =",
-                fragments::open_task_clause("blocker"),
-                fragments::open_task_clause("t"),
-            )
-        } else {
-            format!(
-                "SELECT d.task_id AS source_task_id,
-                        t.id, t.title, t.status, t.priority, p.key AS project_key, p.prefix AS project_prefix,
-                        d.created_at AS dependency_created_at,
-                        CASE
-                            WHEN {}
-                            THEN 1 ELSE 0
-                        END AS unresolved
-                 FROM task_dependencies d
-                 JOIN tasks t
-                  ON t.workspace_id = d.workspace_id AND t.id = d.depends_on_task_id
-                 JOIN projects p
-                  ON p.workspace_id = t.workspace_id AND p.id = t.project_id
-                 WHERE d.workspace_id =",
-                fragments::open_task_clause("t"),
-            )
-        };
-        let mut query = QueryBuilder::<Sqlite>::new(&initial);
-        query.push_bind(workspace_id);
-        let source_column = if blocks_only {
-            "d.depends_on_task_id"
-        } else {
-            "d.task_id"
-        };
-        query.push(" AND ");
-        query.push(source_column);
-        query.push(" IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(") ORDER BY unresolved DESC, t.status, t.title, d.created_at, t.id");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let source_task_id: TaskId = row.get("source_task_id");
-            links
-                .entry(source_task_id)
-                .or_insert_with(Vec::new)
-                .push(dependency_link_from_row(&row, workspace_id, display_refs));
-        }
-    }
-    Ok(links)
-}
-
-async fn epic_children_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-    display_refs: &DisplayRefContext,
-) -> Result<HashMap<TaskId, Vec<TaskDependencyLink>>> {
-    let mut links = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(links);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT l.epic_task_id AS source_task_id,
-                    t.id, t.title, t.status, t.priority, p.key AS project_key, p.prefix AS project_prefix,
-                    CASE WHEN ",
-        );
-        query.push(fragments::open_task_clause("t"));
-        query.push(
-            " THEN 1 ELSE 0 END AS unresolved
-             FROM task_epic_links l
-             JOIN tasks t ON t.workspace_id = l.workspace_id AND t.id = l.child_task_id
-             JOIN projects p ON p.workspace_id = t.workspace_id AND p.id = t.project_id
-             WHERE l.workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND l.epic_task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(
-            ") AND t.deleted = 0 ORDER BY unresolved DESC, t.status, t.title, l.created_at, t.id",
-        );
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let source_task_id: TaskId = row.get("source_task_id");
-            links
-                .entry(source_task_id)
-                .or_insert_with(Vec::new)
-                .push(dependency_link_from_row(&row, workspace_id, display_refs));
-        }
-    }
-    Ok(links)
-}
-
-async fn epic_rollups_for_tasks(
-    conn: &mut SqliteConnection,
-    workspace_id: &WorkspaceId,
-    task_ids: &[TaskId],
-) -> Result<HashMap<TaskId, EpicRollup>> {
-    let mut rollups = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(rollups);
-    }
-    let now = crate::ids::now();
-    let today = chrono::Local::now()
-        .date_naive()
-        .format("%Y-%m-%d")
-        .to_string();
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT l.epic_task_id,
-                    COUNT(*) AS total,
-                    SUM(CASE WHEN t.status NOT IN ('done', 'canceled') THEN 1 ELSE 0 END) AS open,
-                    SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) AS done,
-                    SUM(CASE WHEN t.status = 'canceled' THEN 1 ELSE 0 END) AS canceled,
-                    SUM(CASE WHEN t.status NOT IN ('done', 'canceled') AND EXISTS (
-                        SELECT 1 FROM task_dependencies d
-                        JOIN tasks blocker
-                          ON blocker.workspace_id = d.workspace_id
-                         AND blocker.id = d.depends_on_task_id
-                        WHERE d.workspace_id = t.workspace_id
-                          AND d.task_id = t.id
-                          AND blocker.deleted = 0
-                          AND blocker.status NOT IN ('done', 'canceled')
-                    ) THEN 1 ELSE 0 END) AS blocked,
-                    SUM(CASE WHEN t.status NOT IN ('done', 'canceled')
-                                  AND t.due_on != '' AND t.due_on < ",
-        );
-        query.push_bind(&today);
-        query.push(
-            " THEN 1 ELSE 0 END) AS overdue,
-                    SUM(CASE WHEN t.status NOT IN ('done', 'canceled')
-                                  AND (t.available_at = '' OR t.available_at <= ",
-        );
-        query.push_bind(&now);
-        query.push(
-            ") AND NOT EXISTS (
-                        SELECT 1 FROM task_dependencies d
-                        JOIN tasks blocker
-                          ON blocker.workspace_id = d.workspace_id
-                         AND blocker.id = d.depends_on_task_id
-                        WHERE d.workspace_id = t.workspace_id
-                          AND d.task_id = t.id
-                          AND blocker.deleted = 0
-                          AND blocker.status NOT IN ('done', 'canceled')
-                    ) THEN 1 ELSE 0 END) AS ready,
-                    MAX(t.updated_at) AS latest_activity_at
-             FROM task_epic_links l
-             JOIN tasks t
-               ON t.workspace_id = l.workspace_id AND t.id = l.child_task_id
-             WHERE l.workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND l.epic_task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(") AND t.deleted = 0 GROUP BY l.epic_task_id");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let epic_id: TaskId = row.get("epic_task_id");
-            rollups.insert(
-                epic_id,
-                EpicRollup {
-                    total: usize::try_from(row.get::<i64, _>("total")).unwrap_or(usize::MAX),
-                    open: usize::try_from(row.get::<i64, _>("open")).unwrap_or(usize::MAX),
-                    done: usize::try_from(row.get::<i64, _>("done")).unwrap_or(usize::MAX),
-                    canceled: usize::try_from(row.get::<i64, _>("canceled")).unwrap_or(usize::MAX),
-                    blocked: usize::try_from(row.get::<i64, _>("blocked")).unwrap_or(usize::MAX),
-                    overdue: usize::try_from(row.get::<i64, _>("overdue")).unwrap_or(usize::MAX),
-                    ready: usize::try_from(row.get::<i64, _>("ready")).unwrap_or(usize::MAX),
-                    latest_activity_at: row.get("latest_activity_at"),
-                },
-            );
-        }
-    }
-    Ok(rollups)
-}
-
 pub(crate) async fn epic_parents_for_tasks(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
     task_ids: &[TaskId],
     display_refs: &DisplayRefContext,
 ) -> Result<HashMap<TaskId, TaskDependencyLink>> {
-    let mut links = HashMap::new();
-    if task_ids.is_empty() {
-        return Ok(links);
-    }
-    for chunk in task_ids.chunks(SQLITE_BIND_CHUNK_SIZE) {
-        let mut query = QueryBuilder::<Sqlite>::new(
-            "SELECT l.child_task_id AS source_task_id,
-                    t.id, t.title, t.status, t.priority, p.key AS project_key, p.prefix AS project_prefix,
-                    CASE WHEN ",
-        );
-        query.push(fragments::open_task_clause("t"));
-        query.push(
-            " THEN 1 ELSE 0 END AS unresolved
-             FROM task_epic_links l
-             JOIN tasks t ON t.workspace_id = l.workspace_id AND t.id = l.epic_task_id
-             JOIN projects p ON p.workspace_id = t.workspace_id AND p.id = t.project_id
-             WHERE l.workspace_id = ",
-        );
-        query.push_bind(workspace_id);
-        query.push(" AND l.child_task_id IN (");
-        {
-            let mut separated = query.separated(", ");
-            for task_id in chunk {
-                separated.push_bind(task_id);
-            }
-        }
-        query.push(") AND t.deleted = 0 ORDER BY t.title, l.created_at, t.id");
-
-        for row in query.build().fetch_all(&mut *conn).await? {
-            let source_task_id: TaskId = row.get("source_task_id");
-            links.insert(
-                source_task_id,
-                dependency_link_from_row(&row, workspace_id, display_refs),
-            );
-        }
-    }
-    Ok(links)
+    epics::epic_parents_for_tasks(conn, workspace_id, task_ids, display_refs).await
 }
 
 #[cfg(test)]
