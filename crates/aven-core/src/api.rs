@@ -503,7 +503,7 @@ impl Store {
             .expect("persisted task status is validated by core mutations");
         let mutation = InternalIosTaskMutation::DetailStatus {
             status: status.as_str().to_string(),
-            expected_version: outcome.status_version,
+            expected_version: outcome.field_version,
         };
         let undo_token = outcome.changed.then(|| {
             serde_json::to_string(&IosMutationUndoToken {
@@ -531,6 +531,64 @@ impl Store {
                 "invalid detail status undo token".to_string(),
             ));
         }
+        self.undo_ios_mutation(token).await
+    }
+
+    /// Sets the synchronized soft-deletion field and returns a conditional Undo receipt.
+    pub async fn set_ios_task_deleted(
+        &self,
+        workspace_id: &WorkspaceId,
+        task_id: &TaskId,
+        deleted: bool,
+    ) -> Result<IosTaskDeletionReceipt, Error> {
+        let workspace = self.workspace(workspace_id).await?;
+        let mutation = InternalIosTaskMutation::DeletedState {
+            deleted,
+            expected_version: None,
+        };
+        let outcome = self
+            .database
+            .mutate_ios_task(&workspace, task_id, &mutation)
+            .await
+            .map_err(Error::from_internal)?;
+        let deleted = outcome.after.deleted;
+        let mutation = InternalIosTaskMutation::DeletedState {
+            deleted,
+            expected_version: outcome.field_version,
+        };
+        let undo_token = outcome.changed.then(|| {
+            serde_json::to_string(&IosMutationUndoToken {
+                workspace_id: workspace_id.clone(),
+                task_id: task_id.clone(),
+                mutation,
+                before: outcome.before,
+                expected: outcome.after,
+            })
+            .expect("Undo snapshots contain only JSON-serializable values")
+        });
+        Ok(IosTaskDeletionReceipt {
+            deleted,
+            undo_token,
+        })
+    }
+
+    pub async fn undo_ios_task_deletion(&self, undo_token: &str) -> Result<(), Error> {
+        let token: IosMutationUndoToken = serde_json::from_str(undo_token).map_err(|_| {
+            Error::new(
+                ErrorCode::Validation,
+                "invalid task deletion undo token".to_string(),
+            )
+        })?;
+        if !matches!(token.mutation, InternalIosTaskMutation::DeletedState { .. }) {
+            return Err(Error::new(
+                ErrorCode::Validation,
+                "invalid task deletion undo token".to_string(),
+            ));
+        }
+        self.undo_ios_mutation(token).await
+    }
+
+    async fn undo_ios_mutation(&self, token: IosMutationUndoToken) -> Result<(), Error> {
         let workspace = self.workspace(&token.workspace_id).await?;
         self.database
             .undo_ios_task_mutation(
@@ -1823,6 +1881,12 @@ pub struct IosQueueMutationResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IosDetailStatusReceipt {
     pub status: TaskStatus,
+    pub undo_token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IosTaskDeletionReceipt {
+    pub deleted: bool,
     pub undo_token: Option<String>,
 }
 

@@ -330,7 +330,7 @@ async fn task_field_value_for_field(
     .bind(task_id)
     .fetch_optional(&mut *conn)
     .await?
-    .ok_or_else(|| anyhow::anyhow!("error task-not-found task_id={task_id}"))?;
+    .ok_or_else(|| CoreError::not_found(format!("error task-not-found task_id={task_id}")))?;
     let task = task_from_row(&row)?;
     Ok(task_field.current_value(&task))
 }
@@ -364,7 +364,7 @@ pub(crate) async fn task_snapshot(
     .bind(task_id)
     .fetch_optional(&mut *conn)
     .await?
-    .ok_or_else(|| anyhow::anyhow!("error task-not-found task_id={task_id}"))?;
+    .ok_or_else(|| CoreError::not_found(format!("error task-not-found task_id={task_id}")))?;
     let labels = task_labels(conn, workspace_id, task_id).await?;
     let metadata = sqlx::query_as::<_, (String, String)>(
         "SELECT field_id, value FROM task_metadata
