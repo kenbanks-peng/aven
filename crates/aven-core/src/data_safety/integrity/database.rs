@@ -3,12 +3,9 @@ use sqlx::{SqliteConnection, query_scalar};
 
 use crate::db;
 
-use super::integrity;
-use super::{IntegrityCheck, IntegrityReport};
+use super::super::{IntegrityCheck, IntegrityReport};
 
-pub(super) async fn database_integrity_report_with_connection(
-    conn: &mut SqliteConnection,
-) -> Result<IntegrityReport> {
+pub(super) async fn report_with_connection(conn: &mut SqliteConnection) -> Result<IntegrityReport> {
     let quick_check_value: String = query_scalar("PRAGMA quick_check")
         .fetch_one(&mut *conn)
         .await?;
@@ -221,7 +218,7 @@ pub(super) async fn database_integrity_report_with_connection(
         "SELECT count(*) FROM field_versions fv LEFT JOIN changes c ON c.change_id = fv.version WHERE c.change_id IS NULL AND NOT (fv.entity_type = 'task' AND EXISTS (SELECT 1 FROM recurrence_occurrences o WHERE o.workspace_id = fv.workspace_id AND o.task_id = fv.entity_id))",
     )
     .await?);
-    checks.extend(integrity::recurrence_integrity_checks(conn).await?);
+    checks.extend(super::recurrence_integrity_checks(conn).await?);
     push_meta_checks(conn, &mut checks).await?;
 
     Ok(IntegrityReport {
@@ -231,7 +228,7 @@ pub(super) async fn database_integrity_report_with_connection(
     })
 }
 
-pub(super) fn ensure_integrity_ok(report: &IntegrityReport) -> Result<()> {
+pub(super) fn ensure_ok(report: &IntegrityReport) -> Result<()> {
     let mut bad = vec![];
     if !report.quick_check_ok {
         bad.push("quick check");

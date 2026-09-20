@@ -12,7 +12,7 @@ use crate::db::{
 use crate::recurrence::{RecurrenceSchedule, derive_occurrence_identity, is_slot};
 
 use super::super::IntegrityCheck;
-use super::super::recurrence_validation::recurrence_stop_boundary_valid;
+use super::super::validation::recurrence::recurrence_stop_boundary_valid;
 use super::count_check;
 
 pub(super) async fn recurrence_integrity_checks(

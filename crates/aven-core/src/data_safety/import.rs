@@ -6,8 +6,8 @@ use sqlx::SqliteConnection;
 use crate::db;
 
 use super::AvenExport;
-use super::recurrence_validation::has_recurrence_data;
 use super::tables;
+use super::validation::recurrence::has_recurrence_data;
 
 pub(super) async fn replace_from_export(
     tx: &mut SqliteConnection,

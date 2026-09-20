@@ -2,10 +2,19 @@ use anyhow::Result;
 use sqlx::{SqliteConnection, query_scalar};
 use std::path::Path;
 
-use super::IntegrityCheck;
+use super::{IntegrityCheck, IntegrityReport};
 
 mod attachments;
+mod database;
 mod recurrence;
+
+pub(super) async fn database_report(conn: &mut SqliteConnection) -> Result<IntegrityReport> {
+    database::report_with_connection(conn).await
+}
+
+pub(super) fn ensure_ok(report: &IntegrityReport) -> Result<()> {
+    database::ensure_ok(report)
+}
 
 pub(crate) async fn recurrence_integrity_checks(
     conn: &mut SqliteConnection,

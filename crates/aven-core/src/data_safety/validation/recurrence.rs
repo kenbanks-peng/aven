@@ -13,9 +13,9 @@ use crate::recurrence::{
 };
 use crate::task_fields::TaskField;
 
-use super::{AvenExport, ChangeRow, RecurrenceSeriesRow};
+use super::super::export_types::{AvenExport, ChangeRow, RecurrenceSeriesRow};
 
-pub(super) fn has_recurrence_data(export: &AvenExport) -> bool {
+pub(in crate::data_safety) fn has_recurrence_data(export: &AvenExport) -> bool {
     !export.tables.recurrence_series.is_empty()
         || !export.tables.recurrence_series_labels.is_empty()
         || !export.tables.recurrence_series_metadata.is_empty()
@@ -25,7 +25,7 @@ pub(super) fn has_recurrence_data(export: &AvenExport) -> bool {
 
 // A stopped series retains its final projection, even when its slot is in the future.
 // Only that occurrence may resolve after stopping, and it cannot generate a successor.
-pub(super) fn recurrence_stop_boundary_valid(
+pub(in crate::data_safety) fn recurrence_stop_boundary_valid(
     stopped_at: &str,
     resolved_at: Option<&str>,
     archived_at: Option<&str>,

@@ -8,8 +8,10 @@ use crate::choices::TaskSource;
 use crate::ids::{ProjectId, TaskId, WorkspaceId};
 use crate::recurrence::RecurrenceSeriesId;
 
+use super::AvenExport;
 use super::export_types::{EXPORT_FORMAT, EXPORT_VERSION};
-use super::{AvenExport, recurrence_validation};
+
+pub(super) mod recurrence;
 
 pub(super) async fn ensure_supported_export(
     _conn: &mut SqliteConnection,
@@ -463,8 +465,8 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
         "error invalid-export-snapshot recurrence metadata limits exceeded"
     );
 
-    if recurrence_validation::has_recurrence_data(export) {
-        recurrence_validation::validate_recurrence_snapshot(
+    if recurrence::has_recurrence_data(export) {
+        recurrence::validate_recurrence_snapshot(
             export,
             &workspace_ids,
             &project_ids,

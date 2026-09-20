@@ -31,7 +31,7 @@ mod tests;
 
 mod lifecycle;
 mod projection;
-mod task_gate_undo;
+mod resolution;
 mod template;
 
 pub use lifecycle::{pause_recurrence_series, resume_recurrence_series, stop_recurrence_series};
@@ -41,8 +41,8 @@ pub(crate) use lifecycle::{
 pub(crate) use projection::reconcile_recurrence_series_in_transaction;
 use projection::{materialize_occurrence, verify_materialized_occurrence};
 use projection::{reconcile_recurrence_series_once, retryable_reconcile_error};
-pub(crate) use task_gate_undo::resolve_recurrence_occurrence_in_transaction;
-pub(crate) use task_gate_undo::{
+pub(crate) use resolution::resolve_recurrence_occurrence_in_transaction;
+pub(crate) use resolution::{
     RecurrenceMutationOutcome, RecurrenceStructuralMutation, RecurrenceTaskMutation,
     route_recurrence_task_mutation, undo_recurrence_resolution,
 };

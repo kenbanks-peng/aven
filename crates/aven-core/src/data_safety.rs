@@ -4,16 +4,21 @@ use std::path::{Path, PathBuf};
 use crate::db::{self, Database};
 
 mod archive;
-mod database_integrity;
 mod export_types;
 mod import;
 mod integrity;
-mod recurrence_validation;
 mod scan;
 mod tables;
 mod validation;
 
-pub use export_types::*;
+pub use export_types::{
+    AvenExport, BlobInventoryExportRow, ChangeRow, ConflictRow, ExportTables, FieldVersionRow,
+    LabelRow, MetaRow, MetadataFieldIdAliasRow, MetadataFieldRow, NoteRow, ProjectIdAliasRow,
+    ProjectPathRow, ProjectRow, RecurrenceOccurrenceRow, RecurrencePauseIntervalRow,
+    RecurrenceSeriesLabelRow, RecurrenceSeriesMetadataRow, RecurrenceSeriesRow, TaskAttachmentRow,
+    TaskDependencyRow, TaskEpicLinkRow, TaskLabelRow, TaskMetadataRow, TaskRelatedLinkRow, TaskRow,
+    WorkspaceRow,
+};
 use export_types::{EXPORT_FORMAT, EXPORT_VERSION};
 
 #[derive(Debug, Clone)]
@@ -31,7 +36,7 @@ pub struct IntegrityCheck {
 }
 
 pub(crate) fn ensure_integrity_ok(report: &IntegrityReport) -> Result<()> {
-    database_integrity::ensure_integrity_ok(report)
+    integrity::ensure_ok(report)
 }
 
 impl Database {
@@ -97,7 +102,7 @@ impl Database {
             .context("missing target client_id")?;
         let mut tx = db::begin_immediate(&mut conn).await?;
         import::replace_from_export(&mut tx, export, &target_client_id).await?;
-        let report = database_integrity::database_integrity_report_with_connection(&mut tx).await?;
+        let report = integrity::database_report(&mut tx).await?;
         ensure_integrity_ok(&report)?;
         tx.commit().await?;
         Ok(report)
@@ -105,7 +110,7 @@ impl Database {
 
     pub async fn database_integrity_report(&self) -> Result<IntegrityReport> {
         let mut conn = self.acquire_reader().await?;
-        database_integrity::database_integrity_report_with_connection(&mut conn).await
+        integrity::database_report(&mut conn).await
     }
 
     pub async fn attachment_integrity_checks(
