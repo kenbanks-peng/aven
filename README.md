@@ -73,7 +73,7 @@ brew install raine/aven/aven
 Open Aven:
 
 ```sh
-aven tui
+aven
 ```
 
 Or try the demo:
