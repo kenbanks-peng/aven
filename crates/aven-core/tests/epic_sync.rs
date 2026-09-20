@@ -112,7 +112,7 @@ impl Replicas {
         // Each read opens persisted state without retaining a replica handle.
         let store = Store::open(path).await.unwrap();
         let detail = store
-            .ios_task_detail(&self.workspace, &self.child)
+            .task_detail(&self.workspace, &self.child)
             .await
             .unwrap();
         assert_eq!(
@@ -124,10 +124,7 @@ impl Replicas {
         assert!(detail.blocked_by.is_empty());
         assert!(detail.blocks.is_empty());
         for parent in &self.parents {
-            let detail = store
-                .ios_task_detail(&self.workspace, parent)
-                .await
-                .unwrap();
+            let detail = store.task_detail(&self.workspace, parent).await.unwrap();
             let children: Vec<_> = detail
                 .epic_children
                 .iter()
@@ -151,7 +148,7 @@ impl Replicas {
     async fn assert_all(&self, expected: Option<&TaskId>) {
         for path in [&self.first, &self.second] {
             let db = Database::open(path).await.unwrap();
-            let facts = db.ios_sync_facts().await.unwrap();
+            let facts = db.sync_facts().await.unwrap();
             assert_eq!(facts.pending_changes, 0, "{}: {facts:?}", path.display());
             assert!(facts.metadata_caught_up, "{}: {facts:?}", path.display());
             drop(db);
@@ -235,7 +232,7 @@ async fn drain(path: &Path, server: &Database, push_limit: usize, pull_limit: u3
         let facts = Database::open(path)
             .await
             .unwrap()
-            .ios_sync_facts()
+            .sync_facts()
             .await
             .unwrap();
         if !response.has_more && facts.pending_changes == 0 {
@@ -351,7 +348,7 @@ async fn acknowledgement_beyond_cursor_preserves_write_after_prepare_and_reopen(
     replicas.add(&replicas.second, parent).await;
     apply(&replicas.second, request, response).await;
     let db = Database::open(&replicas.second).await.unwrap();
-    let facts = db.ios_sync_facts().await.unwrap();
+    let facts = db.sync_facts().await.unwrap();
     assert_eq!(facts.pending_changes, 1);
     assert!(!facts.metadata_caught_up);
     drop(db);
@@ -393,7 +390,7 @@ async fn acknowledged_readd_beyond_cursor_is_visible_without_pending_writes() {
     let facts = Database::open(&replicas.second)
         .await
         .unwrap()
-        .ios_sync_facts()
+        .sync_facts()
         .await
         .unwrap();
     assert_eq!(facts.pending_changes, 0);

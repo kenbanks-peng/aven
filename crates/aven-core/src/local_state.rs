@@ -17,7 +17,7 @@ pub enum OnboardingStatus {
 }
 
 impl Database {
-    pub async fn restore_ios_queue_workspace(&self) -> Result<crate::workspaces::Workspace> {
+    pub async fn restore_queue_workspace(&self) -> Result<crate::workspaces::Workspace> {
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         let workspaces = crate::workspaces::list_workspaces(&mut tx).await?;
@@ -34,7 +34,7 @@ impl Database {
         Ok(selected)
     }
 
-    pub async fn select_ios_queue_workspace(
+    pub async fn select_queue_workspace(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<crate::workspaces::Workspace> {

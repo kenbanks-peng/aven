@@ -2,13 +2,13 @@ use std::path::Path;
 
 use aven_core::api::{
     ConflictField, ConflictResolution, CreateRecurrenceSeries, CreateTask, ErrorCode,
-    IosQueueMutation, IosQueueMutationKind, IosTaskCapture, MetadataInput, OptionalDateUpdate,
-    OptionalLocalTimeUpdate, QueueBand, QueueDate, QueueDateKind, QueueReason, RecurrenceDuePolicy,
+    MetadataInput, OptionalDateUpdate, OptionalLocalTimeUpdate, QueueBand, QueueDate,
+    QueueDateKind, QueueMutation, QueueMutationKind, QueueReason, RecurrenceDuePolicy,
     RecurrenceFrequency, RecurrenceHistoryKind, RecurrenceOutcome, RecurrenceProjectionState,
-    RecurrenceRule, RecurrenceScheduleInput, RecurrenceSeriesState, Store,
+    RecurrenceRule, RecurrenceScheduleInput, RecurrenceSeriesState, Store, TaskCapture,
     UpdateRecurrenceTemplate, UpdateTask,
 };
-use aven_core::choices::{TaskPriority, TaskStatus};
+use aven_core::choices::{TaskPriority, TaskSource, TaskStatus};
 use aven_core::db::Database;
 use aven_core::ids::{TaskId, WorkspaceId};
 use aven_core::recurrence::RecurrenceSeriesId;
@@ -20,7 +20,7 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
 
 #[tokio::test]
-async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
+async fn consumer_navigation_reads_project_and_search_rows_by_stable_identity() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-navigation.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -57,7 +57,7 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
         )
         .await
         .unwrap();
-    let state = store.ios_queue_state().await.unwrap();
+    let state = store.queue_state().await.unwrap();
     let project = state
         .projects
         .iter()
@@ -65,7 +65,7 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
         .unwrap();
 
     let project_rows = store
-        .ios_project_tasks(&workspace.id, &project.id)
+        .project_tasks(&workspace.id, &project.id)
         .await
         .unwrap();
     assert_eq!(project_rows.len(), 1);
@@ -74,7 +74,7 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
     assert!(!project_rows[0].display_ref.is_empty());
 
     let results = store
-        .ios_search_tasks(&workspace.id, "distinct local search phrase")
+        .search_tasks(&workspace.id, "distinct local search phrase")
         .await
         .unwrap();
     assert_eq!(results.len(), 1);
@@ -82,7 +82,7 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
     assert_eq!(results[0].task.display_ref, project_rows[0].display_ref);
     assert!(
         store
-            .ios_search_tasks(&workspace.id, "   ")
+            .search_tasks(&workspace.id, "   ")
             .await
             .unwrap()
             .is_empty()
@@ -95,7 +95,7 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
         .await
         .unwrap();
     let cross_workspace = store
-        .ios_project_tasks(&workspace.id, &foreign_project.id)
+        .project_tasks(&workspace.id, &foreign_project.id)
         .await
         .unwrap_err();
     assert_eq!(cross_workspace.code, ErrorCode::NotFound);
@@ -114,14 +114,14 @@ async fn ios_navigation_reads_project_and_search_rows_by_stable_identity() {
         .await
         .unwrap();
     let unavailable = store
-        .ios_project_tasks(&workspace.id, &project.id)
+        .project_tasks(&workspace.id, &project.id)
         .await
         .unwrap_err();
     assert_eq!(unavailable.code, ErrorCode::NotFound);
 }
 
 #[tokio::test]
-async fn ios_capture_is_local_workspace_scoped_and_reversible() {
+async fn queue_capture_is_local_workspace_scoped_and_reversible() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-capture.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -149,7 +149,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
         .await
         .unwrap();
 
-    let initial = store.ios_queue_state().await.unwrap();
+    let initial = store.queue_state().await.unwrap();
     assert_eq!(
         initial
             .projects
@@ -161,14 +161,15 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
     assert_eq!(initial.labels, ["capture"]);
 
     let missing_project = store
-        .capture_ios_queue_task(
+        .capture_queue_task(
             &workspace.id,
-            IosTaskCapture {
+            TaskCapture {
                 description: String::new(),
                 title: "Requires a selected project".to_string(),
                 project: None,
                 status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
+                source: TaskSource::Ios,
                 due_on: None,
                 labels: Vec::new(),
             },
@@ -176,20 +177,21 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
         .await
         .unwrap_err();
     assert_eq!(missing_project.code, ErrorCode::Validation);
-    let after_rejection = store.ios_queue_state().await.unwrap();
+    let after_rejection = store.queue_state().await.unwrap();
     assert_eq!(after_rejection.projects, initial.projects);
     assert_eq!(after_rejection.queue.tasks, initial.queue.tasks);
 
     let due_on = (chrono::Utc::now().date_naive() + chrono::Duration::days(7)).to_string();
     let captured = store
-        .capture_ios_queue_task(
+        .capture_queue_task(
             &workspace.id,
-            IosTaskCapture {
+            TaskCapture {
                 description: "    code block\n\n- item\n".to_string(),
                 title: "  Captured offline  ".to_string(),
                 project: Some("ios".to_string()),
                 status: TaskStatus::Inbox,
                 priority: TaskPriority::High,
+                source: TaskSource::Ios,
                 due_on: Some(due_on.clone()),
                 labels: vec!["capture".to_string()],
             },
@@ -212,7 +214,7 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
     assert_eq!(row.title, "Captured offline");
     let reopened = Store::open(&path).await.unwrap();
     let detail = reopened
-        .ios_task_detail(&workspace.id, &captured.task_id)
+        .task_detail(&workspace.id, &captured.task_id)
         .await
         .unwrap();
     assert_eq!(detail.description, "    code block\n\n- item\n");
@@ -226,44 +228,47 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
     assert_eq!(row.band, QueueBand::Focus);
 
     for input in [
-        IosTaskCapture {
+        TaskCapture {
             description: String::new(),
             title: "   ".to_string(),
             project: None,
             status: TaskStatus::Inbox,
             priority: TaskPriority::None,
+            source: TaskSource::Ios,
             due_on: None,
             labels: Vec::new(),
         },
-        IosTaskCapture {
+        TaskCapture {
             description: String::new(),
             title: "Stale project".to_string(),
             project: Some("missing".to_string()),
             status: TaskStatus::Inbox,
             priority: TaskPriority::None,
+            source: TaskSource::Ios,
             due_on: None,
             labels: Vec::new(),
         },
-        IosTaskCapture {
+        TaskCapture {
             description: String::new(),
             title: "Stale label".to_string(),
             project: Some("ios".to_string()),
             status: TaskStatus::Inbox,
             priority: TaskPriority::None,
+            source: TaskSource::Ios,
             due_on: None,
             labels: vec!["missing".to_string()],
         },
     ] {
         assert!(
             store
-                .capture_ios_queue_task(&workspace.id, input)
+                .capture_queue_task(&workspace.id, input)
                 .await
                 .is_err()
         );
     }
 
     let undone = store
-        .undo_ios_queue_capture(&captured.undo_token)
+        .undo_queue_capture(&captured.undo_token)
         .await
         .unwrap();
     assert!(
@@ -277,14 +282,14 @@ async fn ios_capture_is_local_workspace_scoped_and_reversible() {
     );
     assert!(
         store
-            .undo_ios_queue_capture(&captured.undo_token)
+            .undo_queue_capture(&captured.undo_token)
             .await
             .is_err()
     );
 }
 
 #[tokio::test]
-async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses() {
+async fn queue_capture_persists_selected_status_atomically_and_undoes_all_statuses() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-capture-status.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -304,14 +309,15 @@ async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses
 
     for status in TaskStatus::OPEN.into_iter().chain(TaskStatus::TERMINAL) {
         let captured = store
-            .capture_ios_queue_task(
+            .capture_queue_task(
                 &workspace.id,
-                IosTaskCapture {
+                TaskCapture {
                     title: format!("Capture {status}"),
                     description: String::new(),
                     project: Some("capture".to_string()),
                     status,
                     priority: TaskPriority::None,
+                    source: TaskSource::Ios,
                     due_on: None,
                     labels: Vec::new(),
                 },
@@ -319,7 +325,7 @@ async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses
             .await
             .unwrap();
         let detail = store
-            .ios_task_detail(&workspace.id, &captured.task_id)
+            .task_detail(&workspace.id, &captured.task_id)
             .await
             .unwrap();
         assert_eq!(detail.status, status);
@@ -335,7 +341,7 @@ async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses
         assert_eq!(payload_status.as_deref(), Some(status.as_str()));
 
         let state = store
-            .undo_ios_queue_capture(&captured.undo_token)
+            .undo_queue_capture(&captured.undo_token)
             .await
             .unwrap();
         assert!(state.is_some());
@@ -352,7 +358,7 @@ async fn ios_capture_persists_selected_status_atomically_and_undoes_all_statuses
 }
 
 #[tokio::test]
-async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
+async fn queue_quick_actions_are_exact_local_and_state_checked() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-quick-actions.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -391,11 +397,11 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
         .unwrap();
 
     let started = store
-        .mutate_ios_queue_task(
+        .mutate_queue_task(
             &workspace.id,
             &task.id,
-            IosQueueMutation {
-                kind: IosQueueMutationKind::Start,
+            QueueMutation {
+                kind: QueueMutationKind::Start,
                 priority: None,
                 local_date: None,
                 time_zone: None,
@@ -405,23 +411,23 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
         .unwrap();
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
         TaskStatus::Active
     );
     store
-        .undo_ios_queue_mutation(&started.undo_token)
+        .undo_queue_mutation(&started.undo_token)
         .await
         .unwrap();
 
     let snoozed = store
-        .mutate_ios_queue_task(
+        .mutate_queue_task(
             &workspace.id,
             &task.id,
-            IosQueueMutation {
-                kind: IosQueueMutationKind::Snooze,
+            QueueMutation {
+                kind: QueueMutationKind::Snooze,
                 priority: None,
                 local_date: Some("2026-09-02".to_string()),
                 time_zone: Some("America/New_York".to_string()),
@@ -429,22 +435,19 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
         )
         .await
         .unwrap();
-    let detail = store
-        .ios_task_detail(&workspace.id, &task.id)
-        .await
-        .unwrap();
+    let detail = store.task_detail(&workspace.id, &task.id).await.unwrap();
     assert_eq!(detail.available_at.as_deref(), Some("2026-09-03T04:00:00Z"));
     store
-        .undo_ios_queue_mutation(&snoozed.undo_token)
+        .undo_queue_mutation(&snoozed.undo_token)
         .await
         .unwrap();
 
     let completed = store
-        .mutate_ios_queue_task(
+        .mutate_queue_task(
             &workspace.id,
             &task.id,
-            IosQueueMutation {
-                kind: IosQueueMutationKind::Done,
+            QueueMutation {
+                kind: QueueMutationKind::Done,
                 priority: None,
                 local_date: None,
                 time_zone: None,
@@ -463,7 +466,7 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
             .all(|row| row.id != task.id)
     );
     let restored = store
-        .undo_ios_queue_mutation(&completed.undo_token)
+        .undo_queue_mutation(&completed.undo_token)
         .await
         .unwrap();
     assert!(
@@ -477,11 +480,11 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
     );
 
     let priority = store
-        .mutate_ios_queue_task(
+        .mutate_queue_task(
             &workspace.id,
             &task.id,
-            IosQueueMutation {
-                kind: IosQueueMutationKind::SetPriority,
+            QueueMutation {
+                kind: QueueMutationKind::SetPriority,
                 priority: Some(TaskPriority::Urgent),
                 local_date: None,
                 time_zone: None,
@@ -502,13 +505,13 @@ async fn ios_queue_quick_actions_are_exact_local_and_state_checked() {
         .unwrap();
     assert!(
         store
-            .undo_ios_queue_mutation(&priority.undo_token)
+            .undo_queue_mutation(&priority.undo_token)
             .await
             .is_err()
     );
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &other.id)
+            .task_detail(&workspace.id, &other.id)
             .await
             .unwrap()
             .priority,
@@ -604,14 +607,15 @@ async fn consumer_api_creation_sync_and_export_preserve_task_sources() {
         .await
         .unwrap();
     let captured = first
-        .capture_ios_queue_task(
+        .capture_queue_task(
             &workspace.id,
-            IosTaskCapture {
+            TaskCapture {
                 title: "iOS source".to_string(),
                 description: String::new(),
                 project: Some("Core".to_string()),
                 status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
+                source: TaskSource::Ios,
                 due_on: None,
                 labels: Vec::new(),
             },
@@ -792,7 +796,7 @@ async fn consumer_api_queue_report_ranks_open_tasks_and_reads_last_success() {
 }
 
 #[tokio::test]
-async fn ios_queue_state_lists_counts_restores_selection_and_falls_back() {
+async fn queue_state_lists_counts_restores_selection_and_falls_back() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-queue-state.sqlite");
     let database = Database::open(&path).await.unwrap();
@@ -823,10 +827,7 @@ async fn ios_queue_state_lists_counts_restores_selection_and_falls_back() {
             .unwrap();
     }
 
-    let selected = store
-        .select_ios_queue_workspace(&personal.id)
-        .await
-        .unwrap();
+    let selected = store.select_queue_workspace(&personal.id).await.unwrap();
     assert_eq!(selected.selected_workspace.id, personal.id);
     assert_eq!(selected.queue.tasks.len(), 1);
     assert_eq!(
@@ -841,7 +842,7 @@ async fn ios_queue_state_lists_counts_restores_selection_and_falls_back() {
 
     let renamed = database.rename_workspace("personal", "Home").await.unwrap();
     let reopened = Store::open(&path).await.unwrap();
-    let restored = reopened.ios_queue_state().await.unwrap();
+    let restored = reopened.queue_state().await.unwrap();
     assert_eq!(restored.selected_workspace.id, renamed.id);
     assert_eq!(restored.selected_workspace.key, "home");
     drop(reopened);
@@ -862,7 +863,7 @@ async fn ios_queue_state_lists_counts_restores_selection_and_falls_back() {
     let fallback = Store::open(&path)
         .await
         .unwrap()
-        .ios_queue_state()
+        .queue_state()
         .await
         .unwrap();
     assert_eq!(fallback.selected_workspace.id, default.id);
@@ -1916,7 +1917,7 @@ async fn consumer_base_list_matches_detail_selection_without_detail_tables() {
 }
 
 #[tokio::test]
-async fn ios_task_detail_is_exact_bounded_and_attachment_aware() {
+async fn task_detail_is_exact_bounded_and_attachment_aware() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("ios-task-detail.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -1961,14 +1962,15 @@ async fn ios_task_detail_is_exact_bounded_and_attachment_aware() {
         .await
         .unwrap();
     let captured = store
-        .capture_ios_queue_task(
+        .capture_queue_task(
             &workspace.id,
-            IosTaskCapture {
+            TaskCapture {
                 description: String::new(),
                 title: "Detailed task".to_string(),
                 project: Some("api".to_string()),
                 status: TaskStatus::Inbox,
                 priority: TaskPriority::High,
+                source: TaskSource::Ios,
                 due_on: Some("2026-09-03".to_string()),
                 labels: vec!["security".to_string()],
             },
@@ -2050,7 +2052,7 @@ async fn ios_task_detail_is_exact_bounded_and_attachment_aware() {
     drop(connection);
 
     let detail = store
-        .ios_task_detail(&workspace.id, &captured.task_id)
+        .task_detail(&workspace.id, &captured.task_id)
         .await
         .unwrap();
     assert_eq!(detail.id, captured.task_id);
@@ -2066,24 +2068,24 @@ async fn ios_task_detail_is_exact_bounded_and_attachment_aware() {
     assert!(detail.attachments[0].has_blob);
     assert_eq!(
         detail.attachments[0].availability,
-        aven_core::api::IosAttachmentAvailability::Present
+        aven_core::api::AttachmentAvailability::Present
     );
     assert!(!detail.attachments[1].has_blob);
     assert_eq!(
         detail.attachments[1].availability,
-        aven_core::api::IosAttachmentAvailability::Unavailable
+        aven_core::api::AttachmentAvailability::Unavailable
     );
     assert_ne!(detail.id, seed.id);
 
     let missing = store
-        .ios_task_detail(&workspace.id, &TaskId::new())
+        .task_detail(&workspace.id, &TaskId::new())
         .await
         .unwrap_err();
     assert_eq!(missing.code, ErrorCode::NotFound);
 }
 
 #[tokio::test]
-async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() {
+async fn queue_capture_undo_rejects_activity_changed_by_inverse_status_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("capture-activity.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -2102,25 +2104,26 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
         .execute(&mut connection).await.unwrap();
     sqlx::query("CREATE TRIGGER mutation_activity AFTER UPDATE OF status ON tasks BEGIN UPDATE tasks SET queue_activity_at = CASE NEW.status WHEN 'done' THEN '2000-01-02T00:00:00Z' ELSE '2000-01-03T00:00:00Z' END WHERE id = NEW.id; END")
         .execute(&mut connection).await.unwrap();
-    let input = || IosTaskCapture {
+    let input = || TaskCapture {
         title: "State-checked capture".to_string(),
         description: String::new(),
         project: Some("capture".to_string()),
         status: TaskStatus::Inbox,
         priority: TaskPriority::None,
+        source: TaskSource::Ios,
         due_on: None,
         labels: Vec::new(),
     };
     let captured = store
-        .capture_ios_queue_task(&workspace.id, input())
+        .capture_queue_task(&workspace.id, input())
         .await
         .unwrap();
     let completed = store
-        .mutate_ios_queue_task(
+        .mutate_queue_task(
             &workspace.id,
             &captured.task_id,
-            IosQueueMutation {
-                kind: IosQueueMutationKind::Done,
+            QueueMutation {
+                kind: QueueMutationKind::Done,
                 priority: None,
                 local_date: None,
                 time_zone: None,
@@ -2129,7 +2132,7 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
         .await
         .unwrap();
     store
-        .undo_ios_queue_mutation(&completed.undo_token)
+        .undo_queue_mutation(&completed.undo_token)
         .await
         .unwrap();
     let row: (String, bool, String) =
@@ -2152,7 +2155,7 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
             .await
             .unwrap();
     let error = store
-        .undo_ios_queue_capture(&captured.undo_token)
+        .undo_queue_capture(&captured.undo_token)
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::GenerationConflict);
@@ -2170,13 +2173,10 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
     assert_eq!(row, after);
     assert_eq!(changes, changes_after);
     let fresh = store
-        .capture_ios_queue_task(&workspace.id, input())
+        .capture_queue_task(&workspace.id, input())
         .await
         .unwrap();
-    store
-        .undo_ios_queue_capture(&fresh.undo_token)
-        .await
-        .unwrap();
+    store.undo_queue_capture(&fresh.undo_token).await.unwrap();
     let deleted: bool = sqlx::query_scalar("SELECT deleted FROM tasks WHERE id = ?")
         .bind(&fresh.task_id)
         .fetch_one(&mut connection)
@@ -2186,8 +2186,8 @@ async fn ios_capture_undo_rejects_activity_changed_by_inverse_status_mutation() 
 }
 
 #[tokio::test]
-async fn ios_attachment_bytes_are_scoped_bounded_and_leased() {
-    use aven_core::api::IosAttachmentRead;
+async fn attachment_bytes_are_scoped_bounded_and_leased() {
+    use aven_core::api::AttachmentRead;
     use aven_core::attachments::{MAX_BLOB_BYTES, default_blob_dir, object_path, sha256_hex};
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("images.sqlite");
@@ -2199,14 +2199,15 @@ async fn ios_attachment_bytes_are_scoped_bounded_and_leased() {
         .await
         .unwrap();
     let task = store
-        .capture_ios_queue_task(
+        .capture_queue_task(
             &workspace.id,
-            IosTaskCapture {
+            TaskCapture {
                 title: "Images".into(),
                 description: String::new(),
                 project: Some("images".into()),
                 status: TaskStatus::Inbox,
                 priority: TaskPriority::None,
+                source: TaskSource::Ios,
                 due_on: None,
                 labels: vec![],
             },
@@ -2225,41 +2226,41 @@ async fn ios_attachment_bytes_are_scoped_bounded_and_leased() {
         .bind(&workspace.id).bind(&task.task_id).bind(&sha).bind(bytes.len() as i64).execute(&mut conn).await.unwrap();
     sqlx::query("INSERT INTO blob_inventory(sha256, byte_size, media_type, available, first_seen_at) VALUES (?, ?, 'image/png', 1, '2026-09-01T10:00:00Z')")
         .bind(&sha).bind(bytes.len() as i64).execute(&mut conn).await.unwrap();
-    let read = || store.ios_attachment_bytes(&workspace.id, &task.task_id, "ATTACHMENT000001");
+    let read = || store.attachment_bytes(&workspace.id, &task.task_id, "ATTACHMENT000001");
     let snapshot = read().await.unwrap();
     assert_eq!(
         snapshot,
-        IosAttachmentRead::Bytes {
+        AttachmentRead::Bytes {
             bytes: bytes.clone()
         }
     );
     assert_eq!(
         store
-            .ios_attachment_bytes(&workspace.id, &TaskId::new(), "ATTACHMENT000001")
+            .attachment_bytes(&workspace.id, &TaskId::new(), "ATTACHMENT000001")
             .await
             .unwrap(),
-        IosAttachmentRead::Invalidated
+        AttachmentRead::Invalidated
     );
     std::fs::write(&object, vec![0; bytes.len()]).unwrap();
-    assert_eq!(read().await.unwrap(), IosAttachmentRead::Corrupt);
+    assert_eq!(read().await.unwrap(), AttachmentRead::Corrupt);
     std::fs::File::create(&object)
         .unwrap()
         .set_len(MAX_BLOB_BYTES as u64 + 1)
         .unwrap();
-    assert_eq!(read().await.unwrap(), IosAttachmentRead::Corrupt);
+    assert_eq!(read().await.unwrap(), AttachmentRead::Corrupt);
     std::fs::remove_file(&object).unwrap();
-    assert_eq!(read().await.unwrap(), IosAttachmentRead::Missing);
-    assert_eq!(snapshot, IosAttachmentRead::Bytes { bytes });
+    assert_eq!(read().await.unwrap(), AttachmentRead::Missing);
+    assert_eq!(snapshot, AttachmentRead::Bytes { bytes });
     sqlx::query("UPDATE blob_inventory SET available = 0")
         .execute(&mut conn)
         .await
         .unwrap();
-    assert_eq!(read().await.unwrap(), IosAttachmentRead::Unavailable);
+    assert_eq!(read().await.unwrap(), AttachmentRead::Unavailable);
     sqlx::query("UPDATE task_attachments SET deleted = 1, deleted_at = '2026-09-01T10:00:00Z'")
         .execute(&mut conn)
         .await
         .unwrap();
-    assert_eq!(read().await.unwrap(), IosAttachmentRead::Invalidated);
+    assert_eq!(read().await.unwrap(), AttachmentRead::Invalidated);
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blob_leases")
         .fetch_one(&mut conn)
         .await
@@ -2268,18 +2269,18 @@ async fn ios_attachment_bytes_are_scoped_bounded_and_leased() {
 }
 
 #[tokio::test]
-async fn ios_sync_facts_confirm_metadata_only_after_catch_up() {
+async fn sync_facts_confirm_metadata_only_after_catch_up() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("facts.sqlite");
     let store = Store::open(&path).await.unwrap();
     let server = Database::open(&directory.path().join("server.sqlite"))
         .await
         .unwrap();
-    let before = store.ios_sync_facts().await.unwrap();
+    let before = store.sync_facts().await.unwrap();
     assert!(!before.metadata_caught_up);
     assert!(before.metadata_confirmed_at.is_none());
     exchange(&path, &server).await;
-    let confirmed = store.ios_sync_facts().await.unwrap();
+    let confirmed = store.sync_facts().await.unwrap();
     assert_eq!(confirmed.pending_changes, 0);
     assert!(confirmed.metadata_caught_up);
     assert!(confirmed.metadata_confirmed_at.as_deref().unwrap() > "2026-07-18T00:00:00Z");
@@ -2300,14 +2301,14 @@ async fn ios_sync_facts_confirm_metadata_only_after_catch_up() {
         )
         .await
         .unwrap();
-    let pending = store.ios_sync_facts().await.unwrap();
+    let pending = store.sync_facts().await.unwrap();
     assert!(pending.pending_changes > 0);
     assert_eq!(
         pending.metadata_confirmed_at,
         confirmed.metadata_confirmed_at
     );
     exchange_bounded(&path, &server, 1).await;
-    let partial = store.ios_sync_facts().await.unwrap();
+    let partial = store.sync_facts().await.unwrap();
     assert_eq!(partial.pending_changes, 0);
     assert!(!partial.metadata_caught_up);
     assert_eq!(
@@ -2315,12 +2316,12 @@ async fn ios_sync_facts_confirm_metadata_only_after_catch_up() {
         confirmed.metadata_confirmed_at
     );
     exchange(&path, &server).await;
-    assert_eq!(store.ios_sync_facts().await.unwrap().pending_changes, 0);
+    assert_eq!(store.sync_facts().await.unwrap().pending_changes, 0);
 }
 
 #[tokio::test]
-async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_history() {
-    use aven_core::api::IosTaskActivityKind;
+async fn task_detail_activity_preserves_bounded_order_anchor_and_empty_history() {
+    use aven_core::api::TaskActivityKind;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("activity.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -2350,12 +2351,9 @@ async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_histo
         .execute(&mut connection)
         .await
         .unwrap();
-    let created = store
-        .ios_task_detail(&workspace.id, &task.id)
-        .await
-        .unwrap();
+    let created = store.task_detail(&workspace.id, &task.id).await.unwrap();
     assert_eq!(created.activity.len(), 1);
-    assert_eq!(created.activity[0].kind, IosTaskActivityKind::Created);
+    assert_eq!(created.activity[0].kind, TaskActivityKind::Created);
     assert_eq!(created.activity[0].summary, "created task");
     assert!(created.activity[0].anchors_queue_idle);
 
@@ -2393,13 +2391,10 @@ async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_histo
         .execute(&mut connection)
         .await
         .unwrap();
-    let detail = store
-        .ios_task_detail(&workspace.id, &task.id)
-        .await
-        .unwrap();
+    let detail = store.task_detail(&workspace.id, &task.id).await.unwrap();
     assert_eq!(detail.activity.len(), 9);
     for (index, action) in detail.activity[..8].iter().enumerate() {
-        assert_eq!(action.kind, IosTaskActivityKind::Title);
+        assert_eq!(action.kind, TaskActivityKind::Title);
         assert_eq!(
             action.summary,
             format!("renamed task · Title {}", 11 - index)
@@ -2408,19 +2403,19 @@ async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_histo
         assert!(!action.anchors_queue_idle);
         assert!(!action.change_id.is_empty());
     }
-    assert_eq!(detail.activity[8].kind, IosTaskActivityKind::Priority);
+    assert_eq!(detail.activity[8].kind, TaskActivityKind::Priority);
     assert!(detail.activity[8].anchors_queue_idle);
     assert_eq!(
         detail.activity,
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .activity
     );
     assert_eq!(
         store
-            .ios_task_detail(&WorkspaceId::new(), &task.id)
+            .task_detail(&WorkspaceId::new(), &task.id)
             .await
             .unwrap_err()
             .code,
@@ -2432,16 +2427,13 @@ async fn ios_task_detail_activity_preserves_bounded_order_anchor_and_empty_histo
         .execute(&mut connection)
         .await
         .unwrap();
-    let empty = store
-        .ios_task_detail(&workspace.id, &task.id)
-        .await
-        .unwrap();
+    let empty = store.task_detail(&workspace.id, &task.id).await.unwrap();
     assert!(empty.activity.is_empty());
     assert_eq!(empty.title, "Title 11");
 }
 
 #[tokio::test]
-async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
+async fn task_deletion_is_scoped_reversible_and_stale_safe() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("task-deletion.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -2467,7 +2459,7 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
 
     assert_eq!(
         store
-            .set_ios_task_deleted(&other_workspace.id, &task.id, true)
+            .set_task_deleted(&other_workspace.id, &task.id, true)
             .await
             .unwrap_err()
             .code,
@@ -2475,20 +2467,20 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
     );
 
     let deleted = store
-        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .set_task_deleted(&workspace.id, &task.id, true)
         .await
         .unwrap();
     assert!(deleted.deleted);
     assert!(deleted.undo_token.is_some());
     let repeated = store
-        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .set_task_deleted(&workspace.id, &task.id, true)
         .await
         .unwrap();
     assert!(repeated.deleted);
     assert!(repeated.undo_token.is_none());
 
     let restored = store
-        .set_ios_task_deleted(&workspace.id, &task.id, false)
+        .set_task_deleted(&workspace.id, &task.id, false)
         .await
         .unwrap();
     assert!(!restored.deleted);
@@ -2505,7 +2497,7 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
         .unwrap();
     assert_eq!(
         store
-            .undo_ios_task_deletion(restored.undo_token.as_deref().unwrap())
+            .undo_task_deletion(restored.undo_token.as_deref().unwrap())
             .await
             .unwrap_err()
             .code,
@@ -2513,25 +2505,22 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
     );
 
     let deleted_again = store
-        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .set_task_deleted(&workspace.id, &task.id, true)
         .await
         .unwrap();
     store
-        .undo_ios_task_deletion(deleted_again.undo_token.as_deref().unwrap())
+        .undo_task_deletion(deleted_again.undo_token.as_deref().unwrap())
         .await
         .unwrap();
     assert_eq!(
         store
-            .undo_ios_task_deletion(deleted_again.undo_token.as_deref().unwrap())
+            .undo_task_deletion(deleted_again.undo_token.as_deref().unwrap())
             .await
             .unwrap_err()
             .code,
         ErrorCode::GenerationConflict
     );
-    let detail = store
-        .ios_task_detail(&workspace.id, &task.id)
-        .await
-        .unwrap();
+    let detail = store.task_detail(&workspace.id, &task.id).await.unwrap();
     assert!(!detail.deleted);
     assert_eq!(detail.title, "Changed after restore");
 
@@ -2561,7 +2550,7 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
     let reopened = Store::open(&path).await.unwrap();
     assert!(
         !reopened
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .deleted
@@ -2569,7 +2558,7 @@ async fn ios_task_deletion_is_scoped_reversible_and_stale_safe() {
 }
 
 #[tokio::test]
-async fn ios_task_deletion_syncs_delete_and_restore() {
+async fn task_deletion_syncs_delete_and_restore() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("deletion-first.sqlite");
     let second_path = directory.path().join("deletion-second.sqlite");
@@ -2598,7 +2587,7 @@ async fn ios_task_deletion_syncs_delete_and_restore() {
     exchange(&second_path, &server).await;
 
     first
-        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .set_task_deleted(&workspace.id, &task.id, true)
         .await
         .unwrap();
     exchange(&first_path, &server).await;
@@ -2606,21 +2595,21 @@ async fn ios_task_deletion_syncs_delete_and_restore() {
     let second = Store::open(&second_path).await.unwrap();
     assert!(
         second
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .deleted
     );
 
     first
-        .set_ios_task_deleted(&workspace.id, &task.id, false)
+        .set_task_deleted(&workspace.id, &task.id, false)
         .await
         .unwrap();
     exchange(&first_path, &server).await;
     exchange(&second_path, &server).await;
     assert!(
         !second
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .deleted
@@ -2628,7 +2617,7 @@ async fn ios_task_deletion_syncs_delete_and_restore() {
 }
 
 #[tokio::test]
-async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards() {
+async fn task_deletion_preserves_conflict_recurrence_and_attachment_guards() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("task-deletion-guards.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -2687,7 +2676,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
     .unwrap();
     assert_eq!(
         store
-            .set_ios_task_deleted(&workspace.id, &task.id, true)
+            .set_task_deleted(&workspace.id, &task.id, true)
             .await
             .unwrap_err()
             .code,
@@ -2701,7 +2690,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
         .unwrap();
 
     let deleted = store
-        .set_ios_task_deleted(&workspace.id, &task.id, true)
+        .set_task_deleted(&workspace.id, &task.id, true)
         .await
         .unwrap();
     let unreferenced_at: Option<String> =
@@ -2712,7 +2701,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
             .unwrap();
     assert!(unreferenced_at.is_some());
     store
-        .undo_ios_task_deletion(deleted.undo_token.as_deref().unwrap())
+        .undo_task_deletion(deleted.undo_token.as_deref().unwrap())
         .await
         .unwrap();
     let unreferenced_at: Option<String> =
@@ -2729,7 +2718,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
         .unwrap();
     assert_eq!(
         store
-            .set_ios_task_deleted(&workspace.id, &recurrence.task.id, true)
+            .set_task_deleted(&workspace.id, &recurrence.task.id, true)
             .await
             .unwrap_err()
             .code,
@@ -2737,7 +2726,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
     );
     assert!(
         !store
-            .ios_task_detail(&workspace.id, &recurrence.task.id)
+            .task_detail(&workspace.id, &recurrence.task.id)
             .await
             .unwrap()
             .deleted
@@ -2745,7 +2734,7 @@ async fn ios_task_deletion_preserves_conflict_recurrence_and_attachment_guards()
 }
 
 #[tokio::test]
-async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_undo() {
+async fn detail_status_receipts_use_authoritative_state_and_reject_stale_undo() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("detail-status.sqlite");
     let store = Store::open(&path).await.unwrap();
@@ -2779,17 +2768,17 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .await
         .unwrap();
     let receipt = store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Active)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Active)
         .await
         .unwrap();
     assert_eq!(receipt.status, TaskStatus::Active);
     store
-        .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+        .undo_detail_status(receipt.undo_token.as_deref().unwrap())
         .await
         .unwrap();
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
@@ -2797,7 +2786,7 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
     );
 
     let receipt = store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Active)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Active)
         .await
         .unwrap();
     store
@@ -2813,7 +2802,7 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .unwrap();
     assert_eq!(
         store
-            .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+            .undo_detail_status(receipt.undo_token.as_deref().unwrap())
             .await
             .unwrap_err()
             .code,
@@ -2821,7 +2810,7 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
     );
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
@@ -2841,34 +2830,34 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .unwrap();
     assert_eq!(
         store
-            .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+            .undo_detail_status(receipt.undo_token.as_deref().unwrap())
             .await
             .unwrap_err()
             .code,
         ErrorCode::GenerationConflict
     );
     let noop = store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Active)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Active)
         .await
         .unwrap();
     assert!(noop.undo_token.is_none());
 
     store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Done)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Done)
         .await
         .unwrap();
     let reopen = store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
         .await
         .unwrap();
     assert_eq!(reopen.status, TaskStatus::Todo);
     store
-        .undo_ios_detail_status(reopen.undo_token.as_deref().unwrap())
+        .undo_detail_status(reopen.undo_token.as_deref().unwrap())
         .await
         .unwrap();
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
@@ -2883,13 +2872,13 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .execute(&mut connection).await.unwrap();
     assert!(
         store
-            .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
+            .update_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
             .await
             .is_err()
     );
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
@@ -2900,20 +2889,20 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .await
         .unwrap();
     let receipt = store
-        .update_ios_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
+        .update_detail_status(&workspace.id, &task.id, TaskStatus::Todo)
         .await
         .unwrap();
     sqlx::query("CREATE TRIGGER reject_detail_write BEFORE INSERT ON changes BEGIN SELECT RAISE(ABORT, 'injected write failure'); END")
         .execute(&mut connection).await.unwrap();
     assert!(
         store
-            .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+            .undo_detail_status(receipt.undo_token.as_deref().unwrap())
             .await
             .is_err()
     );
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &task.id)
+            .task_detail(&workspace.id, &task.id)
             .await
             .unwrap()
             .status,
@@ -2924,13 +2913,13 @@ async fn ios_detail_status_receipts_use_authoritative_state_and_reject_stale_und
         .await
         .unwrap();
     store
-        .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+        .undo_detail_status(receipt.undo_token.as_deref().unwrap())
         .await
         .unwrap();
 }
 
 #[tokio::test]
-async fn ios_detail_status_receipts_preserve_recurrence_routing() {
+async fn detail_status_receipts_preserve_recurrence_routing() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("detail-recurrence.sqlite"))
         .await
@@ -2941,23 +2930,23 @@ async fn ios_detail_status_receipts_preserve_recurrence_routing() {
         .await
         .unwrap();
     let started = store
-        .update_ios_detail_status(&workspace.id, &created.task.id, TaskStatus::Active)
+        .update_detail_status(&workspace.id, &created.task.id, TaskStatus::Active)
         .await
         .unwrap();
     store
-        .undo_ios_detail_status(started.undo_token.as_deref().unwrap())
+        .undo_detail_status(started.undo_token.as_deref().unwrap())
         .await
         .unwrap();
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &created.task.id)
+            .task_detail(&workspace.id, &created.task.id)
             .await
             .unwrap()
             .status,
         TaskStatus::Todo
     );
     let receipt = store
-        .update_ios_detail_status(&workspace.id, &created.task.id, TaskStatus::Done)
+        .update_detail_status(&workspace.id, &created.task.id, TaskStatus::Done)
         .await
         .unwrap();
     assert!(
@@ -2973,19 +2962,19 @@ async fn ios_detail_status_receipts_preserve_recurrence_routing() {
     // A terminal occurrence requires recurrence aggregate Undo, not a scalar reopen.
     assert!(
         store
-            .undo_ios_detail_status(receipt.undo_token.as_deref().unwrap())
+            .undo_detail_status(receipt.undo_token.as_deref().unwrap())
             .await
             .is_err()
     );
     assert!(
         store
-            .update_ios_detail_status(&workspace.id, &created.task.id, TaskStatus::Todo)
+            .update_detail_status(&workspace.id, &created.task.id, TaskStatus::Todo)
             .await
             .is_err()
     );
     assert_eq!(
         store
-            .ios_task_detail(&workspace.id, &created.task.id)
+            .task_detail(&workspace.id, &created.task.id)
             .await
             .unwrap()
             .status,

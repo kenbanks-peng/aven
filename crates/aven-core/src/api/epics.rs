@@ -1,14 +1,14 @@
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IosEpicProgress {
+pub struct EpicProgress {
     pub total: u32,
     pub open: u32,
     pub done: u32,
     pub canceled: u32,
 }
 
-impl From<crate::query::EpicRollup> for IosEpicProgress {
+impl From<crate::query::EpicRollup> for EpicProgress {
     fn from(value: crate::query::EpicRollup) -> Self {
         Self {
             total: value.total.min(u32::MAX as usize) as u32,
@@ -20,16 +20,13 @@ impl From<crate::query::EpicRollup> for IosEpicProgress {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IosEpicSummary {
-    pub task: IosTaskListRow,
-    pub progress: IosEpicProgress,
+pub struct EpicSummary {
+    pub task: TaskListRow,
+    pub progress: EpicProgress,
 }
 
 impl Store {
-    pub async fn ios_epics(
-        &self,
-        workspace_id: &WorkspaceId,
-    ) -> Result<Vec<IosEpicSummary>, Error> {
+    pub async fn epics(&self, workspace_id: &WorkspaceId) -> Result<Vec<EpicSummary>, Error> {
         self.workspace(workspace_id).await?;
         let items = self
             .database
@@ -48,18 +45,18 @@ impl Store {
             .map_err(Error::from_internal)?;
         Ok(items
             .into_iter()
-            .map(|mut item| IosEpicSummary {
+            .map(|mut item| EpicSummary {
                 progress: item.epic_rollup.take().unwrap_or_default().into(),
                 task: item.into(),
             })
             .collect())
     }
 
-    pub async fn ios_epic_candidates(
+    pub async fn epic_candidates(
         &self,
         workspace_id: &WorkspaceId,
         epic_id: &TaskId,
-    ) -> Result<Vec<IosTaskListRow>, Error> {
+    ) -> Result<Vec<TaskListRow>, Error> {
         let workspace = self.workspace(workspace_id).await?;
         let epic = self
             .database
@@ -91,29 +88,30 @@ impl Store {
             .map_err(Error::from_internal)
     }
 
-    pub async fn create_ios_epic(
+    pub async fn create_epic(
         &self,
         workspace_id: &WorkspaceId,
-        input: IosTaskCapture,
+        input: TaskCapture,
     ) -> Result<TaskId, Error> {
-        self.create_ios_epic_task(workspace_id, None, input).await
-    }
-
-    pub async fn create_ios_epic_child(
-        &self,
-        workspace_id: &WorkspaceId,
-        epic_id: &TaskId,
-        input: IosTaskCapture,
-    ) -> Result<TaskId, Error> {
-        self.create_ios_epic_task(workspace_id, Some(epic_id.clone()), input)
+        self.create_consumer_epic_task(workspace_id, None, input)
             .await
     }
 
-    async fn create_ios_epic_task(
+    pub async fn create_epic_child(
+        &self,
+        workspace_id: &WorkspaceId,
+        epic_id: &TaskId,
+        input: TaskCapture,
+    ) -> Result<TaskId, Error> {
+        self.create_consumer_epic_task(workspace_id, Some(epic_id.clone()), input)
+            .await
+    }
+
+    async fn create_consumer_epic_task(
         &self,
         workspace_id: &WorkspaceId,
         epic_id: Option<TaskId>,
-        input: IosTaskCapture,
+        input: TaskCapture,
     ) -> Result<TaskId, Error> {
         validate_optional_date("due_on", input.due_on.as_deref())?;
         let workspace = self.workspace(workspace_id).await?;
@@ -130,21 +128,21 @@ impl Store {
                     project: Some(project),
                     status: input.status.as_str().into(),
                     priority: input.priority.as_str().into(),
-                    source: TaskSource::Api,
+                    source: input.source,
                     labels: input.labels,
                     metadata: Vec::new(),
                     available_at: None,
                     due_on: input.due_on,
                     is_epic: epic_id.is_none(),
                 },
-                TaskCreationOptions::for_ios_epic(epic_id),
+                TaskCreationOptions::for_consumer_epic(epic_id),
             )
             .await
             .map_err(Error::from_internal)?;
         Ok(outcome.task.id)
     }
 
-    pub async fn set_ios_epic_child(
+    pub async fn set_epic_child(
         &self,
         workspace_id: &WorkspaceId,
         epic_id: &TaskId,
@@ -153,7 +151,7 @@ impl Store {
     ) -> Result<bool, Error> {
         let workspace = self.workspace(workspace_id).await?;
         self.database
-            .set_ios_epic_child(&workspace, epic_id, child_id, linked)
+            .set_epic_child(&workspace, epic_id, child_id, linked)
             .await
             .map_err(Error::from_internal)
     }

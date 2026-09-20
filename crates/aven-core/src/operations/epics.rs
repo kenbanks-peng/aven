@@ -382,7 +382,7 @@ pub async fn task_has_epic_children(
         > 0)
 }
 
-pub(crate) async fn require_ios_epic(
+pub(crate) async fn require_consumer_epic(
     conn: &mut SqliteConnection,
     workspace: &Workspace,
     epic_id: &TaskId,
@@ -395,7 +395,7 @@ pub(crate) async fn require_ios_epic(
 }
 
 impl Database {
-    pub(crate) async fn set_ios_epic_child(
+    pub(crate) async fn set_epic_child(
         &self,
         workspace: &Workspace,
         epic_id: &TaskId,
@@ -404,7 +404,7 @@ impl Database {
     ) -> Result<bool> {
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
-        require_ios_epic(&mut tx, workspace, epic_id).await?;
+        require_consumer_epic(&mut tx, workspace, epic_id).await?;
         let outcome = if linked {
             add_task_to_epic_in_transaction(&mut tx, workspace, child_id, epic_id).await?
         } else {

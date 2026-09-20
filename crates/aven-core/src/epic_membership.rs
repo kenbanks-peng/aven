@@ -472,7 +472,7 @@ mod tests {
                 .unwrap();
             assert_eq!(changes, 6);
         }
-        let facts = database.ios_sync_facts().await.unwrap();
+        let facts = database.sync_facts().await.unwrap();
         assert_eq!(facts.pending_changes, 0);
         assert!(facts.metadata_caught_up);
         let integrity = database.database_integrity_report().await.unwrap();

@@ -10,12 +10,12 @@ impl Database {
         super::sync_persistence_status(&mut conn).await
     }
 
-    pub async fn ios_sync_facts(&self) -> Result<crate::api::IosSyncFacts> {
+    pub async fn sync_facts(&self) -> Result<crate::api::SyncFacts> {
         let mut conn = self.acquire_reader().await?;
         let mut tx = sqlx::Connection::begin(&mut *conn).await?;
         let status = super::sync_persistence_status(&mut tx).await?;
         let missing = super::super::blob::missing_local_blob_counts(&mut tx).await?;
-        let facts = crate::api::IosSyncFacts {
+        let facts = crate::api::SyncFacts {
             compatibility_block: status.blocked_protocol.map(|server_protocol| {
                 super::super::protocol::SyncCompatibilityError {
                     server_protocol,

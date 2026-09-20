@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum IosTaskMutation {
+pub(crate) enum ConsumerTaskMutation {
     Start,
     Done,
     DetailStatus {
@@ -30,7 +30,7 @@ pub(crate) enum IosTaskMutation {
     },
 }
 
-pub(crate) struct IosTaskMutationOutcome {
+pub(crate) struct ConsumerTaskMutationOutcome {
     pub field_version: Option<String>,
     pub before: TaskUndoSnapshot,
     pub after: TaskUndoSnapshot,
@@ -38,7 +38,7 @@ pub(crate) struct IosTaskMutationOutcome {
 }
 
 impl Database {
-    pub(crate) async fn undo_ios_capture(
+    pub(crate) async fn undo_queue_capture(
         &self,
         workspace: &Workspace,
         task_id: &TaskId,
@@ -76,7 +76,7 @@ impl Database {
         Ok(changed)
     }
 
-    pub(crate) async fn edit_ios_task(
+    pub(crate) async fn edit_consumer_task(
         &self,
         workspace: &Workspace,
         task_id: &TaskId,
@@ -107,15 +107,15 @@ impl Database {
         Ok(changed || fields_changed)
     }
 
-    pub(crate) async fn mutate_ios_task(
+    pub(crate) async fn mutate_consumer_task(
         &self,
         workspace: &Workspace,
         task_id: &TaskId,
-        mutation: &IosTaskMutation,
-    ) -> Result<IosTaskMutationOutcome> {
+        mutation: &ConsumerTaskMutation,
+    ) -> Result<ConsumerTaskMutationOutcome> {
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
-        if !matches!(mutation, IosTaskMutation::DeletedState { .. }) {
+        if !matches!(mutation, ConsumerTaskMutation::DeletedState { .. }) {
             let task = get_task_in_workspace(&mut tx, workspace, task_id).await?;
             if task.deleted {
                 return Err(crate::error::CoreError::not_found("task is deleted").into());
@@ -124,15 +124,15 @@ impl Database {
         let before = task_snapshot(&mut tx, &workspace.id, task_id).await?;
         let open = !matches!(before.status.as_str(), "done" | "canceled");
         let update = match mutation {
-            IosTaskMutation::DetailStatus { status, .. } => TaskUpdate {
+            ConsumerTaskMutation::DetailStatus { status, .. } => TaskUpdate {
                 status: Some(status.clone()),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::DeletedState { deleted, .. } => TaskUpdate {
+            ConsumerTaskMutation::DeletedState { deleted, .. } => TaskUpdate {
                 deleted: Some(*deleted),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::Start
+            ConsumerTaskMutation::Start
                 if matches!(before.status.as_str(), "inbox" | "backlog" | "todo") =>
             {
                 TaskUpdate {
@@ -140,11 +140,11 @@ impl Database {
                     ..TaskUpdate::default()
                 }
             }
-            IosTaskMutation::Done if open => TaskUpdate {
+            ConsumerTaskMutation::Done if open => TaskUpdate {
                 status: Some("done".to_string()),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::Snooze { available_at }
+            ConsumerTaskMutation::Snooze { available_at }
                 if open && before.available_at != *available_at =>
             {
                 TaskUpdate {
@@ -152,7 +152,9 @@ impl Database {
                     ..TaskUpdate::default()
                 }
             }
-            IosTaskMutation::SetPriority { priority } if open && before.priority != *priority => {
+            ConsumerTaskMutation::SetPriority { priority }
+                if open && before.priority != *priority =>
+            {
                 TaskUpdate {
                     priority: Some(priority.clone()),
                     ..TaskUpdate::default()
@@ -177,10 +179,10 @@ impl Database {
         .await?;
         let after = task_snapshot(&mut tx, &workspace.id, task_id).await?;
         let field_version = match mutation {
-            IosTaskMutation::DetailStatus { .. } => {
+            ConsumerTaskMutation::DetailStatus { .. } => {
                 crate::db::field_version(&mut tx, task_id.as_str(), "status").await?
             }
-            IosTaskMutation::DeletedState { .. } => {
+            ConsumerTaskMutation::DeletedState { .. } => {
                 crate::db::field_version(&mut tx, task_id.as_str(), "deleted").await?
             }
             _ => None,
@@ -193,7 +195,7 @@ impl Database {
         )
         .await?;
         tx.commit().await?;
-        Ok(IosTaskMutationOutcome {
+        Ok(ConsumerTaskMutationOutcome {
             field_version,
             before,
             after,
@@ -201,11 +203,11 @@ impl Database {
         })
     }
 
-    pub(crate) async fn undo_ios_task_mutation(
+    pub(crate) async fn undo_consumer_task_mutation(
         &self,
         workspace: &Workspace,
         task_id: &TaskId,
-        mutation: &IosTaskMutation,
+        mutation: &ConsumerTaskMutation,
         before: &TaskUndoSnapshot,
         expected: &TaskUndoSnapshot,
     ) -> Result<bool> {
@@ -213,14 +215,14 @@ impl Database {
         let mut tx = begin_immediate(&mut conn).await?;
         let current = task_snapshot(&mut tx, &workspace.id, task_id).await?;
         let expected_field_version = match mutation {
-            IosTaskMutation::DetailStatus {
+            ConsumerTaskMutation::DetailStatus {
                 expected_version, ..
             } => Some((
                 "status",
                 expected_version,
                 "task status changed after the detail action",
             )),
-            IosTaskMutation::DeletedState {
+            ConsumerTaskMutation::DeletedState {
                 expected_version, ..
             } => Some((
                 "deleted",
@@ -242,23 +244,23 @@ impl Database {
             .into());
         }
         let update = match mutation {
-            IosTaskMutation::Start
-            | IosTaskMutation::Done
-            | IosTaskMutation::DetailStatus { .. } => TaskUpdate {
+            ConsumerTaskMutation::Start
+            | ConsumerTaskMutation::Done
+            | ConsumerTaskMutation::DetailStatus { .. } => TaskUpdate {
                 status: Some(before.status.clone()),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::DeletedState { .. } => TaskUpdate {
+            ConsumerTaskMutation::DeletedState { .. } => TaskUpdate {
                 deleted: Some(before.deleted),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::Snooze { .. } => TaskUpdate {
+            ConsumerTaskMutation::Snooze { .. } => TaskUpdate {
                 available_at: Some(
                     (!before.available_at.is_empty()).then(|| before.available_at.clone()),
                 ),
                 ..TaskUpdate::default()
             },
-            IosTaskMutation::SetPriority { .. } => TaskUpdate {
+            ConsumerTaskMutation::SetPriority { .. } => TaskUpdate {
                 priority: Some(before.priority.clone()),
                 ..TaskUpdate::default()
             },

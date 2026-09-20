@@ -107,7 +107,7 @@ async fn create_task_with_epic(
     } = options;
     let mut tx = begin_immediate(conn).await?;
     if require_existing_epic && let Some(epic_id) = &epic_id {
-        crate::operations::epics::require_ios_epic(&mut tx, workspace, epic_id).await?;
+        crate::operations::epics::require_consumer_epic(&mut tx, workspace, epic_id).await?;
     }
     let inserted = insert_task(
         &mut tx,

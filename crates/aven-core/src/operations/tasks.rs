@@ -1,6 +1,6 @@
 mod attachment_creation;
+mod consumer;
 mod creation;
-mod ios;
 mod mutation;
 mod notes;
 
@@ -74,7 +74,7 @@ impl TaskCreationOptions {
         self
     }
 
-    pub(crate) fn for_ios_epic(epic_id: Option<TaskId>) -> Self {
+    pub(crate) fn for_consumer_epic(epic_id: Option<TaskId>) -> Self {
         Self {
             epic_id,
             undo: TaskCreationUndo::None,
@@ -85,7 +85,7 @@ impl TaskCreationOptions {
         }
     }
 
-    pub fn for_ios_capture() -> Self {
+    pub fn for_consumer_capture() -> Self {
         Self {
             epic_id: None,
             undo: TaskCreationUndo::None,
@@ -191,9 +191,9 @@ pub struct NoteOutcome {
     pub change_id: String,
 }
 
+pub(crate) use consumer::ConsumerTaskMutation;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use creation::create_task;
-pub(crate) use ios::IosTaskMutation;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use mutation::update_task;
 pub(crate) use mutation::update_task_labels_in_workspace;

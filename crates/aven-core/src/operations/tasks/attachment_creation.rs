@@ -236,7 +236,7 @@ async fn create_task_with_attachments_and_epic(
     let database_result = async {
         let mut tx = begin_immediate(conn).await?;
         if require_existing_epic && let Some(epic_id) = &epic_id {
-            crate::operations::epics::require_ios_epic(&mut tx, workspace, epic_id).await?;
+            crate::operations::epics::require_consumer_epic(&mut tx, workspace, epic_id).await?;
         }
         for attachment in unique.values() {
             crate::attachments::storage::upsert_inventory_available(
