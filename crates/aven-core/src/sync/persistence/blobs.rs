@@ -278,7 +278,7 @@ pub(super) async fn ensure_attachment_blobs_admitted(
 mod tests {
     use std::collections::HashSet;
     use std::io::Cursor;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use image::{DynamicImage, ImageFormat};
 
@@ -398,11 +398,16 @@ mod tests {
                     .await
             }
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(
-            task.is_finished(),
-            "corrupt content validation should not wait for the writer gate"
-        );
+        // The rejection must land while this test still owns the writer gate. Poll to a
+        // generous deadline so the assertion tracks gate ordering rather than machine load.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !task.is_finished() {
+            assert!(
+                Instant::now() < deadline,
+                "corrupt content validation should not wait for the writer gate"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         drop(writer);
         let error = task.await.unwrap().unwrap_err();
         assert!(
