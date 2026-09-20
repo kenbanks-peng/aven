@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: The TUI Ref column label aligns with the task refs beneath it.
 - Add synchronized individual task deletion and restoration for iOS, including state-checked Undo.
 - Improve sync compatibility so newer apps can keep working with older supported servers, while preserving offline edits when an update is required.
 - Add an optional dedicated [due-date column](https://aventasks.dev/configuration/#tui-table-columns) to TUI task lists. ([#25](https://github.com/raine/aven/issues/25))

@@ -4,6 +4,16 @@ use super::*;
 use crate::tui::widgets::priority_icon;
 
 #[tokio::test]
+async fn ref_header_aligns_with_task_refs() {
+    let store = test_store_with_tasks(vec![task_list_item("Aligned ref")]).await;
+    let buffer = render_task_list_buffer(&store, 80, 4);
+    let header = text_in_cell(&buffer, Rect::new(0, 0, 80, 1));
+    let task = text_in_cell(&buffer, Rect::new(0, 1, 80, 1));
+
+    assert_eq!(header.find("REF"), task.find("APP-"));
+}
+
+#[tokio::test]
 async fn reordered_columns_align_headers_content_and_status_hits() {
     for width in [64, 120] {
         let mut item = task_list_item("Short title");

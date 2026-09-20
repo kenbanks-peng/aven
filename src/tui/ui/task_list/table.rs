@@ -385,7 +385,7 @@ pub(super) fn render_task_header(
     };
     for column in TableColumn::ALL {
         let label = match column {
-            TableColumn::Ref => " REF",
+            TableColumn::Ref => "   REF",
             TableColumn::Title => "TITLE",
             TableColumn::Labels if render_mode == TaskListRenderMode::Epics => "SUMMARY",
             TableColumn::Labels => "LABELS",
