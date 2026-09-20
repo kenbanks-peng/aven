@@ -4,20 +4,17 @@ mod markdown;
 mod text;
 
 #[cfg(test)]
+pub(crate) use attachments::attachment_placeholder;
+#[cfg(test)]
 pub(crate) use attachments::attachment_unavailable_placeholder;
-#[allow(unused_imports)]
 pub(crate) use attachments::{
-    AttachmentMetadataJson, attachment_metadata_json, attachment_placeholder,
-    attachment_state_placeholder, human_file_size, print_attachment_metadata_line,
-    print_attachment_section,
+    AttachmentMetadataJson, attachment_metadata_json, attachment_state_placeholder,
+    human_file_size, print_attachment_section,
 };
-#[allow(unused_imports)]
 pub(crate) use json::{
-    MetadataDetailJson, TaskConflictReport, TaskDependencyItemJson, TaskDependencySummaryJson,
-    TaskEpicLinkJson, TaskFullJson, TaskLineJson, TaskNoteJson, TaskRecurrenceGroupJson,
-    TaskRecurrenceJson, TaskRelatedJson, task_dependency_summary_json, task_epic_link_json,
-    task_full_json, task_line_json_item, task_recurrence_group_json, task_recurrence_json,
-    task_related_json,
+    TaskConflictReport, TaskEpicLinkJson, TaskLineJson, TaskRecurrenceJson, TaskRelatedJson,
+    task_dependency_summary_json, task_epic_link_json, task_full_json, task_line_json_item,
+    task_recurrence_json, task_related_json,
 };
 pub(crate) use markdown::{gist_description, gist_filename, task_markdown};
 pub(crate) use text::{

@@ -93,20 +93,11 @@ fn staging_dir(blob_dir: &Path) -> PathBuf {
     blob_dir.join("objects").join("sha256")
 }
 
-#[allow(unused_imports)]
 pub use leases::{acquire_lease, release_lease};
-#[allow(unused_imports)]
 pub use liveness::reconcile_liveness;
-#[allow(unused_imports)]
-pub(crate) use liveness::{
-    reconcile_liveness_for_hashes_in_transaction, reconcile_liveness_in_transaction,
-};
-#[allow(unused_imports)]
-pub use maintenance::{
-    prune, prune_preview_cache, reconcile_missing_objects, reconcile_orphan_objects,
-    reconcile_staging, reconcile_trash,
-};
-#[allow(unused_imports)]
-pub use quota::{ensure_local_capacity, local_unique_bytes, release_reservation, reserve_upload};
-#[allow(unused_imports)]
+pub(crate) use liveness::reconcile_liveness_for_hashes_in_transaction;
+pub use maintenance::{prune, prune_preview_cache};
+#[cfg(test)]
+pub(crate) use maintenance::{reconcile_missing_objects, reconcile_trash};
+pub use quota::{ensure_local_capacity, release_reservation, reserve_upload};
 pub use report::lifecycle_report;

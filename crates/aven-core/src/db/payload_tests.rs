@@ -1,8 +1,10 @@
 use super::*;
 use crate::choices::TaskSource;
-use crate::error::ErrorKind;
+use crate::error::{CoreError, ErrorKind};
 use crate::operations::{TaskCreationUndo, TaskDraft, TaskUpdate};
 use crate::undo::UndoContext;
+use serde_json::Value;
+use sqlx::Row;
 
 fn draft(description: String) -> TaskDraft {
     TaskDraft {

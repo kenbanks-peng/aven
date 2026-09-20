@@ -6,16 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
-#[allow(unused_imports)]
-use crate::error::CoreError;
 use anyhow::{Context, Result};
-#[cfg(test)]
-#[allow(unused_imports)]
-use serde_json::Value;
-#[cfg(test)]
-#[allow(unused_imports)]
-use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Connection as _, Sqlite, SqliteConnection, SqlitePool, Transaction};
 use tokio::sync::{Mutex, OwnedMutexGuard};
@@ -40,8 +31,6 @@ pub(crate) use field_versions::{
     set_entity_field_version, set_field_version,
 };
 pub use inspection::{DatabaseInspection, InspectedDatabase};
-#[allow(unused_imports)]
-pub(in crate::db) use rows::optional_task_date;
 pub(crate) use rows::{
     recurrence_occurrence_from_row, recurrence_pause_interval_from_row, recurrence_series_from_row,
     recurrence_series_label_from_row, task_from_row,

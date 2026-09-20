@@ -22,10 +22,9 @@ pub use paths::{
     resolve_blob_dir, resolve_db_path, resolve_sync_server,
 };
 pub(crate) use paths::{expand_tilde_from, resolve_sync_server_from};
-#[allow(unused_imports)]
-pub use tui::{
-    SidebarConfig, SidebarView, TableColumn, TaskColumnConfig, TaskTableConfig, TuiConfig,
-};
+#[cfg(test)]
+pub use tui::TaskTableConfig;
+pub use tui::{SidebarView, TableColumn, TaskColumnConfig, TuiConfig};
 
 #[cfg(test)]
 use paths::resolve_db_path_from;

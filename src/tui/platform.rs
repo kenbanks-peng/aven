@@ -23,5 +23,6 @@ pub(crate) use terminal::{
 };
 #[cfg(test)]
 pub(crate) use viewer::browser_url_for_test;
-#[cfg_attr(test, allow(unused_imports))]
-pub(crate) use viewer::{open_image_in_default_viewer, open_url_in_default_browser};
+#[cfg(not(test))]
+pub(crate) use viewer::open_image_in_default_viewer;
+pub(crate) use viewer::open_url_in_default_browser;

@@ -1,3 +1,4 @@
+use super::rows::optional_task_date;
 use super::*;
 use crate::recurrence::{RecurrenceOutcome, RecurrenceProjectionState};
 use crate::types::MutableEntityType;
