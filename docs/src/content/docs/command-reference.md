@@ -1183,7 +1183,7 @@ Replace local data from an aven JSON export.
 aven import <path> --yes
 ```
 
-Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable until sync or a backup restore supplies them.
+Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable. Sync restores images that reached the same server before export. Attachments that were still local-only remain unavailable metadata and are not published after import; use a backup archive when moving them and their image files.
 
 Exports without recurrence sections import every task as nonrecurring data.
 

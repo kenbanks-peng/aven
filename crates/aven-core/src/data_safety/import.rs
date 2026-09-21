@@ -79,10 +79,7 @@ pub(super) async fn replace_from_export(
         .filter(|change| {
             change.server_seq.is_none()
                 && change.field.as_deref() == Some("attachments")
-                && matches!(
-                    change.op_type.as_str(),
-                    "attachment_add" | "attachment_delete"
-                )
+                && change.op_type == "attachment_add"
         })
         .map(|change| change.change_id.as_str())
         .collect::<HashSet<_>>();

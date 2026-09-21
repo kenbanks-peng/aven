@@ -62,9 +62,16 @@ a safety backup first.
 ## Restore attachment images
 
 After importing JSON, attachment labels remain visible while the TUI shows
-unavailable-image placeholders. Run sync or restore a backup archive to supply
-the files. Until then, [`attachment get --output`](/command-reference/#aven-attachment)
-cannot save them.
+unavailable-image placeholders. Sync can restore an image only if its attachment
+was synchronized to the same server before the export. Until the bytes return,
+[`attachment get --output`](/command-reference/#aven-attachment) cannot save the
+image.
+
+An attachment that was still local-only when exported remains local unavailable
+metadata after import. Aven does not publish it because the JSON lacks the image
+bytes required by the sync server. Use a backup archive instead when moving
+unsynchronized images. Restoring that archive replaces the database and restores
+the included image files together.
 
 A complete backup includes only images available locally when it is created. If
 you synchronize attachments, confirm that sync is complete before creating the

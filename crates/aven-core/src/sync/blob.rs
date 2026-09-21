@@ -330,6 +330,8 @@ async fn missing_local_blob_page(
                 MAX(ta.height) AS height
          FROM task_attachments AS ta INDEXED BY idx_task_attachments_live_sha256
          JOIN tasks t ON t.workspace_id = ta.workspace_id AND t.id = ta.task_id
+         JOIN changes c ON c.change_id = ta.created_by_change_id
+                       AND c.op_type = 'attachment_add' AND c.server_seq IS NOT NULL
          LEFT JOIN blob_inventory bi ON bi.sha256 = ta.sha256
          WHERE ta.deleted = 0 AND t.deleted = 0
          GROUP BY ta.sha256
@@ -360,6 +362,8 @@ pub(super) async fn missing_local_blob_counts(conn: &mut SqliteConnection) -> Re
            SELECT ta.sha256, MAX(ta.byte_size) AS byte_size
            FROM task_attachments AS ta INDEXED BY idx_task_attachments_live_sha256
            JOIN tasks t ON t.workspace_id = ta.workspace_id AND t.id = ta.task_id
+           JOIN changes c ON c.change_id = ta.created_by_change_id
+                         AND c.op_type = 'attachment_add' AND c.server_seq IS NOT NULL
            LEFT JOIN blob_inventory bi ON bi.sha256 = ta.sha256
            WHERE ta.deleted = 0 AND t.deleted = 0
            GROUP BY ta.sha256
@@ -480,6 +484,7 @@ mod tests {
         for index in 0..count {
             let task_id = format!("{index:016X}");
             let attachment_id = format!("{:016X}", index + 100);
+            let change_id = format!("{:016X}", index + 200);
             let sha256 = format!("{index:064x}");
             sqlx::query(
                 "INSERT INTO tasks(
@@ -494,19 +499,73 @@ mod tests {
             .await
             .unwrap();
             sqlx::query(
+                "INSERT INTO changes(
+                   change_id, client_id, local_seq, entity_type, entity_id, field, op_type,
+                   payload, created_at, server_seq
+                 ) VALUES (?, 'remote', ?, 'task', ?, 'attachments', 'attachment_add', '{}',
+                           '2026-01-01T00:00:00Z', ?)",
+            )
+            .bind(&change_id)
+            .bind(i64::try_from(index + 1).unwrap())
+            .bind(&task_id)
+            .bind(i64::try_from(index + 1).unwrap())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+            sqlx::query(
                 "INSERT INTO task_attachments(
                    workspace_id, attachment_id, task_id, sha256, byte_size, media_type,
-                   width, height, created_at
+                   width, height, created_at, created_by_change_id
                  ) VALUES ('0000000000000000', ?, ?, ?, 4, 'image/png', 1, 1,
-                           '2026-01-01T00:00:00Z')",
+                           '2026-01-01T00:00:00Z', ?)",
             )
             .bind(attachment_id)
             .bind(task_id)
             .bind(sha256)
+            .bind(change_id)
             .execute(&mut *conn)
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn imported_local_only_attachment_is_not_scheduled_for_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = Database::open(&temp.path().join("replica.sqlite"))
+            .await
+            .unwrap();
+        let mut conn = database.acquire_writer().await.unwrap();
+        sqlx::query(
+            "INSERT INTO tasks(
+               workspace_id, id, title, description, project_id, status, priority,
+               created_at, updated_at, queue_activity_at
+             ) VALUES ('0000000000000000', '0000000000000001', 'task', '', 'project',
+                       'inbox', 'none', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z',
+                       '2026-01-01T00:00:00Z')",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_attachments(
+               workspace_id, attachment_id, task_id, sha256, byte_size, media_type,
+               width, height, created_at, created_by_change_id
+             ) VALUES ('0000000000000000', '0000000000000002', '0000000000000001',
+                       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                       4, 'image/png', 1, 1, '2026-01-01T00:00:00Z', NULL)",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        drop(conn);
+
+        let page = database.missing_local_blob_page(2).await.unwrap();
+        assert!(page.blobs.is_empty());
+        assert_eq!(
+            database.missing_sync_attachment_counts().await.unwrap(),
+            ByteCount { count: 0, bytes: 0 }
+        );
     }
 
     #[tokio::test]

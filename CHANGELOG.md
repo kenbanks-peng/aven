@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: Sync after a JSON import no longer retries attachment images that were never uploaded, and imported attachment deletions continue to other devices.
 - Fix: The TUI Ref column label aligns with the task refs beneath it.
 - Add synchronized individual task deletion and restoration for iOS, including state-checked Undo.
 - Improve sync compatibility so newer apps can keep working with older supported servers, while preserving offline edits when an update is required.

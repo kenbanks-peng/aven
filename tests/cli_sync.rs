@@ -3407,6 +3407,176 @@ fn attachment_metadata_and_blobs_round_trip_through_real_sync_server() {
 }
 
 #[test]
+fn imported_attachment_history_syncs_only_when_server_has_the_image() {
+    let env = TestEnv::new();
+    let server = TestServer::start(&env);
+    let source = env.db("attachment-import-source.sqlite");
+    let imported = env.db("attachment-import-target.sqlite");
+    let control = env.db("attachment-import-control.sqlite");
+    let second = env.db("attachment-import-second.sqlite");
+
+    let acknowledged_ref = extract_ref(&ok(env.aven(
+        &source,
+        ["add", "acknowledged imported image", "--project", "app"],
+    )));
+    let acknowledged_image = env.path("acknowledged-import.png");
+    std::fs::write(&acknowledged_image, png_bytes(3, 2)).expect("write acknowledged image");
+    ok(env.aven(
+        &source,
+        [
+            "attachment",
+            "add",
+            &acknowledged_ref,
+            acknowledged_image.to_str().unwrap(),
+        ],
+    ));
+
+    let deleted_ref = extract_ref(&ok(env.aven(
+        &source,
+        ["add", "deleted imported image", "--project", "app"],
+    )));
+    let deleted_image = env.path("deleted-import.png");
+    std::fs::write(&deleted_image, png_bytes(4, 2)).expect("write deleted image");
+    ok(env.aven(
+        &source,
+        [
+            "attachment",
+            "add",
+            &deleted_ref,
+            deleted_image.to_str().unwrap(),
+        ],
+    ));
+    ok(env.aven(&source, ["sync", "--server", &server.url]));
+
+    let deleted_attachment_id = query_sql_scalar(
+        &source,
+        "SELECT ta.attachment_id FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id WHERE t.title = 'deleted imported image'",
+    );
+    ok(env.aven(&source, ["attachment", "delete", &deleted_attachment_id]));
+
+    let pending_ref = extract_ref(&ok(env.aven(
+        &source,
+        ["add", "pending imported image", "--project", "app"],
+    )));
+    let pending_image = env.path("pending-import.png");
+    std::fs::write(&pending_image, png_bytes(5, 2)).expect("write pending image");
+    ok(env.aven(
+        &source,
+        [
+            "attachment",
+            "add",
+            &pending_ref,
+            pending_image.to_str().unwrap(),
+        ],
+    ));
+
+    let export = env.path("attachment-import.json");
+    ok(env.aven(&source, ["export", "--output", export.to_str().unwrap()]));
+    ok(env.aven(&imported, ["import", export.to_str().unwrap(), "--yes"]));
+
+    ok(env.aven(&control, ["sync", "--server", &server.url]));
+    let control_ref = extract_ref(&ok(env.aven(
+        &control,
+        ["add", "unimported control image", "--project", "app"],
+    )));
+    let control_image = env.path("unimported-control.png");
+    std::fs::write(&control_image, png_bytes(6, 2)).expect("write control image");
+    ok(env.aven(
+        &control,
+        [
+            "attachment",
+            "add",
+            &control_ref,
+            control_image.to_str().unwrap(),
+        ],
+    ));
+    ok(env.aven(&control, ["sync", "--server", &server.url]));
+
+    ok(env.aven(&imported, ["sync", "--server", &server.url]));
+    ok(env.aven(&second, ["sync", "--server", &server.url]));
+
+    for db in [&imported, &second] {
+        assert_eq!(
+            scalar_i64(
+                db,
+                "SELECT count(*) FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id JOIN blob_inventory bi ON bi.sha256 = ta.sha256 WHERE t.title = 'acknowledged imported image' AND ta.deleted = 0 AND bi.available = 1",
+            ),
+            1
+        );
+        assert_eq!(
+            scalar_i64(
+                db,
+                "SELECT count(*) FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id WHERE t.title = 'deleted imported image' AND ta.deleted = 1",
+            ),
+            1
+        );
+    }
+    assert_eq!(
+        scalar_i64(
+            &imported,
+            "SELECT count(*) FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id JOIN blob_inventory bi ON bi.sha256 = ta.sha256 WHERE t.title = 'pending imported image' AND ta.deleted = 0 AND bi.available = 0",
+        ),
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &second,
+            "SELECT count(*) FROM tasks WHERE title = 'pending imported image'",
+        ),
+        1
+    );
+    assert_eq!(
+        scalar_i64(
+            &second,
+            "SELECT count(*) FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id WHERE t.title = 'pending imported image'",
+        ),
+        0
+    );
+    assert_eq!(
+        scalar_i64(
+            &second,
+            "SELECT count(*) FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id JOIN blob_inventory bi ON bi.sha256 = ta.sha256 WHERE t.title = 'unimported control image' AND ta.deleted = 0 AND bi.available = 1",
+        ),
+        1
+    );
+
+    for (title, expected, output_name) in [
+        (
+            "acknowledged imported image",
+            &acknowledged_image,
+            "downloaded-acknowledged.png",
+        ),
+        (
+            "unimported control image",
+            &control_image,
+            "downloaded-control.png",
+        ),
+    ] {
+        let attachment_id = query_sql_scalar(
+            &second,
+            &format!(
+                "SELECT ta.attachment_id FROM task_attachments ta JOIN tasks t ON t.id = ta.task_id WHERE t.title = '{title}'"
+            ),
+        );
+        let output = env.path(output_name);
+        ok(env.aven(
+            &second,
+            [
+                "attachment",
+                "get",
+                &attachment_id,
+                "--output",
+                output.to_str().unwrap(),
+            ],
+        ));
+        assert_eq!(
+            std::fs::read(output).unwrap(),
+            std::fs::read(expected).unwrap()
+        );
+    }
+}
+
+#[test]
 fn attachment_backlog_syncs_in_bounded_unique_hash_rounds() {
     let env = TestEnv::new();
     let server = TestServer::start(&env);
