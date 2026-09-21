@@ -187,7 +187,7 @@ Optimization applies only to PNG files. Aven preserves the original when optimiz
 | `preview_quota_bytes` | 512 MiB | Maximum disposable preview-cache size. |
 | `maintenance_limit` | 128 | Maximum files processed in one cleanup run. |
 
-Images used by tasks or attachment operations in progress are protected from cleanup. If a task deletion has conflicted, the server conservatively retains its images even after the conflict is resolved. Explicitly deleting those attachments makes their images eligible for normal cleanup once no other task uses them. Identical images share storage and count once toward attachment quotas. The preview cache uses its separate quota and does not count toward image-file quotas. `aven attachment prune` performs a dry run unless you pass `--apply`.
+Images used by tasks or attachment operations in progress are protected from cleanup. Identical images share storage and count once toward attachment quotas. The preview cache uses its separate quota and does not count toward image-file quotas. `aven attachment prune` performs a dry run unless you pass `--apply`.
 
 ## Workspace routes
 
