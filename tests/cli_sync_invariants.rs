@@ -31,6 +31,48 @@ fn sync_server_url_is_pinned_and_normalized() {
 }
 
 #[test]
+fn imported_accepted_history_remains_pinned_to_its_server() {
+    let env = TestEnv::new();
+    let original_server = TestServer::start_with_data(&env, "import-original-server.sqlite");
+    let unrelated_server = TestServer::start_with_data(&env, "import-unrelated-server.sqlite");
+    let source = env.db("import-source.sqlite");
+    let imported = env.db("import-target.sqlite");
+    let export = env.path("accepted-history.json");
+
+    ok(env.aven(&source, ["add", "accepted task", "--project", "app"]));
+    sync(&env, &source, &original_server);
+    ok(env.aven(
+        &source,
+        [
+            "export",
+            "--output",
+            export.to_str().expect("utf8 export path"),
+        ],
+    ));
+    ok(env.aven(
+        &imported,
+        [
+            "import",
+            "--yes",
+            export.to_str().expect("utf8 export path"),
+        ],
+    ));
+
+    assert_eq!(
+        meta_value(&imported, "sync_server_url"),
+        Some(original_server.url.clone())
+    );
+    let error = fail(env.aven(&imported, ["sync", "--server", &unrelated_server.url]));
+    contains_all(
+        &error,
+        &["error sync-server-changed", "use a fresh database"],
+    );
+
+    sync(&env, &imported, &original_server);
+    assert_eq!(scalar_i64(&imported, "SELECT count(*) FROM tasks"), 1);
+}
+
+#[test]
 fn repeated_sync_is_idempotent_and_acknowledges_changes() {
     let env = TestEnv::new();
     let server = TestServer::start(&env);

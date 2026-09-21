@@ -29,8 +29,38 @@ pub(super) async fn ensure_supported_export(
     Ok(())
 }
 
+pub(super) fn accepted_history_server(export: &AvenExport) -> Result<Option<String>> {
+    if !export
+        .tables
+        .changes
+        .iter()
+        .any(|change| change.server_seq.is_some())
+    {
+        return Ok(None);
+    }
+    let mut servers = export
+        .tables
+        .meta
+        .iter()
+        .filter(|row| row.key == "sync_server_url")
+        .map(|row| row.value.as_str());
+    let server = servers.next().context(
+        "error invalid-export-snapshot accepted sync history is missing its server identity",
+    )?;
+    ensure!(
+        servers.next().is_none(),
+        "error invalid-export-snapshot sync server identity is duplicated"
+    );
+    ensure!(
+        crate::sync::wire::sync_server_url_is_valid(server),
+        "error invalid-export-snapshot sync server identity is invalid"
+    );
+    Ok(Some(server.trim_end_matches('/').to_string()))
+}
+
 pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
     use crate::sync::protocol::{MAINTAINED_PROTOCOL_BASELINE, validate_operation};
+    accepted_history_server(export)?;
     for row in &export.tables.tasks {
         validate_operation(
             MAINTAINED_PROTOCOL_BASELINE,

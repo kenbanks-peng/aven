@@ -56,6 +56,9 @@ pub(super) async fn replace_from_export(
         .max()
         .unwrap_or(0);
     db::set_meta(tx, "local_seq", &local_seq.to_string()).await?;
+    if let Some(server) = super::validation::accepted_history_server(export)? {
+        db::set_meta(tx, "sync_server_url", &server).await?;
+    }
 
     for meta in &export.tables.meta {
         if matches!(

@@ -48,10 +48,12 @@ history, pauses, conflicts, and attachment information. It sets
 
 Import validates recurring schedules, generated tasks, history, and recurring
 state before replacing local data. Older task-only exports import every task as
-nonrecurring data. Import keeps this installation's client identity and clears
-server-specific sync state, including established compatibility behavior. Imported
-history must fit the maintained baseline; incompatible records are rejected
-before local data is replaced. A SQLite backup preserves the database
+nonrecurring data. Import keeps this installation's client identity and resets
+the sync cursor and established compatibility behavior. When the export contains
+history already accepted by a sync server, import retains that server binding so
+Aven cannot silently treat the history as belonging to a different server.
+Imported history must fit the maintained baseline; incompatible records are
+rejected before local data is replaced. A SQLite backup preserves the database
 relationship and its established behavior together.
 
 :::caution[Local data replacement]

@@ -995,6 +995,40 @@ fn import_rejects_invalid_snapshot_without_replacing_existing_data() {
 }
 
 #[test]
+fn import_rejects_accepted_history_without_server_identity() {
+    let env = TestEnv::new();
+    let source_db = env.db("accepted-history-source.sqlite");
+    let target_db = env.db("accepted-history-target.sqlite");
+    ok(env.aven(&source_db, ["add", "source task", "--project", "app"]));
+    ok(env.aven(&target_db, ["add", "target stays", "--project", "app"]));
+    let export_path = env.path("accepted-history-without-server.json");
+    ok(env.aven(
+        &source_db,
+        ["export", "--output", export_path.to_str().unwrap()],
+    ));
+
+    let mut snapshot: Value =
+        serde_json::from_str(&fs::read_to_string(&export_path).unwrap()).unwrap();
+    snapshot["tables"]["changes"][0]["server_seq"] = Value::Number(1.into());
+    fs::write(&export_path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+
+    let output = fail(env.aven(
+        &target_db,
+        ["import", "--yes", export_path.to_str().unwrap()],
+    ));
+    contains_all(
+        &output,
+        &[
+            "error invalid-export-snapshot",
+            "accepted sync history is missing its server identity",
+        ],
+    );
+    let list = ok(env.aven(&target_db, ["list", "--all"]));
+    contains_all(&list, &["target stays"]);
+    contains_none(&list, &["source task"]);
+}
+
+#[test]
 fn import_rejects_invalid_project_ids() {
     let env = TestEnv::new();
     let db = env.db("invalid-import-project-id.sqlite");
