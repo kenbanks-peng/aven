@@ -92,19 +92,7 @@ pub(super) async fn apply_server_blob_reference(
             .fetch_all(&mut *conn)
             .await?;
             affected_attachment_hashes.extend(hashes);
-            let deleted = change.payload["value"]
-                .as_str()
-                .is_some_and(|value| value == "1");
-            sqlx::query(
-                "INSERT INTO server_task_tombstones(workspace_id, task_id, deleted)
-                 VALUES (?, ?, ?)
-                 ON CONFLICT(workspace_id, task_id) DO UPDATE SET deleted = excluded.deleted",
-            )
-            .bind(workspace_id)
-            .bind(&change.entity_id)
-            .bind(i64::from(deleted))
-            .execute(&mut *conn)
-            .await?;
+            super::parent_liveness::reconcile_parent(conn, workspace_id, &change.entity_id).await?;
         }
         _ => {}
     }
@@ -502,6 +490,23 @@ mod tests {
             .await
             .unwrap();
 
+            let create_id = format!("DDDDDDDDDDDDDDD{index}");
+            let creation = ChangeWire {
+                change_id: create_id.clone(),
+                client_id: "client".to_string(),
+                local_seq: 1,
+                entity_type: "task".to_string(),
+                entity_id: task_id.clone(),
+                field: None,
+                op_type: op_type::CREATE_TASK.to_string(),
+                payload: json!({"workspace_id": "0000000000000000"}),
+                base_version: None,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+                server_seq: Some(index as i64 * 3 + 1),
+            };
+            super::super::insert_wire_change(&mut conn, &creation)
+                .await
+                .unwrap();
             let deletion_change = |value: &str| ChangeWire {
                 change_id: format!("AAAAAAAAAAAAAA{index}{value}"),
                 client_id: "client".to_string(),
@@ -515,11 +520,18 @@ mod tests {
                     "workspace_key": "default",
                     "value": value,
                 }),
-                base_version: None,
+                base_version: Some(if value == "1" {
+                    create_id.clone()
+                } else {
+                    format!("AAAAAAAAAAAAAA{index}1")
+                }),
                 created_at: "2026-01-01T00:00:00Z".to_string(),
-                server_seq: None,
+                server_seq: Some(index as i64 * 3 + if value == "1" { 2 } else { 3 }),
             };
 
+            super::super::insert_wire_change(&mut conn, &deletion_change("1"))
+                .await
+                .unwrap();
             let mut affected_hashes = HashSet::new();
             apply_server_blob_reference(&mut conn, &deletion_change("1"), &mut affected_hashes)
                 .await
@@ -549,6 +561,9 @@ mod tests {
             assert!(deleted, "{operation} must apply live-to-deleted state");
             assert!(unreferenced_at.is_some());
 
+            super::super::insert_wire_change(&mut conn, &deletion_change("0"))
+                .await
+                .unwrap();
             let mut affected_hashes = HashSet::new();
             apply_server_blob_reference(&mut conn, &deletion_change("0"), &mut affected_hashes)
                 .await

@@ -108,6 +108,7 @@ pub(crate) async fn run_server(args: ServerArgs, config: config::AppConfig) -> R
     let auth_enabled = auth_token.is_some();
     validate_bind_policy(scope, args.unsafe_public_bind, auth_token.as_deref())?;
     let database = Database::open(&args.data).await?;
+    database.reconcile_server_attachment_parents().await?;
     let blob_dir = config::resolve_blob_dir(&args.data, &config)?;
     let lifecycle_policy = config.local.attachment_lifecycle.server_policy();
     let state = ServerState {

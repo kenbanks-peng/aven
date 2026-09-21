@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Fix: Conflicting task deletions no longer let the sync server prune images still needed by other devices.
 - Fix: JSON imports with synchronized history remain bound to their original sync server instead of silently omitting that history from an unrelated server.
 - Fix: Sync after a JSON import no longer retries attachment images that were never uploaded, and imported attachment deletions continue to other devices.
 - Fix: The TUI Ref column label aligns with the task refs beneath it.

@@ -3,6 +3,7 @@ use super::wire::{ChangeWire, PushAck, SyncRequest, SyncResponse};
 mod blobs;
 mod changes;
 mod client;
+mod parent_liveness;
 mod server;
 mod status;
 use blobs::{
