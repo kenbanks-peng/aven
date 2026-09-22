@@ -576,6 +576,16 @@ impl App {
                     self.open_remove_dependency_picker(selection);
                 }
             },
+            PickerIntent::GoToBlocker {
+                source_task_id,
+                scroll,
+            } => match values.first() {
+                Some(blocker_id) => {
+                    self.submit_go_to_blocker(source_task_id, scroll, blocker_id.parse()?)
+                        .await?;
+                }
+                None => self.set_warning("no blocker selected"),
+            },
         }
         Ok(())
     }

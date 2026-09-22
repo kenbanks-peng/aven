@@ -566,6 +566,22 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
         }],
         Action::ReturnToLastChange,
     ),
+    BuiltInCommand::implemented_with_detail_bindings(
+        "go-to-blocker",
+        &[],
+        "open a task that blocks the selected task",
+        "Navigation",
+        &[KeySequence {
+            codes: &[KeyCode::Char('g'), KeyCode::Char('B')],
+            label: "g B",
+        }],
+        &[KeySequence {
+            codes: &[KeyCode::Char('g'), KeyCode::Char('B')],
+            label: "g B",
+        }],
+        DetailFocusPolicy::ParentTask,
+        Action::GoToBlocker,
+    ),
     BuiltInCommand::implemented(
         "toggle-sidebar",
         "toggle the sidebar",

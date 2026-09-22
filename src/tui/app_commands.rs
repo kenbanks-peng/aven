@@ -390,6 +390,10 @@ impl App {
             Action::BeginCreateTaskGist => {
                 self.begin_create_task_gist_for(selection.targets()[0].task.id.clone())
             }
+            Action::GoToBlocker => {
+                self.go_to_blocker_for(selection.targets()[0].clone())
+                    .await?
+            }
             Action::BeginEditTitle => self.begin_edit_title_for(selection),
             Action::BeginEditMetadata => self.begin_edit_metadata_for(selection).await?,
             Action::BeginEditDescription => self.begin_edit_description_for(selection),

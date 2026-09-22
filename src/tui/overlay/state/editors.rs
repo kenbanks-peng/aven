@@ -1,4 +1,4 @@
-use crate::ids::WorkspaceId;
+use crate::ids::{TaskId, WorkspaceId};
 use crate::tui::conflict_flow::ConflictResolutionChoice;
 use crate::tui::overlay::text_buffer::TextBuffer;
 use crate::tui::overlay::text_input::LineEdit;
@@ -144,6 +144,10 @@ pub(crate) enum PickerIntent {
     },
     RemoveDependency {
         selection: crate::tui::task_selection::TaskSelection,
+    },
+    GoToBlocker {
+        source_task_id: TaskId,
+        scroll: u16,
     },
     RemoveRelated {
         selection: crate::tui::task_selection::TaskSelection,

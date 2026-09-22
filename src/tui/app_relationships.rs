@@ -11,7 +11,65 @@ pub(super) struct FocusedRelationship {
     pub(super) title: String,
 }
 
+const GO_TO_BLOCKER_TITLE: &str = "Go to blocker";
+
 impl App {
+    pub(super) async fn go_to_blocker(&mut self) -> Result<()> {
+        let Some(item) = self.selected_command_task() else {
+            self.set_info("no selected task");
+            return Ok(());
+        };
+        self.go_to_blocker_for(item).await
+    }
+
+    pub(super) async fn go_to_blocker_for(
+        &mut self,
+        item: crate::query::TaskListItem,
+    ) -> Result<()> {
+        let source_task_id = item.task.id.clone();
+        let scroll = self.detail.state().map_or(0, |detail| detail.scroll());
+        match item.depends_on.as_slice() {
+            [] => self.set_info("selected task has no blockers"),
+            [blocker] => self.open_detail_task(&blocker.task_id, scroll).await,
+            _ => self.open_picker_overlay(
+                crate::tui::overlay::PickerIntent::GoToBlocker {
+                    source_task_id,
+                    scroll,
+                },
+                GO_TO_BLOCKER_TITLE,
+                crate::tui::store::blocker_navigation_picker_items(&item),
+                false,
+            ),
+        }
+        Ok(())
+    }
+
+    pub(super) async fn submit_go_to_blocker(
+        &mut self,
+        source_task_id: crate::ids::TaskId,
+        scroll: u16,
+        blocker_id: crate::ids::TaskId,
+    ) -> Result<()> {
+        let Some(source) = self.store.selected_task(self.list.selected_task()) else {
+            self.set_warning("source task is unavailable");
+            return Ok(());
+        };
+        if source.task.id != source_task_id {
+            self.set_warning("source task is no longer selected");
+            return Ok(());
+        }
+        if !source
+            .depends_on
+            .iter()
+            .any(|link| link.task_id == blocker_id)
+        {
+            self.set_warning("selected blocker is unavailable");
+            return Ok(());
+        }
+        self.open_detail_task(&blocker_id, scroll).await;
+        Ok(())
+    }
+
     pub(super) async fn remove_selected_epic_child(&mut self) -> Result<()> {
         let detail = self.detail.is_active();
         let focused_child = match self

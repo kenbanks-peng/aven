@@ -67,6 +67,7 @@ pub(crate) enum Action {
     ToggleColumnsPreview,
     GoBack,
     GoForward,
+    GoToBlocker,
     ReturnToLastChange,
     ToggleHelp,
     ShowWelcome,
@@ -290,6 +291,7 @@ impl Action {
             | Self::StopRecurrence
             | Self::ShowRecurrenceHistory => CommandTargetPolicy::Recurrence,
             Self::BeginCreateTaskGist
+            | Self::GoToBlocker
             | Self::ToggleEpicExpanded
             | Self::BeginAddEpicChild
             | Self::ShowConflictDetails

@@ -289,6 +289,7 @@ pub(crate) enum PickerKind {
     DeleteProject,
     LabelAdministration,
     SwitchWorkspace,
+    GoToBlocker,
     Generic,
 }
 
@@ -308,6 +309,7 @@ impl From<&PickerIntent> for PickerKind {
                 Self::LabelAdministration
             }
             PickerIntent::SwitchWorkspace => Self::SwitchWorkspace,
+            PickerIntent::GoToBlocker { .. } => Self::GoToBlocker,
             _ => Self::Generic,
         }
     }
@@ -611,6 +613,38 @@ impl<'a> OverlayView<'a> {
 mod tests {
     use super::*;
     use crate::tui::overlay::{LineEdit, PickerIntent, PickerState};
+
+    #[test]
+    fn blocker_navigation_picker_has_dedicated_presentation_kind() {
+        let state = OverlayState::Picker(PickerState::new(
+            PickerIntent::GoToBlocker {
+                source_task_id: crate::test_support::task_id("blocker-picker-source"),
+                scroll: 0,
+            },
+            "Go to blocker",
+            Vec::new(),
+            false,
+        ));
+        let sync_status = TuiSyncStatus::default();
+        let picker = OverlayView::project(
+            &state,
+            OverlayViewContext {
+                sync_status: &sync_status,
+                syncing: false,
+                now: time::OffsetDateTime::UNIX_EPOCH,
+                status_prefix_active: false,
+                priority_prefix_active: false,
+            },
+        );
+
+        assert!(matches!(
+            picker,
+            OverlayView::Picker(PickerView {
+                kind: PickerKind::GoToBlocker,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn overlay_view_projection_keeps_project_picker_presentation_kinds() {

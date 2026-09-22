@@ -40,6 +40,150 @@ async fn opening_detail_rebinds_after_the_summary_task_disappears() {
 }
 
 #[tokio::test]
+async fn go_to_blocker_reports_no_upstream_blockers() {
+    let mut app = test_app().await;
+    let task_index = create_and_select_task(&mut app, test_task_draft("Unblocked task")).await;
+    app.list.select_task(Some(task_index));
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('B')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        toast_message(&app).as_deref(),
+        Some("selected task has no blockers")
+    );
+}
+
+#[tokio::test]
+async fn go_to_blocker_ignores_downstream_blocks() {
+    let mut app = test_app().await;
+    let (_blocker_id, blocked_id) = create_blocked_pair(&mut app).await;
+    let blocker_index = app
+        .store
+        .tasks
+        .iter()
+        .position(|item| item.blocks.iter().any(|link| link.task_id == blocked_id))
+        .expect("blocker with downstream task");
+    app.list.select_task(Some(blocker_index));
+
+    app.execute(crate::tui::event::Action::GoToBlocker)
+        .await
+        .unwrap();
+
+    assert!(app.overlay.is_none());
+    assert_eq!(
+        toast_message(&app).as_deref(),
+        Some("selected task has no blockers")
+    );
+}
+
+#[tokio::test]
+async fn go_to_blocker_opens_one_blocker_and_back_restores_filtered_source() {
+    let (_dir, pool, mut app) = test_app_with_pool().await;
+    let (blocker_id, blocked_id) = create_blocked_pair(&mut app).await;
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("UPDATE tasks SET status = 'todo' WHERE id = ?")
+        .bind(&blocker_id)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+
+    app.store.view_state.query = TaskQuery::Inbox;
+    app.store.refresh(Some(&blocked_id)).await.unwrap();
+    app.list.select_task(Some(0));
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('B')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+
+    assert_eq!(app.store.view_state.query, TaskQuery::Search);
+    assert_eq!(app.store.tasks[0].task.id, blocker_id);
+    assert!(app.detail.is_active());
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('[')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+
+    assert_eq!(app.store.view_state.query, TaskQuery::Inbox);
+    assert_eq!(app.store.tasks[0].task.id, blocked_id);
+    assert!(app.detail.is_active());
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('B')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+    assert_eq!(app.store.tasks[0].task.id, blocker_id);
+    assert!(app.detail.is_active());
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('[')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+    assert_eq!(app.store.tasks[0].task.id, blocked_id);
+}
+
+#[tokio::test]
+async fn go_to_blocker_picker_cancels_or_opens_selected_upstream_blocker() {
+    let mut app = test_app().await;
+    let (first_blocker_id, blocked_id) = create_blocked_pair(&mut app).await;
+    let second_blocker_index =
+        create_and_select_task(&mut app, test_task_draft("Second blocker")).await;
+    let second_blocker_id = app.store.tasks[second_blocker_index].task.id.clone();
+    let blocked_index = app
+        .store
+        .tasks
+        .iter()
+        .position(|item| item.task.id == blocked_id)
+        .unwrap();
+    app.store
+        .add_dependency(Some(blocked_index), &second_blocker_id)
+        .await
+        .unwrap();
+    app.store.refresh(Some(&blocked_id)).await.unwrap();
+    let blocked_index = app
+        .store
+        .tasks
+        .iter()
+        .position(|item| item.task.id == blocked_id)
+        .unwrap();
+    app.list.select_task(Some(blocked_index));
+
+    app.execute(crate::tui::event::Action::GoToBlocker)
+        .await
+        .unwrap();
+    assert!(matches!(
+        &app.overlay,
+        Some(OverlayState::Picker(PickerState {
+            intent: PickerIntent::GoToBlocker { .. },
+            items,
+            ..
+        })) if items.iter().map(|item| item.value.as_str()).collect::<Vec<_>>()
+            == vec![first_blocker_id.as_str(), second_blocker_id.as_str()]
+    ));
+
+    app.dispatch_key(key(KeyCode::Esc), (80, 24).into())
+        .await
+        .unwrap();
+    assert!(app.overlay.is_none());
+    assert_eq!(app.store.tasks[blocked_index].task.id, blocked_id);
+
+    app.execute(crate::tui::event::Action::GoToBlocker)
+        .await
+        .unwrap();
+    app.dispatch_key(key(KeyCode::Down), (80, 24).into())
+        .await
+        .unwrap();
+    app.dispatch_key(key(KeyCode::Enter), (80, 24).into())
+        .await
+        .unwrap();
+
+    assert_eq!(app.store.view_state.query, TaskQuery::Search);
+    assert_eq!(app.store.tasks[0].task.id, second_blocker_id);
+    assert!(app.detail.is_active());
+}
+
+#[tokio::test]
 async fn detail_sibling_navigation_rebinds_when_the_summary_task_disappears() {
     let mut app = test_app().await;
     let first = create_and_select_task(&mut app, test_task_draft("Resident detail")).await;

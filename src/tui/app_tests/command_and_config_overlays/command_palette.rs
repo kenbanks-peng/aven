@@ -27,6 +27,44 @@ async fn colon_dispatch_opens_contextual_panel_for_selected_task() {
 }
 
 #[tokio::test]
+async fn command_palette_opens_blocker_from_list_and_parent_detail() {
+    let mut app = test_app().await;
+    let (blocker_id, blocked_id) = create_blocked_pair(&mut app).await;
+    app.store.refresh(Some(&blocked_id)).await.unwrap();
+    let blocked_index = app
+        .store
+        .tasks
+        .iter()
+        .position(|item| item.task.id == blocked_id)
+        .unwrap();
+    app.list.select_task(Some(blocked_index));
+
+    app.begin_command().await;
+    type_chars(&mut app, ":go-to-blocker").await;
+    app.handle_overlay_key(key(KeyCode::Enter)).await.unwrap();
+
+    assert_eq!(app.store.tasks[0].task.id, blocker_id);
+    assert!(app.detail.is_active());
+
+    for code in [KeyCode::Char('g'), KeyCode::Char('[')] {
+        app.dispatch_key(key(code), (80, 24).into()).await.unwrap();
+    }
+    assert_eq!(
+        app.store
+            .selected_task(app.list.selected_task())
+            .map(|item| item.task.id.clone()),
+        Some(blocked_id.clone())
+    );
+
+    app.begin_command().await;
+    type_chars(&mut app, ":go-to-blocker").await;
+    app.handle_overlay_key(key(KeyCode::Enter)).await.unwrap();
+
+    assert_eq!(app.store.tasks[0].task.id, blocker_id);
+    assert!(app.detail.is_active());
+}
+
+#[tokio::test]
 async fn colon_dispatch_opens_contextual_panel_for_marked_tasks() {
     let mut app = test_app().await;
     let first = create_and_select_task(&mut app, test_task_draft("First marked target")).await;

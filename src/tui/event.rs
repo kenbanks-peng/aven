@@ -55,6 +55,7 @@ fn implemented_action_is_handled(action: Action) -> bool {
             | Action::ToggleColumnsPreview
             | Action::GoBack
             | Action::GoForward
+            | Action::GoToBlocker
             | Action::ReturnToLastChange
             | Action::ToggleHelp
             | Action::ShowWelcome
@@ -723,6 +724,17 @@ mod tests {
                 &[KeyCode::Char('g'), KeyCode::Char('.')]
             ),
             ShortcutLookup::Found(Action::ReturnToLastChange)
+        );
+        assert_eq!(
+            resolve_shortcut_for(
+                CommandContext::Detail,
+                &[KeyCode::Char('g'), KeyCode::Char('B')]
+            ),
+            ShortcutLookup::Found(Action::GoToBlocker)
+        );
+        assert_eq!(
+            resolve_shortcut(&[KeyCode::Char('g'), KeyCode::Char('B')]),
+            ShortcutLookup::Found(Action::GoToBlocker)
         );
         assert_eq!(
             resolve_shortcut_for(

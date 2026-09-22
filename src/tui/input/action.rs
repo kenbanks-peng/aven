@@ -78,6 +78,7 @@ impl App {
             }
             Action::GoBack => self.go_back().await?,
             Action::GoForward => self.go_forward().await?,
+            Action::GoToBlocker => self.go_to_blocker().await?,
             Action::ReturnToLastChange => self.return_to_last_change().await?,
             Action::ToggleHelp => self.toggle_help_at_height(24),
             Action::ShowWelcome => self.show_welcome(),

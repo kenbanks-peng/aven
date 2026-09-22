@@ -5,6 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
+- Navigate from a task to its blocker with `g B`, choosing from a picker when it has multiple blockers.
 - Fix: Editing inherited metadata on newly created recurring tasks no longer causes false sync conflicts.
 
 - Fix: Conflicting task deletions no longer let the sync server prune images still needed by other devices.

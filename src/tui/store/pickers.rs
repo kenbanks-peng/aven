@@ -141,18 +141,32 @@ impl TuiStore {
     }
 
     pub(crate) fn selected_dependency_picker_items(&self, index: Option<usize>) -> Vec<PickerItem> {
-        let Some(item) = self.selected_task(index) else {
-            return Vec::new();
-        };
-        item.depends_on
-            .iter()
-            .map(|link| PickerItem {
-                label: format!("{} {}", link.display_ref, link.title),
-                value: link.task_id.to_string(),
-                selected: false,
-            })
-            .collect()
+        self.selected_task(index)
+            .map(dependency_picker_items)
+            .unwrap_or_default()
     }
+}
+
+pub(crate) fn dependency_picker_items(item: &TaskListItem) -> Vec<PickerItem> {
+    item.depends_on
+        .iter()
+        .map(|link| PickerItem {
+            label: format!("{} {}", link.display_ref, link.title),
+            value: link.task_id.to_string(),
+            selected: false,
+        })
+        .collect()
+}
+
+pub(crate) fn blocker_navigation_picker_items(item: &TaskListItem) -> Vec<PickerItem> {
+    item.depends_on
+        .iter()
+        .map(|link| PickerItem {
+            label: format!("{}  {}  {}", link.project_key, link.display_ref, link.title),
+            value: link.task_id.to_string(),
+            selected: false,
+        })
+        .collect()
 }
 
 fn create_project_picker_item() -> PickerItem {

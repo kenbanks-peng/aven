@@ -250,8 +250,9 @@ Open the preview to move between attachments, open one in the system viewer, or 
 Press `p` to administer projects. Label administration uses `L n` to create,
 `L b` to browse names and usage, `L r` to rename, and `L D` to delete. Rename
 and delete update tasks and recurring templates that use the label. The `t B` and
-`t U` actions add and remove blockers. Epic membership actions live under `t c`,
-and `v e` opens the Epics view.
+`t U` actions add and remove blockers. Press `g B` on a selected task to open one
+of its blockers, or choose one when it has several. Epic membership actions live
+under `t c`, and `v e` opens the Epics view.
 
 Related-task actions add or remove links from the selected task. In task detail,
 you can focus a relationship and open its task. An unlink action operates on the

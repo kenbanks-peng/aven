@@ -70,6 +70,73 @@ fn priority_picker_shows_priority_icons() {
 }
 
 #[test]
+fn blocker_picker_styles_task_reference_and_title() {
+    let item = PickerItem {
+        label: "docs  DCS-5283  BNV Multi Blocker Alpha".to_string(),
+        value: "blocker-id".to_string(),
+        selected: false,
+    };
+
+    let line = super::picker::blocker_picker_line(&item, false, 8);
+
+    assert_eq!(line.spans[1].content, "DCS");
+    assert_eq!(line.spans[1].style.fg, Some(theme::project_color("docs")));
+    assert_eq!(line.spans[2].content, "-");
+    assert_eq!(line.spans[2].style.fg, Some(FG_DIM));
+    assert_eq!(line.spans[3].content, "5283");
+    assert_eq!(line.spans[3].style.fg, Some(FG_DIM));
+    assert_eq!(line.spans[5].content, "BNV Multi Blocker Alpha");
+    assert_eq!(line.spans[5].style.fg, Some(crate::tui::theme::FG_MUTED));
+
+    let selected = super::picker::blocker_picker_line(&item, true, 8);
+    assert_eq!(selected.spans[0].content, "▸ ");
+    assert_eq!(selected.spans[5].style.fg, Some(FG));
+}
+
+#[test]
+fn blocker_picker_aligns_titles_after_different_ref_widths() {
+    let docs = PickerItem {
+        label: "docs  DCS-NA0G  Docs blocker".to_string(),
+        value: "docs-blocker".to_string(),
+        selected: false,
+    };
+    let mobile = PickerItem {
+        label: "mobile-app  MA-964N  Mobile blocker".to_string(),
+        value: "mobile-blocker".to_string(),
+        selected: false,
+    };
+
+    let docs_line = super::picker::blocker_picker_line(&docs, false, 8);
+    let mobile_line = super::picker::blocker_picker_line(&mobile, false, 8);
+    let title_column = |line: &Line<'_>| {
+        line.spans[..line.spans.len() - 1]
+            .iter()
+            .map(|span| span.width())
+            .sum::<usize>()
+    };
+
+    assert_eq!(title_column(&docs_line), title_column(&mobile_line));
+    assert_eq!(title_column(&docs_line), 12);
+}
+
+#[test]
+fn blocker_picker_kind_uses_structured_task_renderer() {
+    let rendered = render_overlay_view(OverlayView::Picker(PickerView {
+        kind: PickerKind::GoToBlocker,
+        title: "Go to blocker".to_string(),
+        items: borrow_slice(vec![picker_item(
+            "docs  DCS-5283  BNV Multi Blocker Alpha",
+            "blocker-id",
+        )]),
+        visible_indices: vec![0],
+        ..picker_view()
+    }));
+
+    assert!(rendered.contains("DCS-5283  BNV Multi Blocker Alpha"));
+    assert!(!rendered.contains("docs  DCS"));
+}
+
+#[test]
 fn picker_viewport_uses_scroll_position() {
     let items = (0..12)
         .map(|index| PickerItem {
