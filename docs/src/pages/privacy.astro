@@ -1,6 +1,5 @@
 ---
-import logo from '../assets/aven-logo-grape-violet.svg';
-import AvenLettering from '../components/AvenLettering.astro';
+import Brand from '../components/Brand.astro';
 import GitHubIcon from '../components/GitHubIcon.astro';
 import ExternalLinkIcon from '../components/ExternalLinkIcon.astro';
 import '../styles/landing.css';
@@ -27,10 +26,7 @@ import '../styles/privacy.css';
     <a class="skip-link" href="#main">Skip to content</a>
     <div class="container">
       <header class="site-header">
-        <a class="brand" href="/" aria-label="aven home">
-          <img src={logo.src} alt="" width="34" height="34" />
-          <AvenLettering />
-        </a>
+        <Brand />
         <nav aria-label="Main navigation">
           <a class="features-link" href="/#features">Features</a>
           <a href="/getting-started/">Docs</a>
@@ -112,7 +108,7 @@ import '../styles/privacy.css';
       </main>
 
       <footer class="site-footer">
-        <div><a class="brand" href="/" aria-label="aven home"><img src={logo.src} alt="" width="25" height="25" /><AvenLettering /></a></div>
+        <div><Brand /></div>
         <nav aria-label="Footer navigation"><a href="/getting-started/">Docs</a><a href="/changelog/">Changelog</a><a href="/support/">Support</a><a href="/privacy/" aria-current="page">Privacy</a><a href="https://github.com/raine/aven">Source <ExternalLinkIcon /></a></nav>
       </footer>
     </div>
