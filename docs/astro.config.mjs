@@ -14,7 +14,7 @@ export default defineConfig({
       description: 'A local-first task manager for power users and agents.',
       plugins: [starlightLlmsTxt()],
       logo: {
-        dark: './src/assets/aven-wordmark-grape-violet.svg',
+        dark: './src/assets/aven-landing-wordmark.svg',
         light: './src/assets/aven-wordmark-grape-violet-light.svg',
         alt: 'Aven logo',
         replacesTitle: true,
