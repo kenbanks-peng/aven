@@ -499,6 +499,7 @@ pub(super) async fn apply_initial_task_values(
     workspace_id: &WorkspaceId,
     task_id: &TaskId,
     change: &ChangeWire,
+    field_version_seed: &str,
 ) -> Result<()> {
     let values = change
         .payload
@@ -533,7 +534,7 @@ pub(super) async fn apply_initial_task_values(
             conn,
             task_id,
             &format!("metadata:{}", field.id),
-            &change.change_id,
+            field_version_seed,
         )
         .await?;
     }

@@ -4113,6 +4113,124 @@ fn recurrence_same_slot_materialization_and_retries_are_idempotent() {
 }
 
 #[test]
+fn recurrence_successor_metadata_versions_converge_and_preserve_concurrent_conflicts() {
+    recurrence_successor_metadata_sync(false);
+}
+
+#[test]
+fn recurrence_successor_legacy_metadata_versions_are_not_silently_rewritten() {
+    recurrence_successor_metadata_sync(true);
+}
+
+fn recurrence_successor_metadata_sync(legacy: bool) {
+    let env = TestEnv::new();
+    let server = TestServer::start(&env);
+    let a = env.db("recurrence-metadata-a.sqlite");
+    let b = env.db("recurrence-metadata-b.sqlite");
+    let (series, occurrence) = add_daily_recurrence(&env, &a, "metadata recurrence");
+    ok(env.aven(&a, ["recur", "edit", &series, "--metadata", "ticket=42"]));
+    sync(&env, &a, &server);
+    sync(&env, &b, &server);
+    ok(env.aven(&a, ["edit", &occurrence, "--status", "done"]));
+    let successor = query_sql_scalar(
+        &a,
+        "SELECT task_id FROM recurrence_occurrences WHERE projection_state = 'projected'",
+    );
+    let version_sql = format!(
+        "SELECT version FROM field_versions WHERE entity_type = 'task'
+         AND entity_id = '{successor}' AND field LIKE 'metadata:%'"
+    );
+    let seed = query_sql_scalar(
+        &a,
+        &format!(
+            "SELECT json_extract(payload, '$.task_field_version_seed') FROM changes
+             WHERE entity_id = '{successor}' AND op_type = 'create_task'"
+        ),
+    );
+    sync(&env, &a, &server);
+    sync(&env, &b, &server);
+    assert_eq!(query_sql_scalar(&a, &version_sql), seed);
+    assert_eq!(query_sql_scalar(&b, &version_sql), seed);
+
+    if legacy {
+        // Model a receiver that materialized the successor before canonical
+        // metadata seeds were used. Retained create history alone is not proof
+        // that all subsequent edits and conflicts can be safely rewritten.
+        let legacy_version = query_sql_scalar(
+            &b,
+            &format!(
+                "SELECT change_id FROM changes WHERE entity_id = '{successor}' AND op_type = 'create_task'"
+            ),
+        );
+        assert_ne!(legacy_version, seed);
+        exec_sql(
+            &b,
+            &format!(
+                "UPDATE field_versions SET version = '{legacy_version}' WHERE entity_id = '{successor}' AND field LIKE 'metadata:%'"
+            ),
+        );
+        sync(&env, &b, &server);
+        assert_eq!(query_sql_scalar(&b, &version_sql), legacy_version);
+        ok(env.aven(&a, ["edit", &successor, "--metadata", "ticket=creator"]));
+        sync(&env, &a, &server);
+        sync(&env, &b, &server);
+        assert_eq!(
+            scalar_i64(
+                &b,
+                "SELECT count(*) FROM conflicts WHERE resolved = 0 AND field LIKE 'metadata:%'"
+            ),
+            1
+        );
+        assert_eq!(query_sql_scalar(&b, &version_sql), legacy_version);
+        sync(&env, &b, &server);
+        assert_eq!(
+            scalar_i64(&b, "SELECT count(*) FROM conflicts WHERE resolved = 0"),
+            1
+        );
+        return;
+    }
+
+    let value_sql = format!("SELECT value FROM task_metadata WHERE task_id = '{successor}'");
+    // Sequential edits from either replica must use the same causal base.
+    for (writer, reader, value) in [(&a, &b, "ticket=creator"), (&b, &a, "ticket=peer")] {
+        ok(env.aven(writer, ["edit", &successor, "--metadata", value]));
+        sync(&env, writer, &server);
+        sync(&env, reader, &server);
+        assert_eq!(
+            query_sql_scalar(writer, &version_sql),
+            query_sql_scalar(reader, &version_sql)
+        );
+        for db in [&a, &b] {
+            assert_eq!(
+                query_sql_scalar(db, &value_sql),
+                value.strip_prefix("ticket=").unwrap()
+            );
+            assert_eq!(
+                scalar_i64(db, "SELECT count(*) FROM conflicts WHERE resolved = 0"),
+                0
+            );
+        }
+    }
+
+    ok(env.aven(&a, ["edit", &successor, "--metadata", "ticket=alpha"]));
+    ok(env.aven(&b, ["edit", &successor, "--metadata", "ticket=beta"]));
+    sync(&env, &a, &server);
+    sync(&env, &b, &server);
+    sync(&env, &a, &server);
+    for db in [&a, &b] {
+        assert_eq!(
+            scalar_i64(
+                db,
+                "SELECT count(*) FROM conflicts WHERE resolved = 0 AND field LIKE 'metadata:%'"
+            ),
+            1
+        );
+    }
+    assert_eq!(query_sql_scalar(&a, &value_sql), "alpha");
+    assert_eq!(query_sql_scalar(&b, &value_sql), "beta");
+}
+
+#[test]
 fn recurrence_dual_complete_merges_earliest_completion() {
     let env = TestEnv::new();
     let server = TestServer::start(&env);

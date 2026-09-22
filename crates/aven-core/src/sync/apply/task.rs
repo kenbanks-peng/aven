@@ -73,12 +73,19 @@ pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire
                 .await?;
         }
     }
-    super::metadata::apply_initial_task_values(conn, &workspace_id, &task_id, change).await?;
     let field_version_seed = change
         .payload
         .get("task_field_version_seed")
         .and_then(Value::as_str)
         .unwrap_or(&change.change_id);
+    super::metadata::apply_initial_task_values(
+        conn,
+        &workspace_id,
+        &task_id,
+        change,
+        field_version_seed,
+    )
+    .await?;
     for field in TaskField::VERSIONED {
         set_field_version(conn, &task_id, field.as_str(), field_version_seed).await?;
     }
