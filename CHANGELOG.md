@@ -3,21 +3,14 @@ title: Changelog
 description: Release notes for aven.
 ---
 
-## Unreleased
+## v0.1.41 (2026-09-22)
 
-- Navigate from a task to its blocker with `g B`, choosing from a picker when it has multiple blockers.
-- Fix: Editing inherited metadata on newly created recurring tasks no longer causes false sync conflicts.
-
-- Fix: Conflicting task deletions no longer let the sync server prune images still needed by other devices.
-- Fix: JSON imports with synchronized history remain bound to their original sync server instead of silently omitting that history from an unrelated server.
-- Fix: Sync after a JSON import no longer retries attachment images that were never uploaded, and imported attachment deletions continue to other devices.
-- Fix: The TUI Ref column label aligns with the task refs beneath it.
-- Add synchronized individual task deletion and restoration for iOS, including state-checked Undo.
-- Improve sync compatibility so newer apps can keep working with older supported servers, while preserving offline edits when an update is required.
+- Navigate from a task to its blocker with `g B`, choosing from a picker when it has multiple blockers. ([#27](https://github.com/raine/aven/issues/27))
 - Add an optional dedicated [due-date column](https://aventasks.dev/configuration/#tui-table-columns) to TUI task lists. ([#25](https://github.com/raine/aven/issues/25))
-- Fix: Local edits no longer bypass background sync retry delays when the server is unavailable or incompatible.
-- Fix: Sync rejects contradictory server responses instead of silently losing operation history.
-- Aven warns before installing an update that could interrupt sync with an older or unreachable server, and recommends updating the sync server first.
+- Newer apps can keep syncing with older supported servers, while preserving offline edits when an update is required.
+- Aven warns before installing an update that could interrupt sync and recommends updating the sync server first when needed.
+- Fix: More reliable sync for recurring tasks, JSON imports, attachments, and server errors, preventing false conflicts, lost history, and unnecessary retries.
+- Fix: The TUI Ref column label aligns with the task refs beneath it.
 
 ## v0.1.40 (2026-09-19)
 
