@@ -129,6 +129,12 @@ export default defineConfig({
             { label: 'Changelog', slug: 'changelog' },
           ],
         },
+        {
+          label: 'Community',
+          items: [
+            { label: 'Community projects', slug: 'community' },
+          ],
+        },
       ],
     }),
   ],
