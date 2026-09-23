@@ -3,6 +3,11 @@ title: Changelog
 description: Release notes for aven.
 ---
 
+## Unreleased
+
+- Navigate TUI task lists by page with Page Up/Page Down and by half-page with Ctrl-U/Ctrl-D.
+- Fix: Ctrl-U clears the current line in task inputs instead of opening the schedule editor.
+
 ## v0.1.41 (2026-09-22)
 
 - Navigate from a task to its blocker with `g B`, choosing from a picker when it has multiple blockers. ([#27](https://github.com/raine/aven/issues/27))
