@@ -5,6 +5,8 @@ description: Release notes for aven.
 
 ## Unreleased
 
+## v0.1.42 (2026-09-24)
+
 - Navigate TUI task lists by page with Page Up/Page Down and by half-page with Ctrl-U/Ctrl-D.
 - Fix: Ctrl-U clears the current line in task inputs instead of opening the schedule editor.
 
