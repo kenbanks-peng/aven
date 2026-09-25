@@ -1,12 +1,8 @@
 # Design: Agent sessions through `aven agent`
 
-Status: proposed; this document specifies new behavior, not commands already implemented.
-
 ## Goal
 
-Give an external orchestrator a small, JSON-first interface for managing a session's tasks. Persist orchestration membership as task metadata, while Aven owns validation, assignment, progress transitions, filtering, and serialization. Agents use semantic commands; they never construct metadata keys or interpret stored protocol records.
-
-The existing task model remains authoritative for status, dependencies, availability, descriptions, and notes. The TUI remains the human view of the same data.
+Give an external orchestrator a small interface for managing a session's tasks, with an explicit `--json` mode for machine-readable responses. Persist orchestration data as task metadata keys.
 
 ## Session model
 
@@ -22,11 +18,11 @@ A session is a workspace-scoped collection of tasks associated with an opaque se
 
 ## CLI interface
 
-All `aven agent` operational commands emit JSON by default. No `--json` flag is needed. Help and version output remain normal CLI help.
+All `aven agent` operational commands emit human-readable text by default, consistent with the existing CLI. Every operational command accepts `--json` to select the JSON protocol defined below for both success and error responses. Without `--json`, render results as human-readable summaries or detail reports on stdout and errors as diagnostic text on stderr. Output mode changes presentation only, not command semantics or exit codes. Commands remain noninteractive in either mode. Help and version output remain normal CLI output, including when `--json` is supplied.
 
 | Command                                                             | Behavior                                                                           |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `aven agent protocol`                                               | Describe protocol version, commands, statuses, outcomes, and error codes as JSON   |
+| `aven agent protocol`                                               | Describe protocol version, commands, statuses, outcomes, and error codes           |
 | `aven agent session <SESSION> [FILTERS]`                            | Return a session snapshot, counts, and its matching tasks                          |
 | `aven agent assign <TASK_REF> --session <SESSION>`                  | Associate an unassigned task with this session                                     |
 | `aven agent assign <TASK_REF> --session <NEW> --from-session <OLD>` | Transfer membership only if the task currently belongs to the expected old session |
@@ -35,21 +31,23 @@ All `aven agent` operational commands emit JSON by default. No `--json` flag is 
 | `aven agent complete <TASK_REF> --session <SESSION>`                | Check membership, then change an `active` task to `done`                           |
 | `aven agent release <TASK_REF> --session <SESSION>`                 | Remove matching membership without changing task status                            |
 
-`session` reuses existing task-query semantics for `--ready`, `--blocked`, `--status`, `--project`, and `--label`. Filters combine with session membership using AND. It excludes deleted tasks by default; `--include-deleted` includes them for inspection. Return all matching tasks in v1: no implicit truncation, limit, or pagination.
+`session` reuses existing task-query meanings and combination restrictions for `--ready`, `--blocked`, `--status`, `--project`, and `--label`. Apply session membership as an additional AND constraint. It excludes deleted tasks by default; `--all` includes them for inspection, matching `aven list --all`. Reject `--ready` together with `--blocked`, and reject either of those filters together with `--all`, as `aven list` does. Invalid combinations return `invalid_argument`, rendered according to the selected output mode.
+
+The v1 session interface supports only the filters listed above; it does not expose every `aven list` option. Return all matching tasks: no implicit truncation, limit, or pagination. The `todo` status alone does not establish readiness; `--ready` and `start` use the existing dependency and availability checks.
 
 Use existing task commands for creation, dependency editing, notes, deferral, cancellation, and manual recovery. Agent-specific options live only under `aven agent`. The existing skill installation interface remains unchanged.
 
-### Typical session
+### Typical orchestrator session
 
 ```sh
-aven agent assign APP-7KQ9 --session run-42
-aven agent session run-42 --ready
-aven agent context APP-7KQ9 --session run-42
-aven agent start APP-7KQ9 --session run-42
+aven agent assign APP-7KQ9 --session run-42 --json
+aven agent session run-42 --ready --json
+aven agent context APP-7KQ9 --session run-42 --json
+aven agent start APP-7KQ9 --session run-42 --json
 # The worker performs the work.
-aven agent complete APP-7KQ9 --session run-42
-aven agent session run-42
-aven agent release APP-7KQ9 --session run-42
+aven agent complete APP-7KQ9 --session run-42 --json
+aven agent session run-42 --json
+aven agent release APP-7KQ9 --session run-42 --json
 ```
 
 Aven checks whether a task can start; it does not pick a worker or automatically claim the next task. Successful completion records the worker's report, not independent verification of its work.
@@ -81,9 +79,9 @@ These checks provide local consistency, not distributed exclusivity. Two unsynch
 
 ## JSON protocol v1
 
-Write exactly one UTF-8 JSON object followed by a newline to stdout. Keep progress, logs, and diagnostic prose off stdout. Commands are noninteractive and do not prompt or emit ANSI styling.
+With `--json`, write exactly one UTF-8 JSON object followed by a newline to stdout. Keep progress, logs, and diagnostic prose off stdout, and emit no ANSI styling.
 
-Every operational response uses this envelope:
+Every operational response in JSON mode uses this envelope:
 
 ```json
 {
@@ -95,13 +93,13 @@ Every operational response uses this envelope:
 }
 ```
 
-Success has non-null `data` and null `error`. Failure has null `data` and a structured `error`. Exit codes: `0` success including `unchanged`; `2` invalid invocation or unsupported protocol; `3` domain precondition failure; `1` storage or unexpected failure. Once `aven agent` is recognized, argument parsing errors also use this envelope. Process termination before the CLI can respond is outside this guarantee.
+Success has non-null `data` and null `error`. Failure has null `data` and a structured `error`. Exit codes in both output modes: `0` success including `unchanged`; `2` invalid invocation or unsupported protocol; `3` domain precondition failure; `1` storage or unexpected failure. Once `aven agent` is recognized and `--json` is requested, argument parsing errors also use this envelope. Process termination before the CLI can respond is outside this guarantee.
 
 All commands accept `--protocol-version 1`. Unsupported requested versions fail before mutation. Additive response fields are compatible; changing field meanings, types, required fields, or command semantics requires a new protocol version. Callers ignore unknown fields and branch on codes and outcomes, not message text.
 
 ### Session snapshot
 
-`aven agent session run-42 --ready` returns data shaped as follows (IDs are illustrative):
+`aven agent session run-42 --ready --json` returns data shaped as follows (IDs are illustrative):
 
 ```json
 {
@@ -194,7 +192,7 @@ Include the column in the default layout; allow hiding and reordering through ex
 
 1. Implement a typed agent-session module in `aven-core`, backed by metadata. Complete when assignment, guarded transfer/release, readiness checks, and progress transitions pass transactional tests.
 2. Verify storage lifecycle integration. Complete when restart, sync conflicts, undo, export/import, deletion/restoration, and recurring-occurrence isolation preserve the specified behavior.
-3. Implement `aven agent` as a thin CLI adapter over that module. Complete when JSON schema, exit-code, invalid-invocation, idempotency, workspace-isolation, and stdout-cleanliness contract tests pass.
+3. Implement `aven agent` as a thin CLI adapter over that module. Complete when human-readable default output, explicit `--json` output, JSON schema, exit-code parity, invalid-invocation handling in both modes, idempotency, workspace-isolation, and JSON stdout-cleanliness contract tests pass.
 4. Implement session queries and structured context. Complete when combined filters, deterministic ordering, full-session counts, empty sessions, and malformed/conflicted metadata match this contract.
 5. Add TUI membership rendering and refresh coverage. Complete when assignment, release, completion, and external edits are visible without restarting, including custom layouts.
 6. Document shipped commands in `CLI.md` and configuration docs; teach `aven prime` and reusable agent guidance the semantic workflow. Complete when examples run against the implementation without raw metadata operations.
