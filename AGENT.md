@@ -1,60 +1,54 @@
 # Plan: Agent session support
 
-Status: Proposed. No implementation changes are included.
-
 ## Goal
 
-Let an external orchestrator use Aven as its task queue and the existing TUI as its UI. Mark the tasks assigned to an agent session with one small dot in the task table. Use the existing task status field for progress.
+Let an external orchestrator use Aven as its task queue and the existing TUI as its UI. Provide a CLI for the agent to mark tasks that are part of its session, the TUI representing those marked tasks with one small dot in the task table. The agent will use the existing task status field for progress.
 
 ## Assignment model
 
-- Add an optional `agent` string to each task. This is not a boolean.
-- Use the value as the external agent session identifier, for example `session-42`.
-- Proposed initial limit: one assignment per task. Setting another value replaces the assignment.
-- Assignment means that the orchestrator must work on the task in that session. It does not mean that execution has started.
+- Add an optional `agent-tag` string to each task.
+- One assignment per task. Setting another value replaces the assignment.
 - Keep the existing statuses: `inbox`, `backlog`, `todo`, `active`, `done`, and `canceled`.
 - Status changes do not remove the assignment. Remove it explicitly.
-- Do not add separate execution states, session lifecycle commands, or an agent registry for this scope.
 
 ## Proposed CLI
 
 Follow the existing label option pattern.
 
-| Command | Purpose |
-| --- | --- |
-| `aven add <TITLE> --agent <AGENT>` | Create a task assigned to an agent session |
-| `aven edit <TASK_REF> --agent <AGENT>` | Set or replace the assignment |
-| `aven edit <TASK_REF> --remove-agent <AGENT>` | Remove the assignment if its value matches |
-| `aven list --agent <AGENT>` | Filter tasks by exact assignment |
-| `aven bulk-update --all --agent <AGENT>` | Assign all nondeleted tasks |
-| `aven bulk-update --all --remove-agent <AGENT>` | Remove matching assignments from all nondeleted tasks |
-| `aven bulk-update --filter-agent <AGENT> --set-status <STATUS>` | Change the status of matching tasks |
+| Command                                                                 | Purpose                                               |
+| ----------------------------------------------------------------------- | ----------------------------------------------------- |
+| `aven add <TITLE> --agent-tag <AGENT-TAG>`                              | Create a task assigned to an agent session            |
+| `aven edit <TASK_REF> --agent-tag <AGENT-TAG>`                          | Set or replace the assignment                         |
+| `aven edit <TASK_REF> --remove-agent-tag <AGENT-TAG>`                   | Remove the assignment if its value matches            |
+| `aven list --agent-tag <AGENT-TAG>`                                     | Filter tasks by exact assignment                      |
+| `aven bulk-update --all --agent-tag <AGENT-TAG>`                        | Assign all nondeleted tasks                           |
+| `aven bulk-update --all --remove-agent-tag <AGENT-TAG>`                 | Remove matching assignments from all nondeleted tasks |
+| `aven bulk-update --filter-agent-tag <AGENT-TAG> --set-status <STATUS>` | Change the status of matching tasks                   |
 
 Requirements:
 
 - Support assignment and removal with existing bulk filters, not only `--all`.
 - Support the existing bulk `--dry-run` option.
 - Reject blank identifiers and conflicting assignment/removal options.
-- A removal with a different identifier must not clear another session's assignment.
 - Combine the list filter with existing filters, including `--status` and `--ready`.
-- Include `agent` as a string or `null` in task JSON. Show its value in task detail and context output.
+- Include `agent-tag` as a string or `null` in task JSON. Show its value in task detail and context output.
 - Keep `aven skill install --agent <AGENT>` unchanged. That existing option selects a skill installation target, not a task session.
 
 Example:
 
 ```sh
-aven edit APP-7KQ9 --agent session-42
-aven list --agent session-42 --ready --json
+aven edit APP-7KQ9 --agent-tag session-42
+aven list --agent-tag session-42 --ready --json
 aven edit APP-7KQ9 --status active
 aven edit APP-7KQ9 --status done
-aven edit APP-7KQ9 --remove-agent session-42
+aven edit APP-7KQ9 --remove-agent-tag session-42
 ```
 
 Assignment is not an execution lock. Worker coordination remains the external orchestrator's responsibility.
 
-## TUI agent marker
+## TUI agent-tag marker
 
-- Add a narrow `agent` table column with header `A`.
+- Add a narrow `agent-tag` table column with header `A`.
 - Show `·` when the task has an assignment. Leave the cell blank otherwise.
 - Use the same marker for every task status. Do not add spinners, state icons, or state-dependent colors.
 - The dot means “assigned to an agent session.” The existing status column shows progress.
