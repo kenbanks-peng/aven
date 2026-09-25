@@ -1,0 +1,16 @@
+[tasks.build]
+description = "Build the production executable"
+run = "cargo build --release --locked"
+
+[tasks.deploy]
+description = "Atomically deploy the production executable to ./bin/"
+depends = ["build"]
+run = """
+set -eu
+mkdir -p ./bin
+tmp="./bin/.aven.tmp.$$"
+trap 'rm -f "$tmp"' EXIT
+cp target/release/aven "$tmp"
+chmod 755 "$tmp"
+mv -f "$tmp" ./bin/aven
+"""
