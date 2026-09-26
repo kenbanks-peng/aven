@@ -592,8 +592,22 @@ fn failure_lines(lines: &mut Vec<Line<'static>>, failure: &OperationFailure, wid
     ));
 }
 
-fn short_id(device: &[u8; 32]) -> String {
-    format!("{}…", &hex::encode(device)[..8])
+fn listed_devices(activity: &SyncActivity) -> &[crate::sync::encrypted::Device] {
+    activity
+        .devices
+        .as_ref()
+        .map(|snapshot| snapshot.listing.devices.as_slice())
+        .unwrap_or_default()
+}
+
+/// The ID `device` shows in the device list, or its eight-character prefix
+/// when the list doesn't include it.
+fn display_device_id(devices: &[crate::sync::encrypted::Device], device: &[u8; 32]) -> String {
+    devices
+        .iter()
+        .position(|listed| listed.id == *device)
+        .map(|index| short_device_ids(devices).swap_remove(index))
+        .unwrap_or_else(|| format!("{}…", &hex::encode(device)[..8]))
 }
 
 fn devices_lines(body: &mut Body, view: &SyncDialogView<'_>, width: usize) {
@@ -626,7 +640,9 @@ fn devices_lines(body: &mut Body, view: &SyncDialogView<'_>, width: usize) {
         lines.push(spinner_line(running));
     }
     match activity.device_result() {
-        Some(OperationResult::Removed(removal)) => removal_lines(lines, removal, width),
+        Some(OperationResult::Removed(removal)) => {
+            removal_lines(lines, removal, listed_devices(activity), width)
+        }
         Some(OperationResult::RemovalFinished {
             key_rotation_pending,
         }) => {
@@ -821,8 +837,13 @@ fn elide_middle(value: &str, max_width: usize) -> String {
     elided
 }
 
-fn removal_lines(lines: &mut Vec<Line<'static>>, removal: &Removal, width: usize) {
-    let id = short_id(&removal.device);
+fn removal_lines(
+    lines: &mut Vec<Line<'static>>,
+    removal: &Removal,
+    devices: &[crate::sync::encrypted::Device],
+    width: usize,
+) {
+    let id = display_device_id(devices, &removal.device);
     match (removal.access_revoked, removal.key_rotation_pending) {
         (true, false) => {
             lines.extend(paragraph_with_mark(
@@ -870,19 +891,16 @@ fn removal_lines(lines: &mut Vec<Line<'static>>, removal: &Removal, width: usize
 }
 
 fn confirm_remove_lines(body: &mut Body, activity: &SyncActivity, device: &[u8; 32], width: usize) {
-    let devices = activity
-        .devices
-        .as_ref()
-        .map(|snapshot| snapshot.listing.devices.as_slice())
-        .unwrap_or_default();
-    let label = devices
+    let devices = listed_devices(activity);
+    let id = display_device_id(devices, device);
+    let label = match devices
         .iter()
-        .position(|listed| listed.id == *device)
-        .map(|index| match &devices[index].label {
-            Some(label) => format!("{} ({label})", short_device_ids(devices)[index]),
-            None => short_device_ids(devices)[index].clone(),
-        })
-        .unwrap_or_else(|| short_id(device));
+        .find(|listed| listed.id == *device)
+        .and_then(|listed| listed.label.as_ref())
+    {
+        Some(label) => format!("{id} ({label})"),
+        None => id,
+    };
     let lines = &mut body.lines;
     lines.extend(paragraph(
         &format!("Remove {label} from sync?"),
