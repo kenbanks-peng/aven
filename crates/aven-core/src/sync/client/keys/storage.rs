@@ -182,7 +182,7 @@ impl ProtectedStorage for FileProtectedStorage {
     }
 
     /// Secret items and records share the directory, so both listings name
-    /// every file of the namespace.
+    /// every file of the namespace except its lock.
     fn list_secrets(&self, namespace: &str) -> StoreResult<HashSet<String>> {
         self.list(namespace)
     }
@@ -209,6 +209,7 @@ impl FileProtectedStorage {
                 .file_name()
                 .to_str()
                 .and_then(|name| name.strip_prefix(&prefix))
+                .filter(|name| *name != "lock")
             {
                 names.insert(name.to_string());
             }

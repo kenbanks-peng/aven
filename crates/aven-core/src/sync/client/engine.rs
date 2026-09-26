@@ -29,6 +29,8 @@ mod devices;
 pub use devices::{
     Device, DeviceListing, Removal, finish_removal, load_devices, remove_other_device,
 };
+mod reset;
+pub use reset::{Reset, reset};
 
 /// Upper bound on bounded rounds in one interactive drain. A round may append
 /// a bounded run of ordinary records, but still pulls one page and transfers at

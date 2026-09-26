@@ -22,7 +22,7 @@ use aven_core::sync::client::tail::ImageTransfer;
 use aven_core::sync::client::{ClientHost, Step};
 use zeroize::Zeroizing;
 
-use crate::cli::{JoinArgs, SetupArgs};
+use crate::cli::{JoinArgs, ResetArgs, SetupArgs};
 use crate::config::{self, AppConfig};
 use crate::render::print_json_pretty;
 use crate::sync_http::HttpDriver;
@@ -374,6 +374,44 @@ pub(crate) async fn setup(database: &Database, config: &AppConfig, args: SetupAr
     println!("Sync set up with {}", invitation.server);
     print_outcome(&outcome);
     print_automatic_sync_hint(config);
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ResetReport {
+    version: u32,
+    /// `reset`, or `not-set-up` when the database didn't take part in sync.
+    state: &'static str,
+}
+
+pub(crate) async fn reset(database: &Database, config: &AppConfig, args: ResetArgs) -> Result<()> {
+    if !args.yes {
+        eprintln!("Reset sync for {}", database.path().display());
+        eprintln!("  Deletes this database's sync state and protected sync keys.");
+        eprintln!("  Keeps all tasks, images and history here.");
+        eprintln!("  Changes not yet uploaded stay here but don't reach the current sync.");
+        eprintln!("  Doesn't contact the server or remove this device from other devices.");
+    }
+    confirm_action(
+        args.yes,
+        "Reset sync for this database?",
+        "error sync-reset-confirmation-required hint=\"rerun with --yes to confirm\"",
+        "error sync-reset-canceled",
+    )?;
+    let (state, message) = match engine::reset(database, &DesktopHost(config)).await? {
+        engine::Reset::Reset => ("reset", "Sync reset. This database is now local only."),
+        engine::Reset::NotSetUp => (
+            "not-set-up",
+            "Sync wasn't set up for this database. It is local only.",
+        ),
+    };
+    if args.json {
+        return print_json_pretty(&ResetReport { version: 1, state });
+    }
+    println!("{message}");
+    eprintln!(
+        "Start a new sync with `aven sync setup`, using an invitation from `aven server setup`."
+    );
     Ok(())
 }
 

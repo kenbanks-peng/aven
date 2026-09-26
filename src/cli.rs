@@ -44,7 +44,7 @@ pub(crate) use relationships::{
 };
 pub(crate) use sync::{
     ConflictCommand, ConflictSubcommand, DaemonArgs, DaemonSubcommand, DeviceSubcommand, JoinArgs,
-    ServerArgs, ServerSetupArgs, ServerSubcommand, SetupArgs, SyncArgs, SyncSubcommand,
+    ResetArgs, ServerArgs, ServerSetupArgs, ServerSubcommand, SetupArgs, SyncArgs, SyncSubcommand,
 };
 pub(crate) use tasks::{
     AddArgs, BulkUpdateArgs, ContextArgs, ListArgs, NoteArgs, NoteDeleteArgs, PrimeArgs, RefArgs,

@@ -246,49 +246,8 @@ pub(crate) async fn detach_backup_snapshot(path: &Path) -> Result<()> {
     sqlx::query("PRAGMA secure_delete=ON")
         .execute(&mut conn)
         .await?;
-    let tables: Vec<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND (
-             name GLOB 'local_shared_capture_*'
-             OR name GLOB 'local_seed_*'
-             OR name GLOB 'local_peer_*'
-             OR name GLOB 'local_membership_*'
-             OR name GLOB 'local_e2ee_*'
-         )",
-    )
-    .fetch_all(&mut conn)
-    .await?;
     let mut tx = conn.begin().await?;
-    if tables
-        .iter()
-        .any(|table| table == "local_shared_capture_journal")
-    {
-        sqlx::query("UPDATE local_shared_capture_journal SET publication_owned = 0")
-            .execute(&mut *tx)
-            .await?;
-    }
-    if tables
-        .iter()
-        .any(|table| table == "local_seed_publication_intent")
-    {
-        sqlx::query("DELETE FROM local_seed_publication_intent")
-            .execute(&mut *tx)
-            .await?;
-    }
-    for table in tables {
-        let quoted = table.replace('"', "\"\"");
-        sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{quoted}\"")))
-            .execute(&mut *tx)
-            .await?;
-    }
-    sqlx::query("DELETE FROM meta WHERE key LIKE 'sync_%' OR key LIKE 'e2ee_%'")
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query(
-        "INSERT INTO meta(key, value) VALUES ('sync_cursor', '0'), ('sync_generation', '0')",
-    )
-    .execute(&mut *tx)
-    .await?;
+    clear_sync_state(&mut tx).await?;
     tx.commit().await?;
     let foreign_key_errors: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM pragma_foreign_key_check")
@@ -306,6 +265,73 @@ pub(crate) async fn detach_backup_snapshot(path: &Path) -> Result<()> {
     sqlx::query("VACUUM").execute(&mut conn).await?;
     conn.close().await?;
     Ok(())
+}
+
+/// Removes every local trace of sync: setup and enrollment state, membership,
+/// the cursor, the outbox and sync metadata. Tasks, images and their history
+/// stay, and the database reads as one that never synced.
+pub(crate) async fn clear_sync_state(conn: &mut SqliteConnection) -> Result<()> {
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND (
+             name GLOB 'local_shared_capture_*'
+             OR name GLOB 'local_seed_*'
+             OR name GLOB 'local_peer_*'
+             OR name GLOB 'local_membership_*'
+             OR name GLOB 'local_e2ee_*'
+         )",
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+    if tables
+        .iter()
+        .any(|table| table == "local_shared_capture_journal")
+    {
+        sqlx::query("UPDATE local_shared_capture_journal SET publication_owned = 0")
+            .execute(&mut *conn)
+            .await?;
+    }
+    if tables
+        .iter()
+        .any(|table| table == "local_seed_publication_intent")
+    {
+        sqlx::query("DELETE FROM local_seed_publication_intent")
+            .execute(&mut *conn)
+            .await?;
+    }
+    for table in tables {
+        let quoted = table.replace('"', "\"\"");
+        sqlx::query(sqlx::AssertSqlSafe(format!("DELETE FROM \"{quoted}\"")))
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM meta WHERE key LIKE 'sync_%' OR key LIKE 'e2ee_%'")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO meta(key, value) VALUES ('sync_cursor', '0'), ('sync_generation', '0')",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+impl super::Database {
+    /// Clears sync state from this open database; see [`clear_sync_state`].
+    pub(crate) async fn clear_sync_state(&self) -> Result<()> {
+        let mut conn = self.acquire_writer().await?;
+        sqlx::query("PRAGMA secure_delete=ON")
+            .execute(&mut *conn)
+            .await?;
+        let mut tx = super::begin_immediate(&mut conn).await?;
+        // Sync tables reference each other; check once all rows are gone.
+        sqlx::query("PRAGMA defer_foreign_keys=ON")
+            .execute(&mut *tx)
+            .await?;
+        clear_sync_state(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 async fn ensure_connection_has_no_active_local_shared_capture(

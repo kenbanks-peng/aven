@@ -459,6 +459,9 @@ async fn dispatch_database(
             Some(SyncSubcommand::Status(status)) => {
                 sync::encrypted::status(&database, &config, status.json).await
             }
+            Some(SyncSubcommand::Reset(reset)) => {
+                sync::encrypted::reset(&database, &config, reset).await
+            }
             None => sync::encrypted::sync(&database, &config, args.json).await,
         },
         DatabaseCommand::Workspace(args) => cmd_workspace(&database, args).await,

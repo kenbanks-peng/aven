@@ -291,6 +291,22 @@ impl ProtectedLocalKeyStore {
             .await
     }
 
+    /// Deletes every protected item and record of this database, including
+    /// authority markers, so the database can start sync again as if it never
+    /// took part. Secrets go before markers, so an interrupted erase reads as
+    /// missing authority until it is rerun, never as a fresh namespace.
+    pub fn erase(&self) -> StoreResult<()> {
+        self.prepare()?;
+        let _guard = self.lock()?;
+        for item in self.storage.list_secrets(&self.account)? {
+            self.delete_secret(&item)?;
+        }
+        for name in self.storage.list_records(&self.account)? {
+            self.remove_record(&name)?;
+        }
+        Ok(())
+    }
+
     async fn validate_database(&self, database: &Database) -> StoreResult<()> {
         if database_account(self.storage.as_ref(), database).await? != self.account {
             return Err(error(ProtectedLocalKeyStoreErrorKind::WrongDatabase));

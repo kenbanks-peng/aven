@@ -4,7 +4,8 @@
 //! adoption. Locks serialize supported replacement with source preparation, not
 //! arbitrary database users. Ordinary operations share the lock; source setup
 //! and replacement acquire it exclusively. All acquisition is nonblocking.
-//! Marker removal and live raw replacement are unsupported.
+//! Only a sync reset removes the marker, after the database's sync state and
+//! protected keys are gone. Live raw replacement is unsupported.
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -118,6 +119,17 @@ impl InstallationGuard {
             Err(error) => Err(error.into()),
             Ok(_) => anyhow::bail!(message.to_string()),
         }
+    }
+
+    /// Lifts the fence of a database that no longer takes part in sync.
+    pub fn unfence(&self) -> Result<()> {
+        ensure!(self.exclusive, "error installation-exclusive-lock-required");
+        match fs::remove_file(&self.marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            result => result?,
+        }
+        File::open(self.marker.parent().context("missing marker parent")?)?.sync_all()?;
+        Ok(())
     }
 
     /// Permanently refuses replacement even if later source setup fails.

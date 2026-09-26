@@ -683,6 +683,7 @@ async fn cli_sets_up_pairs_and_syncs_two_installations() {
 mod automatic;
 mod conflicts;
 mod devices;
+mod reset;
 
 /// A running server with seed `a` and joined peer `b`.
 struct Pair {

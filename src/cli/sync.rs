@@ -231,6 +231,9 @@ pub(crate) enum SyncSubcommand {
     /// List or remove the devices that take part in sync
     #[command(after_long_help = DEVICE_HELP)]
     Device(DeviceCommand),
+    /// Stop syncing this database and keep its data as a local database
+    #[command(after_long_help = RESET_HELP)]
+    Reset(ResetArgs),
 }
 
 #[derive(Args)]
@@ -319,6 +322,28 @@ pub(crate) struct SetupArgs {
 #[derive(Args)]
 pub(crate) struct StatusArgs {
     /// Emit the versioned status report as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+pub(super) const RESET_HELP: &str = r#"Deletes this database's sync state, unsent sync queue and protected sync keys.
+Tasks, images and history stay and remain editable. Reset doesn't contact the
+server or remove this device from other devices' lists; remove it there with
+`aven sync device remove`.
+
+Afterwards the database is a local database that never synced: `aven sync
+setup` can start a new sync from it, and `aven sync join` still needs an empty
+database. Changes made here and not yet uploaded don't reach the old sync.
+
+Reset is refused while setup, joining or an invitation is unfinished. It asks
+for confirmation; use --yes when standard input is not a terminal."#;
+
+#[derive(Args)]
+pub(crate) struct ResetArgs {
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// Emit the result as JSON
     #[arg(long)]
     pub(crate) json: bool,
 }
