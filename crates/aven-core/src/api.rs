@@ -856,7 +856,7 @@ impl Store {
             .collect();
         let unresolved_conflict_count = self
             .database
-            .unresolved_conflict_count_in_workspace(workspace_id)
+            .unresolved_task_conflict_count_in_workspace(workspace_id)
             .await
             .map_err(Error::from_internal)?
             .clamp(0, i64::from(u32::MAX)) as u32;
