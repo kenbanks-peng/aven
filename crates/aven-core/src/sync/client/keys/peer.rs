@@ -1591,12 +1591,9 @@ impl TailSnapshot {
 
     pub fn publishing_blocked(&self) -> Result<bool> {
         #[cfg(any(test, feature = "test-support"))]
-        let now = match &self.enrollment_clock {
-            Some(clock) => clock.load(Ordering::SeqCst),
-            None => unix_now()?,
-        };
+        let now = enrollment_now(self.enrollment_clock.as_ref())?;
         #[cfg(not(any(test, feature = "test-support")))]
-        let now = unix_now()?;
+        let now = enrollment_now()?;
         Ok(self
             .withdrawal_deadline
             .is_some_and(|deadline| now >= deadline))
@@ -1610,15 +1607,22 @@ impl TailSnapshot {
 impl ProtectedLocalKeyStore {
     fn enrollment_now(&self) -> Result<u64> {
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(clock) = &self.enrollment_clock {
-            return Ok(clock.load(Ordering::SeqCst));
-        }
-        unix_now()
+        return enrollment_now(self.enrollment_clock.as_ref());
+        #[cfg(not(any(test, feature = "test-support")))]
+        enrollment_now()
     }
 }
 
-fn unix_now() -> Result<u64> {
-    Ok(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs())
+/// Unix seconds enrollment deadlines compare against, overridable in tests.
+#[cfg(any(test, feature = "test-support"))]
+fn enrollment_now(clock: Option<&std::sync::Arc<std::sync::atomic::AtomicU64>>) -> Result<u64> {
+    match clock {
+        Some(clock) => Ok(clock.load(Ordering::SeqCst)),
+        None => crate::sync::client::engine::unix_now(),
+    }
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn enrollment_now() -> Result<u64> {
+    crate::sync::client::engine::unix_now()
 }

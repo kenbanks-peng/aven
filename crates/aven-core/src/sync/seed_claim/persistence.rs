@@ -22,9 +22,7 @@ impl Database {
         request: &[u8],
         authentication: ClaimAuthentication<'_>,
     ) -> Result<ClaimResult> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
+        let now = crate::sync::client::engine::unix_now()?;
         self.admit_seed_claim_at(request, authentication, now).await
     }
 
