@@ -2,38 +2,37 @@
 
 ## Goal
 
-Give an external orchestrator a small interface for managing a session's tasks, with an explicit `--json` mode for machine-readable responses. Persist orchestration data as task metadata keys.
+Give an external orchestrator a small interface for managing a session's tasks. Use the existing CLI conventions for text, JSON, errors, and exit codes. Persist session membership as task metadata.
 
 ## Session model
 
 A session is a workspace-scoped collection of tasks associated with an opaque session ID supplied by the orchestrator.
 
 - Each task belongs to at most one session at a time.
-- A session is a derived view, not another persisted entity. It needs no creation command and can be empty. An empty session is indistinguishable from an ID never used before.
-- Accept case-sensitive IDs of 1–128 UTF-8 bytes; reject whitespace and control characters anywhere. Do not trim, lowercase, or otherwise rewrite IDs.
-- Require the session ID explicitly on each session operation. There is no ambient current session or dependency on shell state.
-- Resolve `--workspace` and `--db` through Aven's existing selection rules. Return the resolved workspace ID in every successful response. Task references must resolve inside that workspace.
-- Membership survives status changes, including completion and cancellation. Release is explicit.
-- Membership is not an execution lock. Multiple workers using the same session must coordinate externally.
+- Session membership survives status changes, including completion and cancellation. Release is explicit.
 
 ## CLI interface
 
-All `aven agent` operational commands emit human-readable text by default, consistent with the existing CLI. Every operational command accepts `--json` to select the JSON protocol defined below for both success and error responses. Without `--json`, render results as human-readable summaries or detail reports on stdout and errors as diagnostic text on stderr. Output mode changes presentation only, not command semantics or exit codes. Commands remain noninteractive in either mode. Help and version output remain normal CLI output, including when `--json` is supplied.
+All `aven agent` operational commands emit human-readable text by default. Every operational command accepts `--json` for successful output. Errors remain diagnostic text on stderr in both modes, as in the existing CLI.
 
-| Command                                                             | Behavior                                                                           |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `aven agent protocol`                                               | Describe protocol version, commands, statuses, outcomes, and error codes           |
-| `aven agent session <SESSION> [FILTERS]`                            | Return a session snapshot, counts, and its matching tasks                          |
-| `aven agent assign <TASK_REF> --session <SESSION>`                  | Associate an unassigned task with this session                                     |
-| `aven agent assign <TASK_REF> --session <NEW> --from-session <OLD>` | Transfer membership only if the task currently belongs to the expected old session |
-| `aven agent context <TASK_REF> --session <SESSION>`                 | Return task context after checking membership                                      |
-| `aven agent start <TASK_REF> --session <SESSION>`                   | Check membership and readiness, then set task status to `active`                   |
-| `aven agent complete <TASK_REF> --session <SESSION>`                | Check membership, then change an `active` task to `done`                           |
-| `aven agent release <TASK_REF> --session <SESSION>`                 | Remove matching membership without changing task status                            |
+| Command | Behavior |
+| --- | --- |
+| `aven agent --help` or `aven help agent` | Show interface version, commands, and usage |
+| `aven agent session <SESSION> [FILTERS]` | List matching session tasks |
+| `aven agent assign <TASK_REF> --session <SESSION>` | Associate an unassigned task with this session |
+| `aven agent assign <TASK_REF> --session <NEW> --from-session <OLD>` | Transfer membership only if the task belongs to the expected old session |
+| `aven agent context <TASK_REF> --session <SESSION>` | Show task context after checking membership |
+| `aven agent start <TASK_REF> --session <SESSION>` | Check membership and readiness, then set task status to `active` |
+| `aven agent complete <TASK_REF> --session <SESSION>` | Check membership, then change an `active` task to `done` |
+| `aven agent release <TASK_REF> --session <SESSION>` | Remove matching membership without changing task status |
 
-`session` reuses existing task-query meanings and combination restrictions for `--ready`, `--blocked`, `--status`, `--project`, and `--label`. Apply session membership as an additional AND constraint. It excludes deleted tasks by default; `--all` includes them for inspection, matching `aven list --all`. Reject `--ready` together with `--blocked`, and reject either of those filters together with `--all`, as `aven list` does. Invalid combinations return `invalid_argument`, rendered according to the selected output mode.
+Help identifies this interface as version 1. This version is the only public protocol metadata and is available in help only. There is no `--protocol-version` option or version negotiation.
 
-The v1 session interface supports only the filters listed above; it does not expose every `aven list` option. Return all matching tasks: no implicit truncation, limit, or pagination. The `todo` status alone does not establish readiness; `--ready` and `start` use the existing dependency and availability checks.
+`session` supports `--ready`, `--blocked`, `--status`, `--project`, and `--label`, with the existing task-query meanings and combination restrictions. Apply session membership as an additional AND constraint. Exclude deleted tasks by default; `--all` includes them for inspection. Reject `--ready` together with `--blocked`, and reject either filter together with `--all`, as `aven list` does.
+
+Session inspection includes deferred tasks by default, so assigned work remains visible. This is an explicit difference from `aven list`, which normally filters for availability. `--all` changes only deletion scope. `--ready` still requires availability and the existing dependency checks. The `todo` status alone does not establish readiness.
+
+The v1 session interface supports only the filters listed above. Return all matching tasks, with no implicit truncation, limit, or pagination. Use the ordinary `aven list` ordering: updated time, descending. Keep recurring occurrences as individual tasks because membership applies to each occurrence.
 
 Use existing task commands for creation, dependency editing, notes, deferral, cancellation, and manual recovery. Agent-specific options live only under `aven agent`. The existing skill installation interface remains unchanged.
 
@@ -50,119 +49,64 @@ aven agent session run-42 --json
 aven agent release APP-7KQ9 --session run-42 --json
 ```
 
-Aven checks whether a task can start; it does not pick a worker or automatically claim the next task. Successful completion records the worker's report, not independent verification of its work.
+Aven checks whether a task can start; it does not pick a worker or automatically claim the next task. Completion changes the task status; it does not independently verify the work. Use the existing note command to record a worker report.
 
 ## Mutation semantics
 
 Resolve the task, validate membership and task state, and apply each mutation within one local write transaction. Validation failure leaves both metadata and task status unchanged. Reuse existing mutation, undo, and sync machinery rather than writing database rows directly from command handlers.
 
-| Operation | Preconditions and result                                                                                                                                                                   |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Assign    | Unassigned → `assigned`; already in the requested session → `unchanged`; another session → `session_mismatch`                                                                              |
-| Transfer  | Current session equals `--from-session` → `transferred`; already in destination → `unchanged` for safe retries; any other state → `session_mismatch`                                       |
-| Start     | Matching membership and `todo` status, plus existing readiness checks → `started`; matching membership and already `active` → `unchanged`; otherwise → `not_ready` or `invalid_transition` |
-| Complete  | Matching membership and `active` → `completed`; matching membership and already `done` → `unchanged`; otherwise → `invalid_transition`                                                     |
-| Release   | Matching membership → `released`; unassigned → `unchanged`; another session → `session_mismatch`                                                                                           |
+| Operation | Preconditions and result |
+| --- | --- |
+| Assign | Unassigned: assign membership. Already in the requested session: no change. Another session: fail. |
+| Transfer | Current session equals `--from-session`: transfer membership. Already in destination: no change, for safe retries. Any other state: fail. |
+| Start | Matching membership and ready `todo` task: set `active`. Matching membership and already `active`: no change. Otherwise: fail. |
+| Complete | Matching membership and `active`: set `done`. Matching membership and already `done`: no change. Otherwise: fail. |
+| Release | Matching membership: remove membership. Unassigned: no change. Another session: fail. |
 
 - Assignment and transfer do not change status, and may include completed or canceled tasks.
 - Validate membership before treating start or complete as an idempotent retry. A stale worker cannot complete another session's task.
-- Reject identical source and destination IDs on transfer as `invalid_argument`.
-- Deleted tasks are read-only through this interface; restore them using the existing task command before mutation.
-- Epic containers can be assigned and inspected, but cannot be started or completed through this worker interface; return `invalid_transition`.
+- Reject identical source and destination IDs on transfer.
+- Deleted tasks are read-only through this interface. Restore them using the existing task command before mutation.
+- Epic containers can be assigned and inspected, but cannot be started or completed through this worker interface.
 - Recurring tasks are assigned per occurrence. Session membership is never copied into recurrence templates or future occurrences.
-- Human edits remain authoritative: normal task status changes preserve membership. After an incompatible manual change, worker commands fail rather than silently restoring their preferred status.
+- Human edits remain authoritative: normal task status changes preserve membership. After an incompatible manual change, worker commands fail rather than restore their preferred status.
 - Release of an active task leaves it active and unassigned. Cleanup is not cancellation or rollback.
 
-All successful mutations return the post-operation task projection and an outcome. Idempotent retries do not create new undo entries or sync changes.
+Idempotent retries succeed without new undo entries or sync changes.
 
 These checks provide local consistency, not distributed exclusivity. Two unsynchronized databases may accept conflicting assignments. Existing sync conflict handling must expose that conflict; agent commands must not silently pick a winner. Session IDs are coordination identifiers, not credentials or authorization tokens.
 
-## JSON protocol v1
+## Output and errors
 
-With `--json`, write exactly one UTF-8 JSON object followed by a newline to stdout. Keep progress, logs, and diagnostic prose off stdout, and emit no ANSI styling.
+Reuse existing CLI serializers and renderers. With `--json`, emit the command result directly as pretty-printed JSON followed by a newline. Keep logs and diagnostic prose off stdout and emit no ANSI styling in JSON.
 
-Every operational response in JSON mode uses this envelope:
+Do not add response wrappers, protocol identifiers, version fields, success flags, outcome fields, or session summary counts. Existing task and context fields, including their existing dependency and recurrence counts, retain their meanings; there are no new count fields for this interface.
 
-```json
-{
-  "protocol": "aven.agent",
-  "version": 1,
-  "ok": true,
-  "data": {},
-  "error": null
-}
-```
+### Session output
 
-Success has non-null `data` and null `error`. Failure has null `data` and a structured `error`. Exit codes in both output modes: `0` success including `unchanged`; `2` invalid invocation or unsupported protocol; `3` domain precondition failure; `1` storage or unexpected failure. Once `aven agent` is recognized and `--json` is requested, argument parsing errors also use this envelope. Process termination before the CLI can respond is outside this guarantee.
+`aven agent session <SESSION> --json` returns an array of task objects, as `aven list --json` does. An empty result is `[]`.
 
-All commands accept `--protocol-version 1`. Unsupported requested versions fail before mutation. Additive response fields are compatible; changing field meanings, types, required fields, or command semantics requires a new protocol version. Callers ignore unknown fields and branch on codes and outcomes, not message text.
+Reuse the existing task-list JSON representation and add `session_id` as a task field. Do not define a separate reduced task schema or add a stored or returned readiness flag. Callers use `--ready` to query readiness, and `start` always checks readiness again.
 
-### Session snapshot
+Text output uses the existing task-line format with session membership. Read membership and task-query results from one consistent local snapshot.
 
-`aven agent session run-42 --ready --json` returns data shaped as follows (IDs are illustrative):
+### Mutation output
 
-```json
-{
-  "workspace_id": "workspace-id",
-  "session_id": "run-42",
-  "counts": {
-    "total": 3,
-    "ready": 1,
-    "by_status": {
-      "inbox": 0,
-      "backlog": 0,
-      "todo": 1,
-      "active": 1,
-      "done": 1,
-      "canceled": 0
-    }
-  },
-  "matched_count": 1,
-  "tasks": [
-    {
-      "id": "task-id",
-      "ref": "APP-7KQ9",
-      "title": "Implement the parser",
-      "status": "todo",
-      "session_id": "run-42",
-      "ready": true,
-      "deleted": false
-    }
-  ]
-}
-```
+With `--json`, return the post-operation task object directly, using the same representation as session results. `session_id` is null after release. Do not wrap the task in an operation report or repeat the requested session, workspace, or previous session outside the task.
 
-Counts cover the entire session within the deletion scope, before optional filters; `matched_count` equals `tasks.length`. Include all six status counts, even when zero. An empty session returns zero counts and an empty array. Order tasks deterministically by task reference, then task ID. Read membership, counts, and readiness from one consistent local snapshot; a later `start` always rechecks readiness.
+Text output follows existing mutation commands: an operation summary with the task reference, `changed=true/false`, and relevant task fields. JSON retries return the current task object without a separate outcome marker.
 
-The task projection shown above is the common minimum for all task responses. `session_id` is null after release. `ready` uses existing readiness rules and is false for deleted tasks and epic containers.
+### Context output
 
-### Mutation and context data
+After checking membership, `aven agent context` uses the existing `aven context` selection, rendering, and JSON structure. Add `session_id` to the context's task object. Preserve existing names, types, empty-value conventions, and sections, including dependencies, related tasks, notes, conflicts, epics, recurrence, and attachments.
 
-Mutation `data` contains `workspace_id`, `session_id` (the requested session), `outcome`, and `task` (the common projection). Transfer additionally returns `previous_session_id` when a transfer occurred. A retry returning `unchanged` does not invent the original previous session.
+Do not introduce alternate names such as `blockers`, `dependents`, or `related_tasks`, or place the existing context inside a second wrapper. Keep ordinary task detail and context output consistent with the membership display described below.
 
-Context `data` contains `workspace_id`, `session_id`, `task`, and `context`. The structured `context` contains `description`, `notes`, `blockers`, `dependents`, and `related_tasks`, using existing context selection semantics rather than embedding rendered terminal text. Related-task entries use stable task IDs and references, statuses, and titles. Notes include stable IDs and text. Preserve deterministic ordering. Optional scalars are null; collections are arrays, including when empty. Freeze exact context schemas with contract tests before shipping v1.
+### Errors and exit codes
 
-### Errors
+Use the existing argument parser and runtime error path. Success, including an unchanged retry, exits with `0`; argument parsing errors use the parser's existing exit behavior; runtime failures, including membership and readiness failures, exit with `1`. Do not add a separate domain-error exit code or JSON error format.
 
-```json
-{
-  "protocol": "aven.agent",
-  "version": 1,
-  "ok": false,
-  "data": null,
-  "error": {
-    "code": "session_mismatch",
-    "message": "Task belongs to another session.",
-    "details": {
-      "task_ref": "APP-7KQ9",
-      "expected_session_id": "run-42",
-      "actual_session_id": "run-43"
-    }
-  }
-}
-```
-
-Stable v1 codes: `invalid_argument`, `unsupported_protocol`, `task_not_found`, `task_deleted`, `session_mismatch`, `not_ready`, `invalid_transition`, `invalid_agent_metadata`, `agent_metadata_conflict`, and `internal_error`. `error.details` is always an object. `not_ready` includes machine-readable reasons derived from existing readiness checks, including blocking task references and availability restrictions where applicable.
+Use existing diagnostic conventions to explain failures. Membership errors identify the task and expected and actual sessions. Readiness errors identify blocking tasks or availability restrictions where applicable. Malformed metadata and sync conflicts must be distinguishable from missing membership. The help text describes these preconditions without defining a separate catalog of protocol error codes.
 
 ## Metadata implementation
 
@@ -172,15 +116,15 @@ Persist one reserved task metadata value under `aven.agent`, encoded as a compac
 { "version": 1, "session_id": "run-42" }
 ```
 
-Absence means no membership. Keep the version and session together so sync treats the record as one metadata value. Release removes that value. Store no duplicate membership column, session table, readiness flag, or agent-specific task status.
+This version describes the internal storage format, not public response metadata. Absence means no membership. Keep the storage version and session together so sync treats the record as one metadata value. Release removes that value. Store no duplicate membership column, session table, readiness flag, or agent-specific task status.
 
-The current metadata implementation uses string values and rejects public `aven.*` keys. Add an internal, typed protocol writer that can create and mutate this reserved key while preserving existing public restrictions. Reuse metadata field identities, size limits, persistence, sync, conflict, undo, and export/import paths. Audit each path: reserved-key validation must allow legitimate restoration and sync without opening generic user writes.
+The current metadata implementation uses string values and rejects public `aven.*` keys. Add an internal, typed membership writer that can create and mutate this reserved key while preserving existing public restrictions. Reuse metadata field identities, size limits, persistence, sync, conflict, undo, and export/import paths. Audit each path: reserved-key validation must allow legitimate restoration and sync without opening generic user writes.
 
-Generic metadata commands and editors may inspect the value but must not set, remove, or rename the reserved field. The semantic core owns encoding and decoding. Imports and conflict resolution must validate supported records before accepting them as usable membership; unknown versions remain preserved and report an unsupported protocol rather than being rewritten or dropped.
+Generic metadata commands and editors may inspect the value but must not set, remove, or rename the reserved field. The semantic core owns encoding and decoding. Imports and conflict resolution must validate supported records before accepting them as usable membership. Preserve unknown storage versions and report an unsupported storage format rather than rewriting or dropping them.
 
-Malformed or conflicted records are not equivalent to unassigned tasks. Task-targeted commands fail with a structured error. Session snapshots fail if any task in the workspace's selected deletion scope has uninterpretable agent metadata, because Aven cannot prove whether it belongs to the requested session; include affected references in error details. Existing conflict tooling remains the explicit repair route.
+Malformed or conflicted records are not equivalent to unassigned tasks. Task-targeted commands fail through the normal CLI error path. Session queries fail if any task in the workspace's selected deletion scope has uninterpretable agent metadata, because Aven cannot prove whether it belongs to the requested session. Include affected task references in the diagnostic. Existing conflict tooling remains the explicit repair route.
 
-No arbitrary metadata fields are included in the agent projection. Agents consume `session_id`, readiness, and normal task fields, not storage details.
+Expose membership through `session_id`, not by requiring callers to decode reserved metadata. Preserve existing metadata visibility rules on ordinary CLI surfaces.
 
 ## Human interface
 
@@ -192,8 +136,8 @@ Include the column in the default layout; allow hiding and reordering through ex
 
 1. Implement a typed agent-session module in `aven-core`, backed by metadata. Complete when assignment, guarded transfer/release, readiness checks, and progress transitions pass transactional tests.
 2. Verify storage lifecycle integration. Complete when restart, sync conflicts, undo, export/import, deletion/restoration, and recurring-occurrence isolation preserve the specified behavior.
-3. Implement `aven agent` as a thin CLI adapter over that module. Complete when human-readable default output, explicit `--json` output, JSON schema, exit-code parity, invalid-invocation handling in both modes, idempotency, workspace-isolation, and JSON stdout-cleanliness contract tests pass.
-4. Implement session queries and structured context. Complete when combined filters, deterministic ordering, full-session counts, empty sessions, and malformed/conflicted metadata match this contract.
+3. Implement `aven agent` as a thin CLI adapter over that module. Complete when tests cover text output, direct JSON results, existing stderr and exit-code behavior, help-only interface version, idempotency, workspace isolation, and clean JSON stdout.
+4. Implement session queries and reuse structured context. Complete when tests cover combined filters, deferred-task visibility, existing list ordering, individual recurring occurrences, empty arrays, malformed/conflicted metadata, and reuse of existing task and context schemas without new summary fields.
 5. Add TUI membership rendering and refresh coverage. Complete when assignment, release, completion, and external edits are visible without restarting, including custom layouts.
 6. Document shipped commands in `CLI.md` and configuration docs; teach `aven prime` and reusable agent guidance the semantic workflow. Complete when examples run against the implementation without raw metadata operations.
 
