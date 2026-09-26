@@ -18,13 +18,13 @@ credential version one and generation boundary zero, with no bootstrap,
 recovery or pending rotation. Core, state and attachments are respectively
 229, 280 and 312 bytes. The HPKE plaintext is 175 bytes and ciphertext 191 bytes.
 
-Tests also construct newly signed invalid records, verify strict parser and
+Tests also sign invalid records at test time, verify strict parser and
 cross-field rejection, and demonstrate that signed opaque self-package validity
 must be checked by the client rather than inferred by the server.
 
 ## Same-generation membership
 
-`membership.json` freezes exact AVID v2 declarations, unchanged PSK requests and
+`membership.json` freezes exact AVID v2 declarations, PSK requests and
 AVAD v2 / AVGS v4 / AVGA v4 admissions for a seed inviting a peer, then that peer
 inviting a third device. Both records use the same admission format. Tests rebuild
 and compare every byte, not only the stored SHA256 values.
@@ -38,5 +38,5 @@ are 2000000000/2000000001. These are test-only deterministic values, not product
 entropy or independently reproduced interoperability evidence. Production uses
 fallible OS-seeded single-shot HPKE; exact retries retain the resulting bytes.
 
-The pure membership parser rejects old fixed first-peer enrollment versions.
-Genesis/publication and unchanged request framing retain their original meaning.
+The pure membership parser rejects fixed first-peer enrollment versions.
+Genesis/publication and request framing keep the meaning frozen in their fixtures.
