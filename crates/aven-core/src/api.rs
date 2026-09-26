@@ -1246,7 +1246,11 @@ impl Store {
             .await
             .map_err(Error::from_internal)?
             .into_iter()
-            .filter(|conflict| !conflict.field.starts_with("metadata:"))
+            // Summaries identify tasks with typed task fields; series template
+            // conflicts use their own fields and resolution path.
+            .filter(|conflict| {
+                !conflict.recurrence_series && !conflict.field.starts_with("metadata:")
+            })
             .map(|conflict| {
                 Ok(ConflictSummary {
                     task_id: conflict.task_id,
