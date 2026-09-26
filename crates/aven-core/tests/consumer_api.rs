@@ -1806,6 +1806,8 @@ async fn consumer_conflict_list_tolerates_recurrence_series_conflicts() {
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].task_id, task.id);
     assert_eq!(summaries[0].field, ConflictField::Title);
+    let queue = second.queue_report(&workspace.id).await.unwrap();
+    assert_eq!(queue.unresolved_conflict_count, 1);
 }
 
 #[tokio::test]

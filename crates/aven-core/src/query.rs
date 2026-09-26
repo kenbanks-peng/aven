@@ -34,7 +34,7 @@ pub use details::{TaskDetail, TaskDetailConflict};
 pub(crate) use details::{conflict_display_value, task_detail, task_detail_with_display_refs};
 pub use doctor::WorkspaceTaskCounts;
 pub(crate) use doctor::{
-    unresolved_conflict_count, unresolved_conflict_count_in_workspace, workspace_task_counts,
+    unresolved_conflict_count, unresolved_task_conflict_count_in_workspace, workspace_task_counts,
 };
 pub(crate) use projects::list_project_items_in_workspace;
 pub(crate) use recent_actions::{
@@ -594,12 +594,12 @@ impl Database {
         unresolved_conflict_count(&mut conn).await
     }
 
-    pub async fn unresolved_conflict_count_in_workspace(
+    pub async fn unresolved_task_conflict_count_in_workspace(
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<i64> {
         let mut conn = self.acquire_reader().await?;
-        unresolved_conflict_count_in_workspace(&mut conn, workspace_id).await
+        unresolved_task_conflict_count_in_workspace(&mut conn, workspace_id).await
     }
 
     pub async fn sync_history_stats(&self) -> Result<SyncHistoryStats> {
