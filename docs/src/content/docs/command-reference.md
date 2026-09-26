@@ -926,6 +926,29 @@ Refusals include `sync-device-id-invalid`, `sync-device-id-ambiguous`,
 itself. Removal does not erase data the removed device already downloaded. JSON
 output is versioned and omits keys, credentials, and invitations.
 
+#### `aven sync reset`
+
+Stop syncing this database and keep its data as a local database.
+
+```sh
+aven sync reset [--yes] [--json]
+```
+
+Deletes this database's sync state, its unsent sync queue, and its protected
+sync keys. Tasks, images, and history stay and remain editable. Reset does not
+contact the server or change which devices take part in sync; remove this
+device from another device with `aven sync device remove`. Changes made here
+that never synced do not reach the previous sync.
+
+Afterwards the database behaves as if it never synced: `aven sync setup` can
+start a new sync from it, and `aven sync join` still needs an empty database.
+Reset asks for confirmation; `--yes` is required when standard input is not a
+terminal. It is refused with `sync-reset-setup-in-progress`,
+`sync-reset-join-in-progress`, or `sync-reset-invitation-open` while setup,
+joining, or an unexpired invitation is unfinished. JSON output reports `state`
+as `reset`, or `not-set-up` when the database did not take part in sync. The
+TUI has no reset action. See [Rebuilding sync](/sync/#rebuilding-sync).
+
 #### `aven sync status`
 
 Inspect local sync state without contacting the server or starting a sync.

@@ -367,6 +367,47 @@ changes are not carried into the new sync.
 
 See [Back up and restore](/backups/) for backup contents and restore behavior.
 
+## Rebuilding sync
+
+Sync stops on a device when it receives a change it can't apply. If this
+version of Aven doesn't understand the change, update Aven on that device; its
+edits sync after the update. If the change itself is damaged, every later sync
+stops at the same place. Local tasks stay safe and editable, and `aven sync`
+explains which case applies.
+
+To keep syncing after a damaged change, rebuild sync on new server storage.
+Choose the device with the best data as the new starting point.
+
+1. Prepare new server storage and serve it. Do not reuse the old storage:
+
+   ```sh
+   aven server setup --data /path/to/new-sync-server.sqlite --url https://sync.example.com
+   aven server --data /path/to/new-sync-server.sqlite --bind 127.0.0.1:3746
+   ```
+
+2. On the device with the best data, reset sync and set it up again with the
+   new setup invitation:
+
+   ```sh
+   aven sync reset
+   aven sync setup
+   ```
+
+3. On each other device, check for changes that never synced first:
+   `aven sync status` reports whether local changes wait to sync. Save anything
+   you need, for example with `aven export --output unsynced.json`. Then reset
+   and join the new sync from an empty database:
+
+   ```sh
+   aven sync reset
+   aven sync invite                  # on the device from step 2
+   aven --db /path/to/new.sqlite sync join
+   ```
+
+   Joining needs an empty database, so point `--db` at a new path and use it
+   from then on. The old database stays readable as a local database; add any
+   unsynced work from it to the new one.
+
 ## Resolve conflicts
 
 Conflicts happen when multiple clients edit the same task field between syncs. They are explicit and field based. Inspect conflicts before resolving them.
