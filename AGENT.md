@@ -1,8 +1,10 @@
-# Design: Agent sessions through `aven agent`
+# Design: First-class agent CLI through `aven agent`
 
 ## Goal
 
-Give external orchestrators a first-class `aven agent` interface through thin adapters over existing task operations and session metadata management. Reuse existing arguments, queries, mutations, serializers, and renderers rather than defining a parallel CLI. Session membership is organizational metadata, not ownership, locking, or a separate task lifecycle.
+Give agents and external orchestrators a first-class `aven agent` entry point for task workflows, with the same command vocabulary and argument shapes as the ordinary CLI documented in `CLI.md`. Thin adapters are an implementation detail: agents should be able to discover and perform the supported workflow through `aven agent --help` without switching command namespaces. Reuse existing arguments, queries, mutations, serializers, and renderers rather than defining a parallel CLI.
+
+Session membership is optional organizational metadata, not ownership, locking, or a separate task lifecycle. Agents can use the interface with or without an orchestrator session. This document is a proposal; `CLI.md` remains the reference for shipped commands until implementation.
 
 ## Session model
 
@@ -15,38 +17,70 @@ A session is a workspace-scoped collection of tasks associated with an opaque se
 
 All `aven agent` operational commands emit human-readable text by default. Every operational command accepts `--json` for successful output. Errors remain diagnostic text on stderr in both modes, as in the existing CLI.
 
-| Command                                            | Behavior                                                |
-| -------------------------------------------------- | ------------------------------------------------------- |
-| `aven agent --help` or `aven help agent`           | Show interface version, commands, and usage             |
-| `aven agent list <SESSION> [OPTIONS]`              | Equivalent to `aven list --session <SESSION> [OPTIONS]` |
-| `aven agent assign <TASK_REF> --session <SESSION>` | Set membership, replacing any previous session          |
-| `aven agent release <TASK_REF>`                    | Clear membership without changing task status           |
-| `aven agent context <TASK_REF> [OPTIONS]`          | Equivalent to `aven context <TASK_REF> [OPTIONS]`       |
-| `aven agent start <TASK_REF>`                      | Ordinary task status change to `active`                 |
-| `aven agent complete <TASK_REF>`                   | Ordinary task status change to `done`                   |
+### Shared task commands
+
+For each command below, inserting `agent` after `aven` preserves the command's arguments, options, defaults, validation, side effects, and output. `[OPTIONS]` means the corresponding ordinary command's options, not a reduced agent-specific set. Share argument definitions and execution in-process; do not shell out.
+
+| Agent command                                           | Ordinary CLI equivalent                                                         |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `aven agent add <TITLE> [OPTIONS]`                      | `aven add <TITLE> [OPTIONS]`, including natural-language and recurring creation |
+| `aven agent list [OPTIONS]`                             | `aven list [OPTIONS]`                                                           |
+| `aven agent search <QUERY>... [OPTIONS]`                | `aven search <QUERY>... [OPTIONS]`                                              |
+| `aven agent show <TASK_REF> [OPTIONS]`                  | `aven show <TASK_REF> [OPTIONS]`                                                |
+| `aven agent context <TASK_REF> [OPTIONS]`               | `aven context <TASK_REF> [OPTIONS]`                                             |
+| `aven agent edit <TASK_REF> [OPTIONS]`                  | `aven edit <TASK_REF> [OPTIONS]`                                                |
+| `aven agent delete <TASK_REF> [OPTIONS]`                | `aven delete <TASK_REF> [OPTIONS]`                                              |
+| `aven agent restore <TASK_REF> [OPTIONS]`               | `aven restore <TASK_REF> [OPTIONS]`                                             |
+| `aven agent note <TASK_REF> [TEXT] [OPTIONS]`           | `aven note <TASK_REF> [TEXT] [OPTIONS]`, including `--file` and `--stdin`       |
+| `aven agent note-delete <TASK_REF> <NOTE_ID> [OPTIONS]` | `aven note-delete <TASK_REF> <NOTE_ID> [OPTIONS]`                               |
+| `aven agent dep <SUBCOMMAND> [ARGS] [OPTIONS]`          | `aven dep <SUBCOMMAND> [ARGS] [OPTIONS]`                                        |
+| `aven agent related <SUBCOMMAND> [ARGS] [OPTIONS]`      | `aven related <SUBCOMMAND> [ARGS] [OPTIONS]`                                    |
+| `aven agent epic <SUBCOMMAND> [ARGS] [OPTIONS]`         | `aven epic <SUBCOMMAND> [ARGS] [OPTIONS]`                                       |
+
+Status changes use `aven agent edit <TASK_REF> --status <STATUS>`, including `active`, `done`, and `canceled`. Use the existing status vocabulary rather than introducing `start` and `complete` commands. Deferral, description changes, labels, and ordinary metadata edits likewise use the existing `edit` options.
+
+### Session membership commands
+
+| Command                                                     | Behavior                                       |
+| ----------------------------------------------------------- | ---------------------------------------------- |
+| `aven agent assign <TASK_REF> --session <SESSION> [--json]` | Set membership, replacing any previous session |
+| `aven agent release <TASK_REF> [--json]`                    | Clear membership without changing task status  |
+
+These are the only new task operations. Creation does not implicitly assign membership; use `assign` with the created task's reference. A session selector filters a query; it never establishes an implicit session for subsequent commands.
+
+### Help and global options
+
+`aven agent --help` and `aven help agent` show the supported commands and usage. Each shared command has full help under `aven agent <COMMAND> --help` and `aven help agent <COMMAND>`, using the shared argument descriptions and agent-prefixed usage and examples. Agents should not need ordinary-command help to discover supported options.
+
+Existing global options retain their meaning and parser-supported placement, including `aven --db <PATH> agent <COMMAND>` and `aven --workspace <WORKSPACE> agent <COMMAND>`. The namespace does not select a different database or workspace.
 
 Help identifies this interface as version 1. This version is the only public protocol metadata and is available in help only. There is no `--protocol-version` option or version negotiation.
 
-`agent list` accepts the existing list options and inherits their defaults, combination restrictions, availability and deletion scope, ordering, recurrence presentation, result limits, and output formats. Share argument definitions and execution in-process; do not shell out or maintain a separate filter specification. The positional session supplies the shared list's `--session` value; `agent list` does not accept a second session selector.
+### Session filtering
+
+`aven agent list --session <SESSION> [OPTIONS]` is equivalent to `aven list --session <SESSION> [OPTIONS]`. The optional `--session` flag is shared by both commands; neither takes a positional session. Without it, `aven agent list` is an ordinary workspace task list, not an error or an implicit session lookup.
+
+`agent list` accepts the existing list options and inherits their defaults, combination restrictions, availability and deletion scope, ordering, recurrence presentation, result limits, and output formats. Maintain one shared filter specification.
 
 Add session membership as an AND constraint in the shared task query, before recurrence grouping and result limits. Membership belongs to individual occurrences; grouped output must not imply that every occurrence has the same session. Use the existing `--expand-recurring` option when individual task references are needed. A default session-scoped list is not a complete inventory: ordinary availability filtering still applies, and `--all` does not disable it.
 
-Use existing task commands for creation, dependency editing, notes, deferral, cancellation, and recovery. Shared session selection is available through `aven list --session`; membership management lives under `aven agent`. The existing skill installation interface remains unchanged.
+The shared commands cover creation, discovery, inspection, editing, relationships, reporting, and deletion/restoration within `aven agent`. Operations outside this task workflow continue to use the ordinary CLI, including recurring-series management, guarded text operations, attachments, bulk updates, workspace/project administration, sync/conflict repair, and data safety. The existing `aven prime`, `aven skill`, and skill installation interfaces remain unchanged; their guidance should teach the agent-prefixed task workflow.
 
 ### Typical orchestrator session
 
 ```sh
 aven agent assign APP-7KQ9 --session run-42 --json
-aven agent list run-42 --ready --expand-recurring --json
+aven agent list --session run-42 --ready --expand-recurring --json
 aven agent context APP-7KQ9 --json
-aven agent start APP-7KQ9 --json
+aven agent edit APP-7KQ9 --status active --json
 # The worker performs the work.
-aven agent complete APP-7KQ9 --json
-aven agent list run-42 --json
+aven agent note APP-7KQ9 "Implemented the change; targeted tests passed." --json
+aven agent edit APP-7KQ9 --status done --json
+aven agent list --session run-42 --json
 aven agent release APP-7KQ9 --json
 ```
 
-`--ready` helps select work; it does not establish ownership or impose an agent-only precondition on status changes. Completion changes task status without independently verifying the work. Use the existing note command to record a worker report.
+`--ready` helps select work; it does not establish ownership or impose an agent-only precondition on status changes. Completion changes task status without independently verifying the work. Use `aven agent note` to record a worker report.
 
 ## Mutation semantics
 
@@ -54,8 +88,8 @@ Reuse existing task resolution, validation, transactions, mutation, undo, and sy
 
 - Assign sets membership without changing status, replacing any previous session. Assigning the same session is a no-op. A separate transfer command is unnecessary.
 - Release clears membership without changing status. Releasing an unassigned task is a no-op; releasing an active task leaves it active.
-- Start and complete use ordinary status changes to `active` and `done`. They require neither session membership nor an expected previous status beyond ordinary task validation.
-- Context uses ordinary task inspection without a membership precondition.
+- `edit --status` uses ordinary status changes for every supported status. It requires neither session membership nor an expected previous status beyond ordinary task validation.
+- Shared task commands operate without a membership precondition; only an explicit `list --session` constrains task selection by membership.
 - Recurring tasks are assigned per occurrence. Session membership is never copied into recurrence templates or future occurrences.
 - All status changes preserve membership, whether made through `aven agent`, ordinary task commands, or the TUI.
 
@@ -71,7 +105,7 @@ Do not add response wrappers, protocol identifiers, version fields, success flag
 
 ### List output
 
-`aven agent list <SESSION> --json` and `aven list --session <SESSION> --json` return identical output using the existing list representation. An empty result is `[]`.
+`aven agent list --session <SESSION> --json` and `aven list --session <SESSION> --json` return identical output using the existing list representation. An empty result is `[]`.
 
 Add `session_id` to the shared task representation. Use the existing recurrence-group representation without inventing group-level membership. Do not define a separate reduced task schema or a stored or returned readiness flag.
 
@@ -79,7 +113,7 @@ Text output uses the existing task-line format with session membership. Read mem
 
 ### Mutation output
 
-Start and complete reuse the ordinary status mutation's text and JSON output unchanged. Assign and release use existing mutation rendering conventions and return the post-operation task object directly with `--json`; `session_id` is null after release. Reuse the existing change indicator and retry conventions rather than introducing agent-specific outcome fields or wrappers.
+Shared mutation commands, including `edit --status`, reuse their ordinary command's text and JSON output unchanged. Assign and release use existing mutation rendering conventions and return the post-operation task object directly with `--json`; `session_id` is null after release. Reuse the existing change indicator and retry conventions rather than introducing agent-specific outcome fields or wrappers.
 
 ### Context output
 
@@ -121,11 +155,11 @@ Include the column in the default layout; allow hiding and reordering through ex
 
 1. Implement typed session membership in `aven-core`, backed by existing metadata machinery. Complete when assignment, reassignment, release, and no-op behavior pass transactional tests without changing task status.
 2. Verify storage lifecycle integration. Complete when restart, sync conflicts, undo, export/import, deletion/restoration, and recurring-occurrence isolation preserve the specified behavior.
-3. Implement `aven agent` as thin adapters over membership management and existing task operations. Complete when context and status changes match ordinary command behavior, including validation, output, retries, undo, sync, and exit codes, with no membership guards. Cover membership mutation output, help-only interface version, workspace isolation, and clean JSON stdout.
-4. Add shared session filtering and reuse list arguments and execution. Complete when equivalent `aven agent list` and `aven list --session` requests produce identical text, JSON, and errors. Test session-specific interactions with availability, deletion scope, recurrence grouping, limits, workspace isolation, and malformed/conflicted metadata. Keep ordinary filter coverage in the shared list tests rather than duplicating a separate agent filter suite.
+3. Implement `aven agent` as thin adapters over membership management and the shared task commands listed above. Complete when every shared command and nested subcommand accepts the same arguments and matches ordinary command behavior, including validation, text/JSON output, retries, undo, sync, and exit codes, with no membership guards. Use equivalence tests against identical initial state for mutations. Cover full agent-prefixed help, global options, membership mutation output, help-only interface version, workspace isolation, and clean JSON stdout.
+4. Add shared session filtering and reuse list arguments and execution. Complete when equivalent `aven agent list` and `aven list` requests, both with and without `--session`, produce identical text, JSON, and errors. Test session-specific interactions with availability, deletion scope, recurrence grouping, limits, workspace isolation, and malformed/conflicted metadata. Keep ordinary filter coverage in the shared list tests rather than duplicating a separate agent filter suite.
 5. Add TUI membership rendering and refresh coverage. Complete when assignment, release, completion, and external edits are visible without restarting, including custom layouts.
 6. Document shipped commands in `CLI.md` and configuration docs; teach `aven prime` and reusable agent guidance the semantic workflow. Complete when examples run against the implementation without raw metadata operations.
 
 ## Scope
 
-V1 covers session metadata management and first-class agent conveniences for existing task listing, context, and status operations. Scheduling, worker identities, leases, heartbeats, distributed claims, automatic session cleanup, session history, and bulk mutation are separate designs. Avoid adding those concepts to the metadata record until their semantics are specified.
+V1 covers session metadata management and a first-class agent entry point for the shared task workflow defined above. It reuses ordinary command names and semantics rather than creating a separate agent lifecycle. Scheduling, worker identities, leases, heartbeats, distributed claims, automatic session cleanup, session history, and bulk mutation are separate designs. Avoid adding those concepts to the metadata record until their semantics are specified.
