@@ -33,17 +33,13 @@ Membership is occurrence-specific. Recurrence groups retain their existing schem
 
 ## Storage and validation
 
-Persist membership as one reserved metadata value under `aven.agent`, encoded as a compact JSON string:
+Persist membership as one reserved metadata value under `aven.agent.session_id`, containing the session ID directly as an opaque string (for example, `run-42`).
 
-```json
-{ "session_id": "run-42" }
-```
+Absence means unassigned; release removes the value. An internal typed writer in `aven-core` owns membership updates and validation. Reuse existing task resolution, transactions, metadata limits, persistence, sync, conflict handling, undo, and export/import paths. Generic metadata commands and editors have read-only access to `aven.agent.session_id`; restoration, import, sync, and conflict resolution use the reserved-key validation paths.
 
-Absence means unassigned; release removes the value. An internal typed writer in `aven-core` owns encoding and decoding. Reuse existing task resolution, transactions, metadata limits, persistence, sync, conflict handling, undo, and export/import paths. Generic metadata commands and editors have read-only access to `aven.agent`; restoration, import, sync, and conflict resolution use the reserved-key validation paths.
+Apply existing metadata validation when importing tasks or resolving sync conflicts. If a command needs a task's session assignment and that assignment has an unresolved sync conflict, report the affected task reference. Resolve it using the existing conflict tools.
 
-Validate membership records during import and conflict resolution. Operations interpreting malformed or conflicted membership report affected task references through existing error/conflict presentation; repair uses existing conflict tooling.
-
-Session-filtered queries fail if any task in the selected deletion scope has uninterpretable membership, even when other filters would exclude it. Ordinary unscoped queries retain their existing validation.
+`aven agent list` must fail and report these conflicts rather than silently omit tasks. Check all tasks covered by its deleted/non-deleted selection, even those excluded by other filters. Ordinary `aven list` is unchanged.
 
 ## Output
 
