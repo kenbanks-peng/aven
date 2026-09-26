@@ -1669,6 +1669,78 @@ async fn consumer_recurrence_changes_survive_sync_round_trips() {
 }
 
 #[tokio::test]
+async fn consumer_conflict_list_tolerates_recurrence_series_conflicts() {
+    let directory = tempfile::tempdir().unwrap();
+    let first_path = directory.path().join("series-conflict-first.sqlite");
+    let second_path = directory.path().join("series-conflict-second.sqlite");
+    let server = EncryptedSyncServer::new().await;
+    let first = Store::open(&first_path).await.unwrap();
+    let workspace = first.resolve_workspace("default").await.unwrap();
+    let series = first
+        .create_recurrence_series(&workspace.id, daily_series("contested series"))
+        .await
+        .unwrap()
+        .series;
+    let task = first
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "contested task".to_string(),
+                description: String::new(),
+                project: "Core".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    drop(first);
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+
+    for (path, suffix, initial_status) in [
+        (&first_path, "first", TaskStatus::Backlog),
+        (&second_path, "second", TaskStatus::Inbox),
+    ] {
+        let store = Store::open(path).await.unwrap();
+        store
+            .update_recurrence_template(
+                &workspace.id,
+                &series.id,
+                UpdateRecurrenceTemplate {
+                    title: Some(format!("{suffix} series")),
+                    initial_status: Some(initial_status),
+                    ..UpdateRecurrenceTemplate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &workspace.id,
+                &task.id,
+                UpdateTask {
+                    title: Some(format!("{suffix} task")),
+                    ..UpdateTask::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    exchange(&first_path, &server).await;
+    exchange(&second_path, &server).await;
+
+    let second = Store::open(&second_path).await.unwrap();
+    let summaries = second.list_conflicts(&workspace.id).await.unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].task_id, task.id);
+    assert_eq!(summaries[0].field, ConflictField::Title);
+}
+
+#[tokio::test]
 async fn consumer_api_exposes_symmetric_related_links_on_detail_records() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path().join("related.sqlite"))
