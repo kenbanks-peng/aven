@@ -98,17 +98,14 @@ pub(super) fn components(
     state.extend_from_slice(&original[40..]);
     let mut body = b"AVPB\0\x01".to_vec();
     body.extend(binding.tuple());
-    let mut core = vec![1];
-    bytes(&mut core, &genesis.context.vault_id);
-    core.extend(1_u64.to_be_bytes());
-    bytes(&mut core, &genesis.commitment());
-    core.push(1);
-    bytes(&mut core, &genesis.device);
-    core.push(2);
-    bytes(&mut core, &body);
-    bytes(
-        &mut core,
-        &hash(&cce("aven-e2ee/v1/membership/state", &[&state])),
+    let core = membership_core(
+        &genesis.context.vault_id,
+        1,
+        &genesis.commitment(),
+        &genesis.device,
+        2,
+        &body,
+        &state,
     );
     (core, state, b"AVGA\0\x02\0".to_vec())
 }
@@ -131,10 +128,7 @@ impl Publication {
         let signature = ed25519_dalek::Signature::from_slice(r.blob(64)?)?;
         r.end()?;
         ed25519_dalek::VerifyingKey::from_bytes(&genesis.signing_public)?
-            .verify_strict(
-                &cce("aven-e2ee/v1/membership/sign", &[&core, &attachments]),
-                &signature,
-            )
+            .verify_strict(&cce(MEMBERSHIP_SIGN, &[&core, &attachments]), &signature)
             .map_err(|_| anyhow::anyhow!("error bootstrap-publication-signature"))?;
         Ok(Self {
             record: Box::new(record.try_into()?),
@@ -184,7 +178,7 @@ impl SeedAuthority {
         let binding = PublicationBinding::from_descriptor(&self.genesis, descriptor)?;
         let (core, state, attachments) = components(&self.genesis, &binding);
         let signature = SigningKey::from_bytes(self.signing.expose())
-            .sign(&cce("aven-e2ee/v1/membership/sign", &[&core, &attachments]));
+            .sign(&cce(MEMBERSHIP_SIGN, &[&core, &attachments]));
         let mut record = vec![1];
         for part in [&core[..], &state, &attachments, &signature.to_bytes()] {
             bytes(&mut record, part);

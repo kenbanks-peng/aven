@@ -27,7 +27,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::{LocalSharedStatePackageContext, LocalSharedStatePackageKey};
-use codec::{Reader, bytes, cce, hash, valid};
+use codec::{MEMBERSHIP_SIGN, Reader, bytes, cce, hash, membership_core, valid};
 
 type Kem = hpke::kem::X25519HkdfSha256;
 type Aead = hpke::aead::ChaCha20Poly1305;
@@ -170,19 +170,15 @@ impl Genesis {
         let mut body = b"AVGC\0\x01".to_vec();
         body.extend(self.setup);
         body.extend(self.claim);
-        let mut out = vec![1];
-        bytes(&mut out, &self.context.vault_id);
-        out.extend(0_u64.to_be_bytes());
-        bytes(&mut out, &[0; 32]);
-        out.push(1);
-        bytes(&mut out, &self.device);
-        out.push(1);
-        bytes(&mut out, &body);
-        bytes(
-            &mut out,
-            &hash(&cce("aven-e2ee/v1/membership/state", &[state])),
-        );
-        out
+        membership_core(
+            &self.context.vault_id,
+            0,
+            &[0; 32],
+            &self.device,
+            1,
+            &body,
+            state,
+        )
     }
 }
 
@@ -262,7 +258,7 @@ impl SeedAuthority {
         bytes(&mut attachments, &genesis.hpke_public);
         bytes(&mut attachments, &enc.to_bytes());
         bytes(&mut attachments, &ciphertext);
-        let signature = signer.sign(&cce("aven-e2ee/v1/membership/sign", &[&core, &attachments]));
+        let signature = signer.sign(&cce(MEMBERSHIP_SIGN, &[&core, &attachments]));
         let mut record = vec![1];
         for component in [&core[..], &state, &attachments, &signature.to_bytes()] {
             bytes(&mut record, component);

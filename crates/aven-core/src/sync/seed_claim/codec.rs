@@ -5,6 +5,34 @@ pub(super) use crate::sync::codec::{bytes, cce, hash};
 
 use super::{CLAIM_BYTES, GENESIS_BYTES, Genesis, LocalSharedStatePackageContext};
 
+pub(super) const MEMBERSHIP_SIGN: &str = "aven-e2ee/v1/membership/sign";
+
+pub(super) fn state_hash(state: &[u8]) -> [u8; 32] {
+    hash(&cce("aven-e2ee/v1/membership/state", &[state]))
+}
+
+/// Signed membership core shared by genesis, publication and later actions.
+pub(super) fn membership_core(
+    vault: &[u8],
+    sequence: u64,
+    head: &[u8],
+    signer: &[u8],
+    action: u8,
+    body: &[u8],
+    state: &[u8],
+) -> Vec<u8> {
+    let mut out = vec![1];
+    bytes(&mut out, vault);
+    out.extend(sequence.to_be_bytes());
+    bytes(&mut out, head);
+    out.push(1);
+    bytes(&mut out, signer);
+    out.push(action);
+    bytes(&mut out, body);
+    bytes(&mut out, &state_hash(state));
+    out
+}
+
 pub(super) fn valid(condition: bool) -> Result<()> {
     ensure!(condition, "error seed-claim-invalid");
     Ok(())
@@ -90,7 +118,7 @@ pub(super) fn parse(record: &[u8]) -> Result<Genesis> {
     let setup = body.array()?;
     valid(body.take(32)? == claim)?;
     body.end()?;
-    valid(r.blob(32)? == hash(&cce("aven-e2ee/v1/membership/state", &[state])))?;
+    valid(r.blob(32)? == state_hash(state))?;
     r.end()?;
 
     let mut r = Reader(attachments);
@@ -106,10 +134,7 @@ pub(super) fn parse(record: &[u8]) -> Result<Genesis> {
     let signature = Signature::from_slice(signature)
         .map_err(|_| anyhow::anyhow!("error seed-claim-signature"))?;
     public
-        .verify_strict(
-            &cce("aven-e2ee/v1/membership/sign", &[core, attachments]),
-            &signature,
-        )
+        .verify_strict(&cce(MEMBERSHIP_SIGN, &[core, attachments]), &signature)
         .map_err(|_| anyhow::anyhow!("error seed-claim-signature"))?;
     Ok(Genesis {
         record: record.try_into()?,

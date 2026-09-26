@@ -96,7 +96,7 @@ pub(super) fn validate(m: &Membership, raw: &[u8]) -> Result<Membership> {
     r.end()?;
     verify(
         &member.sign,
-        "aven-e2ee/v1/membership/sign",
+        MEMBERSHIP_SIGN,
         &[core, attachments],
         signature,
     )?;

@@ -49,19 +49,15 @@ pub(super) fn state(m: &Membership) -> Vec<u8> {
     out
 }
 pub(super) fn core(m: &Membership, signer: Hash, action: u8, body: &[u8], state: &[u8]) -> Vec<u8> {
-    let mut out = vec![1];
-    bytes(&mut out, &m.genesis.context.vault_id);
-    out.extend((m.sequence() + 1).to_be_bytes());
-    bytes(&mut out, &m.head());
-    out.push(1);
-    bytes(&mut out, &signer);
-    out.push(action);
-    bytes(&mut out, body);
-    bytes(
-        &mut out,
-        &hash(&cce("aven-e2ee/v1/membership/state", &[state])),
-    );
-    out
+    membership_core(
+        &m.genesis.context.vault_id,
+        m.sequence() + 1,
+        &m.head(),
+        &signer,
+        action,
+        body,
+        state,
+    )
 }
 pub(super) fn packages(count: usize) -> Vec<u8> {
     let mut out = b"AVGA\0\x05".to_vec();

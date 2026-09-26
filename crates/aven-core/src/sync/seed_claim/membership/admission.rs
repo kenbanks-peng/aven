@@ -90,7 +90,7 @@ pub(super) fn validate(
     grant_parts(attachments, &recipient, m.generations.len())?;
     verify(
         &m.member(&d.inviter)?.sign,
-        "aven-e2ee/v1/membership/sign",
+        MEMBERSHIP_SIGN,
         &[core, attachments],
         signature,
     )?;
@@ -128,8 +128,8 @@ pub(super) fn grant_plaintext(
 }
 
 pub(super) fn signed(signing: &Secret, core: &[u8], state: &[u8], attachments: &[u8]) -> Vec<u8> {
-    let sig = SigningKey::from_bytes(signing.expose())
-        .sign(&cce("aven-e2ee/v1/membership/sign", &[core, attachments]));
+    let sig =
+        SigningKey::from_bytes(signing.expose()).sign(&cce(MEMBERSHIP_SIGN, &[core, attachments]));
     let mut raw = vec![1];
     for part in [core, state, attachments, &sig.to_bytes()] {
         bytes(&mut raw, part);
