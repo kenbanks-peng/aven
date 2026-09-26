@@ -1792,6 +1792,10 @@ async fn consumer_conflict_list_tolerates_recurrence_series_conflicts() {
                 &task.id,
                 UpdateTask {
                     title: Some(format!("{suffix} task")),
+                    set_metadata: vec![MetadataInput {
+                        key: "owner".to_string(),
+                        value: suffix.to_string(),
+                    }],
                     ..UpdateTask::default()
                 },
             )

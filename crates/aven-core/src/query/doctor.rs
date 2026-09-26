@@ -38,7 +38,8 @@ pub async fn unresolved_task_conflict_count_in_workspace(
 ) -> Result<i64> {
     Ok(sqlx::query_scalar(
         "SELECT count(*) FROM conflicts
-             WHERE workspace_id = ? AND entity_type = 'task' AND resolved = 0",
+             WHERE workspace_id = ? AND entity_type = 'task' AND resolved = 0
+             AND field NOT LIKE 'metadata:%'",
     )
     .bind(workspace_id)
     .fetch_one(&mut *conn)
