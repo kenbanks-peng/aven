@@ -64,12 +64,7 @@ async fn pending_task(f: &Fixture, title: &str) -> String {
         .id
         .to_string()
 }
-async fn frozen(db: &Database) -> Vec<u8> {
-    sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
-        .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
-        .await
-        .unwrap()
-}
+use crate::test_support::e2ee_http::frozen;
 async fn image_rounds(f: &Fixture, third: &Joined) {
     let client = Client::new(&f.origin).unwrap();
     for _ in 0..8 {

@@ -18,7 +18,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     process::Stdio,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::Instant,
 };
 
 struct Node {
@@ -49,13 +49,7 @@ struct TailState {
     epic_task: TaskId,
 }
 
-fn expiry() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3500
-}
+use crate::test_support::e2ee_http::expiry;
 
 async fn setup() -> Journey {
     let root = tempfile::tempdir().unwrap();

@@ -5,15 +5,9 @@ use aven_core::sync::seed_claim::membership::Membership;
 pub(super) struct Joined {
     pub(super) db: Database,
     pub(super) store: ProtectedLocalKeyStore,
-    blobs: std::path::PathBuf,
+    pub(super) blobs: std::path::PathBuf,
 }
-fn expiry() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600
-}
+use crate::test_support::e2ee_http::expiry;
 pub(super) async fn join(
     f: &Fixture,
     name: &str,

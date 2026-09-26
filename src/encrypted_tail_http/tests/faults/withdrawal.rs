@@ -3,18 +3,10 @@
 use super::*;
 use crate::protected_local_keys::peer::{OutboundInvitation, PublishingBlocked};
 
-/// Leaves time to register, request and prepare a grant before expiry.
-fn soon() -> u64 {
-    expiry() - 3600 + 20
-}
+use crate::test_support::e2ee_http::soon;
 
 async fn past(expiry: u64) {
-    while std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        < expiry
-    {
+    while crate::test_support::e2ee_http::now() < expiry {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }

@@ -11,48 +11,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-struct Joined {
-    db: Database,
-    store: ProtectedLocalKeyStore,
-    blobs: std::path::PathBuf,
-}
-
-fn expiry() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600
-}
-
-async fn join(
-    f: &Fixture,
-    name: &str,
-    inviter: &Database,
-    inviter_store: &ProtectedLocalKeyStore,
-) -> Joined {
-    let enrollment = peer_enrollment_http::Client::new(&f.origin).unwrap();
-    let db = Database::open(&f.root.path().join(format!("{name}.sqlite")))
-        .await
-        .unwrap();
-    let store = isolated_store(&db, &f.root.path().join(format!("{name}-keys"))).await;
-    let invitation = enrollment
-        .invite(inviter_store, inviter, expiry())
-        .await
-        .unwrap();
-    enrollment
-        .request(&store, &db, Some(invitation))
-        .await
-        .unwrap();
-    assert!(enrollment.admit(inviter_store, inviter).await.unwrap());
-    assert!(enrollment.complete(&store, &db).await.unwrap());
-    enrollment.install(&store, &db).await.unwrap();
-    Joined {
-        db,
-        store,
-        blobs: f.root.path().join(format!("{name}-blobs")),
-    }
-}
+use super::membership::{Joined, join};
 
 async fn device(store: &ProtectedLocalKeyStore, db: &Database, origin: &str) -> [u8; 32] {
     store.active_inputs(db, origin).await.unwrap().device()
@@ -157,12 +116,7 @@ async fn fault_request(
     }
 }
 
-async fn frozen(db: &Database) -> Vec<u8> {
-    sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
-        .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
-        .await
-        .unwrap()
-}
+use crate::test_support::e2ee_http::frozen;
 
 async fn accepted_task(f: &Fixture, title: &str) -> (String, String, Vec<u8>) {
     let workspace = f.peer.list_workspaces().await.unwrap().remove(0);

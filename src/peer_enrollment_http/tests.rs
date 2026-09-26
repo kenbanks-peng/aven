@@ -170,13 +170,7 @@ fn test_clock() -> Arc<AtomicU64> {
 fn advance_clock(clock: &AtomicU64, to: u64) {
     clock.store(to, Ordering::SeqCst);
 }
-fn expiry() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3500
-}
+use crate::test_support::e2ee_http::expiry;
 async fn adopted(
     root: &Path,
 ) -> (
@@ -1119,13 +1113,7 @@ async fn management_loopback_authenticates_removed_seed_before_stale_hint() {
 mod retry;
 mod rotation;
 
-fn soon() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 20
-}
+use crate::test_support::e2ee_http::soon;
 
 #[tokio::test]
 async fn production_clock_rejects_an_already_expired_invitation() {

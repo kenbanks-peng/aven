@@ -12,6 +12,32 @@ use axum::Router;
 use std::path::Path;
 
 /// The setup secret [`issue_setup`] issues.
+pub(crate) fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// An invitation expiry just under the one-hour maximum.
+pub(crate) fn expiry() -> u64 {
+    now() + 3500
+}
+
+/// An invitation expiry that leaves time to register, request and prepare a
+/// grant, then passes quickly.
+pub(crate) fn soon() -> u64 {
+    now() + 20
+}
+
+/// The encrypted outbox record frozen for retry.
+pub(crate) async fn frozen(db: &Database) -> Vec<u8> {
+    sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
+        .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
+        .await
+        .unwrap()
+}
+
 pub(crate) fn setup_secret() -> Secret {
     Secret::new([7; 32])
 }
