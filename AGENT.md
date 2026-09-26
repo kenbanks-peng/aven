@@ -8,22 +8,18 @@ Give an external orchestrator a small interface for managing a session's tasks. 
 
 A session is a workspace-scoped collection of tasks associated with an opaque session ID supplied by the orchestrator.
 
-- Each task belongs to at most one session at a time.
-- Session membership survives status changes, including completion and cancellation. Release is explicit.
+- Each task belongs to at most one session at a time, but not as a lock. Accept membership changes as instructed.
+- Session membership survives status changes, including completion and cancellation. Membership release is explicit.
 
 ## CLI interface
 
 All `aven agent` operational commands emit human-readable text by default. Every operational command accepts `--json` for successful output. Errors remain diagnostic text on stderr in both modes, as in the existing CLI.
 
-| Command | Behavior |
-| --- | --- |
-| `aven agent --help` or `aven help agent` | Show interface version, commands, and usage |
-| `aven agent session <SESSION> [FILTERS]` | List matching session tasks |
-| `aven agent assign <TASK_REF> --session <SESSION>` | Associate an unassigned task with this session |
-| `aven agent assign <TASK_REF> --session <NEW> --from-session <OLD>` | Transfer membership only if the task belongs to the expected old session |
-| `aven agent context <TASK_REF> --session <SESSION>` | Show task context after checking membership |
-| `aven agent start <TASK_REF> --session <SESSION>` | Check membership and readiness, then set task status to `active` |
-| `aven agent complete <TASK_REF> --session <SESSION>` | Check membership, then change an `active` task to `done` |
+| Command                                             | Behavior                                                |
+| --------------------------------------------------- | ------------------------------------------------------- |
+| `aven agent --help` or `aven help agent`            | Show interface version, commands, and usage             |
+| `aven agent session <SESSION> [FILTERS]`            | List matching session tasks                             |
+| `aven agent assign <TASK_REF> --session <SESSION>`  | Associate task with this session                        |
 | `aven agent release <TASK_REF> --session <SESSION>` | Remove matching membership without changing task status |
 
 Help identifies this interface as version 1. This version is the only public protocol metadata and is available in help only. There is no `--protocol-version` option or version negotiation.
@@ -55,13 +51,13 @@ Aven checks whether a task can start; it does not pick a worker or automatically
 
 Resolve the task, validate membership and task state, and apply each mutation within one local write transaction. Validation failure leaves both metadata and task status unchanged. Reuse existing mutation, undo, and sync machinery rather than writing database rows directly from command handlers.
 
-| Operation | Preconditions and result |
-| --- | --- |
-| Assign | Unassigned: assign membership. Already in the requested session: no change. Another session: fail. |
-| Transfer | Current session equals `--from-session`: transfer membership. Already in destination: no change, for safe retries. Any other state: fail. |
-| Start | Matching membership and ready `todo` task: set `active`. Matching membership and already `active`: no change. Otherwise: fail. |
-| Complete | Matching membership and `active`: set `done`. Matching membership and already `done`: no change. Otherwise: fail. |
-| Release | Matching membership: remove membership. Unassigned: no change. Another session: fail. |
+| Operation | Preconditions and result                                                                                                                  |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Assign    | Unassigned: assign membership. Already in the requested session: no change. Another session: fail.                                        |
+| Transfer  | Current session equals `--from-session`: transfer membership. Already in destination: no change, for safe retries. Any other state: fail. |
+| Start     | Matching membership and ready `todo` task: set `active`. Matching membership and already `active`: no change. Otherwise: fail.            |
+| Complete  | Matching membership and `active`: set `done`. Matching membership and already `done`: no change. Otherwise: fail.                         |
+| Release   | Matching membership: remove membership. Unassigned: no change. Another session: fail.                                                     |
 
 - Assignment and transfer do not change status, and may include completed or canceled tasks.
 - Validate membership before treating start or complete as an idempotent retry. A stale worker cannot complete another session's task.
