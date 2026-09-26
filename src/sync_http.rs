@@ -25,7 +25,7 @@ impl HttpDriver {
             .no_zstd()
             .no_deflate()
             .build()
-            .map_err(|_| anyhow::anyhow!("error bootstrap-transport"))?;
+            .map_err(|_| anyhow::anyhow!("error sync-transport"))?;
         Ok(Self { http })
     }
 
@@ -39,7 +39,7 @@ impl HttpDriver {
     }
 
     /// Answers every step of `session` until it finishes.
-    pub async fn drive<T>(&self, mut session: Session<'_, T>) -> Result<T> {
+    async fn drive<T>(&self, mut session: Session<'_, T>) -> Result<T> {
         loop {
             match session.next().await? {
                 Step::Done(value) => return Ok(value),
