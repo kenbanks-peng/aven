@@ -479,6 +479,27 @@ pub(crate) fn explain(
             next_step: "Remove it from another device in sync.",
         });
     }
+    if let Some(code) = first(UNSUPPORTED_CHANGE) {
+        return Some(Explanation {
+            code,
+            message: "Another device sent a change this version of Aven doesn't understand, so sync stopped here. Local tasks are safe and editable.",
+            next_step: "Update Aven on this device; edits made meanwhile sync after the update.",
+        });
+    }
+    if let Some(code) = first(BAD_RECORD) {
+        return Some(Explanation {
+            code,
+            message: "Sync stopped on a change it can't apply, to protect your data. Local tasks are safe and editable.",
+            next_step: match surface {
+                ErrorSurface::Cli => {
+                    "To keep syncing, rebuild sync on fresh server storage with `aven sync reset`: https://aven.raine.dev/sync/#rebuilding-sync"
+                }
+                ErrorSurface::Tui => {
+                    "To keep syncing, rebuild sync on fresh server storage; run `aven sync reset` and see https://aven.raine.dev/sync/#rebuilding-sync"
+                }
+            },
+        });
+    }
     if let Some(code) = first(&["enrollment-refused", "bootstrap-refused"]) {
         return Some(match action {
             ErrorAction::Join => Explanation {
@@ -500,6 +521,34 @@ pub(crate) fn explain(
     }
     None
 }
+
+/// A synced change uses an operation or value this version doesn't know.
+const UNSUPPORTED_CHANGE: &[&str] = &[
+    "encrypted-tail-operation-unsupported",
+    "encrypted-tail-domain",
+];
+
+/// A synced change, or this device's record of one, can never be applied or
+/// uploaded as it is, so every later sync stops at the same place.
+const BAD_RECORD: &[&str] = &[
+    "encrypted-tail-invalid",
+    "encrypted-tail-payload",
+    "encrypted-tail-json",
+    "encrypted-tail-projection",
+    "encrypted-tail-workspace",
+    "encrypted-tail-seed",
+    "encrypted-tail-authentication",
+    "encrypted-tail-generation",
+    "encrypted-tail-generation-rank",
+    "encrypted-tail-label-history",
+    "encrypted-tail-note-history",
+    "encrypted-tail-history-lost",
+    "encrypted-tail-mapping",
+    "encrypted-tail-apply",
+    "encrypted-tail-same-id-divergence",
+    "encrypted-tail-integrity-blocked",
+    "encrypted-tail-prefix-identity-collision",
+];
 
 fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
     let kind = error.chain().find_map(|cause| {
@@ -654,5 +703,58 @@ mod tests {
         let rejected = explain(ErrorAction::General, ErrorSurface::Tui, &error).unwrap();
         assert!(rejected.message.contains("expired, was replaced"));
         assert!(rejected.next_step.contains("`aven server setup`"));
+    }
+
+    #[test]
+    fn unsupported_changes_ask_for_an_update() {
+        for code in UNSUPPORTED_CHANGE {
+            let error = anyhow!("error {code}").context("error sync-round");
+            for surface in [ErrorSurface::Cli, ErrorSurface::Tui] {
+                let explanation = explain(ErrorAction::General, surface, &error).unwrap();
+                assert_eq!(explanation.code, *code);
+                assert!(explanation.message.contains("doesn't understand"));
+                assert!(explanation.message.contains("Local tasks are safe"));
+                assert!(explanation.next_step.contains("Update Aven"));
+                assert!(!explanation.combined().contains("reset"));
+            }
+        }
+    }
+
+    #[test]
+    fn bad_records_point_to_rebuilding_sync() {
+        for code in BAD_RECORD {
+            let error = anyhow!("error {code}").context("error sync-round");
+            for surface in [ErrorSurface::Cli, ErrorSurface::Tui] {
+                let explanation = explain(ErrorAction::General, surface, &error).unwrap();
+                assert_eq!(explanation.code, *code);
+                assert!(explanation.message.contains("to protect your data"));
+                assert!(
+                    explanation
+                        .message
+                        .contains("Local tasks are safe and editable")
+                );
+                assert!(explanation.next_step.contains("`aven sync reset`"));
+                assert!(explanation.next_step.contains("/sync/#rebuilding-sync"));
+            }
+        }
+        let error = anyhow::Error::from(aven_core::sync::encrypted_tail::PrefixIdentityCollision);
+        let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "encrypted-tail-prefix-identity-collision");
+    }
+
+    #[test]
+    fn transient_tail_failures_are_not_bad_records() {
+        for code in [
+            "encrypted-tail-http",
+            "encrypted-tail-reply",
+            "encrypted-tail-cursor",
+            "encrypted-tail-storage",
+        ] {
+            let error = anyhow!("error {code}");
+            assert_eq!(
+                explain(ErrorAction::General, ErrorSurface::Cli, &error),
+                None
+            );
+        }
     }
 }
