@@ -21,20 +21,7 @@ use crate::sync::wire::{AttachmentAddPayload, AttachmentDeletePayload, ChangeWir
 
 pub(crate) use task::adopt_generated_defaults;
 
-#[cfg(test)]
-pub async fn apply_remote_change(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    tracing::debug!(
-        change_id = %change.change_id,
-        op_type = %change.op_type,
-        entity_type = %change.entity_type,
-        entity_id = shared::safe_entity_id(change),
-        field = change.field.as_deref().unwrap_or(""),
-        "applying remote change"
-    );
-    apply_remote_change_quiet(conn, change).await
-}
-
-pub(crate) async fn apply_remote_change_quiet(
+pub(crate) async fn apply_remote_change(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
 ) -> Result<()> {

@@ -171,8 +171,9 @@ pub(super) fn decode_projection(input: &[u8]) -> Result<Projection> {
     let result = match r.take(1)?[0] {
         0 => Projection::None,
         1 => {
-            let action = r.take(1)?[0];
-            valid(action <= 2)?;
+            let action =
+                crate::sync::persistence::parent_liveness::ParentAction::from_byte(r.take(1)?[0])
+                    .ok_or_else(|| anyhow::anyhow!("error encrypted-tail-invalid"))?;
             let workspace = std::str::from_utf8(r.blob(256)?)?.to_owned();
             let task = std::str::from_utf8(r.blob(256)?)?.to_owned();
             let deleted = r.take(1)?[0];
@@ -187,7 +188,10 @@ pub(super) fn decode_projection(input: &[u8]) -> Result<Projection> {
                     && !task.is_empty()
                     && version.as_ref().is_none_or(|s| !s.is_empty()),
             )?;
-            valid(action != 0 || (deleted == 0 && version.is_some()))?;
+            valid(
+                action != crate::sync::persistence::parent_liveness::ParentAction::Create
+                    || (deleted == 0 && version.is_some()),
+            )?;
             Projection::Parent {
                 action,
                 workspace,

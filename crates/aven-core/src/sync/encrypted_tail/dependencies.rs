@@ -140,7 +140,7 @@ pub(super) async fn reconcile(
             let change = super::client::load_change(conn, &id)
                 .await?
                 .context("error encrypted-dependency-history")?;
-            crate::sync::apply::apply_remote_change_quiet(conn, &change).await?;
+            crate::sync::apply::apply_remote_change(conn, &change).await?;
         }
     }
     Ok(())

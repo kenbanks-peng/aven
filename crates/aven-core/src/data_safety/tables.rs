@@ -529,15 +529,3 @@ pub(crate) async fn import_conflicts(
     }
     Ok(())
 }
-
-#[allow(dead_code)]
-pub(crate) async fn import_meta(tx: &mut SqliteConnection, rows: &[super::MetaRow]) -> Result<()> {
-    for row in rows {
-        sqlx::query("INSERT INTO meta(key, value) VALUES (?, ?)")
-            .bind(&row.key)
-            .bind(&row.value)
-            .execute(&mut *tx)
-            .await?;
-    }
-    Ok(())
-}

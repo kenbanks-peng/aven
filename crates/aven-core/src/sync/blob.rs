@@ -31,18 +31,14 @@ impl Database {
             let path = crate::attachments::storage::object_path(blob_dir, &sha256)?;
             match std::fs::metadata(path) {
                 Ok(metadata) if metadata.is_file() => {}
-                Ok(_) => {
-                    missing.count += 1;
-                    missing.bytes += u64::try_from(byte_size)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    missing.count += 1;
-                    missing.bytes += u64::try_from(byte_size)?;
-                }
-                Err(error) => {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                     return Err(error).with_context(|| {
                         format!("error setup-image-file task={task:?} attachment={attachment:?}")
                     });
+                }
+                Ok(_) | Err(_) => {
+                    missing.count += 1;
+                    missing.bytes += u64::try_from(byte_size)?;
                 }
             }
         }

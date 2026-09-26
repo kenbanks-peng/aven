@@ -128,7 +128,7 @@ async fn label_administration_assigns_presence_and_existence_in_tail_order() {
     for c in [&add, &delete] {
         insert_wire_change(&mut conn, c).await.unwrap();
     }
-    crate::sync::apply::apply_remote_change_quiet(&mut conn, &add)
+    crate::sync::apply::apply_remote_change(&mut conn, &add)
         .await
         .unwrap();
     assert_eq!(labels(&mut conn).await, ["tag"]);
@@ -154,10 +154,10 @@ async fn label_administration_assigns_presence_and_existence_in_tail_order() {
         json!({"new_name": "topic", "renamed_at": "t"}),
     );
     insert_wire_change(&mut conn, &away).await.unwrap();
-    crate::sync::apply::apply_remote_change_quiet(&mut conn, &away)
+    crate::sync::apply::apply_remote_change(&mut conn, &away)
         .await
         .unwrap();
-    crate::sync::apply::apply_remote_change_quiet(&mut conn, &add)
+    crate::sync::apply::apply_remote_change(&mut conn, &add)
         .await
         .unwrap();
     assert_eq!(labels(&mut conn).await, ["tag", "topic"]);
@@ -194,7 +194,7 @@ async fn reapplied_rename_keeps_later_pending_commands_on_the_new_name() {
         .execute(&mut *conn)
         .await
         .unwrap();
-    crate::sync::apply::apply_remote_change_quiet(&mut conn, &remote_add)
+    crate::sync::apply::apply_remote_change(&mut conn, &remote_add)
         .await
         .unwrap();
     reconcile(&mut conn, 10, &remote_add).await.unwrap();

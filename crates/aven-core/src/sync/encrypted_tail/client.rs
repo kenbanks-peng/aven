@@ -232,7 +232,7 @@ async fn apply_new_remote_change(
     if related {
         persistence::insert_wire_change(conn, change).await?;
     }
-    crate::sync::apply::apply_remote_change_quiet(conn, change)
+    crate::sync::apply::apply_remote_change(conn, change)
         .await
         .map_err(|_| anyhow::anyhow!("error encrypted-tail-apply"))?;
     if !related {

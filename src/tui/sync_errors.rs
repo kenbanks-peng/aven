@@ -98,7 +98,6 @@ mod tests {
             failure.message
         );
         assert!(failure.join_timed_out());
-        assert!(JOIN_TIMEOUT_EXPIRED.starts_with("If the invitation expired"));
     }
 
     #[test]

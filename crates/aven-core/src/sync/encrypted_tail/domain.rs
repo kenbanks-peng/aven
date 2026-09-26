@@ -22,7 +22,7 @@ pub(super) enum Projection {
         reference: String,
     },
     Parent {
-        action: u8,
+        action: crate::sync::persistence::parent_liveness::ParentAction,
         workspace: String,
         task: String,
         deleted: bool,
@@ -76,7 +76,7 @@ impl Projection {
         else {
             return vec![0];
         };
-        let mut out = vec![1, *action];
+        let mut out = vec![1, *action as u8];
         codec::encode_text(&mut out, workspace);
         codec::encode_text(&mut out, task);
         out.push(u8::from(*deleted));
@@ -325,7 +325,7 @@ pub(super) fn validate(c: &ChangeWire) -> Result<Projection> {
         seed.parse::<crate::ids::TaskId>()
             .map_err(|_| anyhow::anyhow!("error encrypted-tail-seed"))?;
         return Ok(Projection::Parent {
-            action: 0,
+            action: crate::sync::persistence::parent_liveness::ParentAction::Create,
             workspace: workspace.into(),
             task: c.entity_id.clone(),
             deleted: false,
@@ -341,7 +341,11 @@ pub(super) fn validate(c: &ChangeWire) -> Result<Projection> {
                 .is_none_or(|v| !v.is_empty() && v.len() <= 256),
         )?;
         return Ok(Projection::Parent {
-            action: if c.op_type == "set_field" { 1 } else { 2 },
+            action: if c.op_type == "set_field" {
+                crate::sync::persistence::parent_liveness::ParentAction::Set
+            } else {
+                crate::sync::persistence::parent_liveness::ParentAction::ForceResolve
+            },
             workspace: workspace.into(),
             task: c.entity_id.clone(),
             deleted: p["value"] == "1",

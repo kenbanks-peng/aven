@@ -13,11 +13,15 @@ use super::{ProtectedLocalKeyStoreErrorKind, StoreResult, error};
 pub const KEYRING_ITEM: &str = "keyring";
 
 /// Holds a namespace's exclusive lock until dropped.
-pub struct ProtectedStorageLock(#[allow(dead_code)] Box<dyn Send + Sync>);
+pub struct ProtectedStorageLock {
+    _guard: Box<dyn Send + Sync>,
+}
 
 impl ProtectedStorageLock {
     pub fn new(guard: impl Send + Sync + 'static) -> Self {
-        Self(Box::new(guard))
+        Self {
+            _guard: Box::new(guard),
+        }
     }
 }
 

@@ -5,7 +5,7 @@ use super::codec::*;
 use super::domain::Mapping;
 use super::{Error, Result};
 use crate::data_safety::export_types::ExportTables;
-use crate::sync::persistence::parent_liveness::ParentState;
+use crate::sync::persistence::parent_liveness::{ParentAction, ParentState};
 
 pub(super) fn prefix(t: &ExportTables) -> Result<Vec<(u64, String)>> {
     let mut rows = t
@@ -83,11 +83,11 @@ pub(super) fn images(t: &ExportTables, mappings: &[Mapping], mut result: Images)
             .or_default();
         state.apply(
             if change.op_type == "create_task" {
-                0
+                ParentAction::Create
             } else if change.op_type == "resolve_field" {
-                2
+                ParentAction::ForceResolve
             } else {
-                1
+                ParentAction::Set
             },
             &change.change_id,
             payload["value"].as_str() == Some("1"),

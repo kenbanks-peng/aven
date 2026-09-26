@@ -15,7 +15,7 @@ const PRIVATE_DIR_MODE: u32 = 0o700;
 const PRIVATE_FILE_MODE: u32 = 0o600;
 
 /// Options that create a new owner-only file and refuse any existing entry.
-pub fn create_new_options() -> OpenOptions {
+fn create_new_options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

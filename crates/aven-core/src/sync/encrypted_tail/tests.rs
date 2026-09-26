@@ -98,7 +98,8 @@ fn strict_json_and_numeric_equality() {
 fn parent_projection_limits_and_domain_binding() {
     for action in 0..=2 {
         let p = Projection::Parent {
-            action,
+            action: crate::sync::persistence::parent_liveness::ParentAction::from_byte(action)
+                .unwrap(),
             workspace: "w".repeat(256),
             task: "t".repeat(256),
             deleted: false,
@@ -112,7 +113,7 @@ fn parent_projection_limits_and_domain_binding() {
     let p = domain::validate(&c).unwrap();
     assert!(
         p == Projection::Parent {
-            action: 1,
+            action: crate::sync::persistence::parent_liveness::ParentAction::Set,
             workspace: "0000000000000000".into(),
             task: c.entity_id.clone(),
             deleted: true,
@@ -124,7 +125,7 @@ fn parent_projection_limits_and_domain_binding() {
     assert!(matches!(
         domain::validate(&c).unwrap(),
         Projection::Parent {
-            action: 2,
+            action: crate::sync::persistence::parent_liveness::ParentAction::ForceResolve,
             version: None,
             ..
         }

@@ -15,10 +15,10 @@ use std::sync::Arc;
 
 use aven_core::sync::client::keys::{FileProtectedStorage, ProtectedStorage, StoreResult};
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(not(test))]
 const STORE_DIRECTORY: &str = "protected-keys";
 #[cfg(target_os = "macos")]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(not(test))]
 const KEYCHAIN_SERVICE: &str = "fi.zendit.Aven.local-package-keyring";
 
 /// This installation's protected key storage.
@@ -38,7 +38,7 @@ fn error(kind: ProtectedLocalKeyStoreErrorKind) -> ProtectedLocalKeyStoreError {
     ProtectedLocalKeyStoreError::new(kind)
 }
 
-#[cfg_attr(test, allow(dead_code))]
+#[cfg(not(test))]
 fn protected_store_directory() -> StoreResult<std::path::PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(std::path::PathBuf::from)

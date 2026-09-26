@@ -163,7 +163,7 @@ pub(crate) fn validate_operation(
             &["key"],
         )?;
     }
-    if op == "publish_device_label" {
+    if op == crate::change_log::op_type::PUBLISH_DEVICE_LABEL {
         let label = payload
             .get("label")
             .and_then(Value::as_str)

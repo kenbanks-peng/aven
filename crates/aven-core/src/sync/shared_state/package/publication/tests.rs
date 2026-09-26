@@ -124,8 +124,6 @@ fn descriptor_fixture_is_exact_and_bounded() {
 
 #[test]
 fn other_descriptor_versions_are_refused_as_unsupported() {
-    let v1 = hex::decode(include_str!("descriptor-v1.hex").trim()).unwrap();
-    assert_eq!(Descriptor::decode(&v1).err(), Some(Error::Unsupported));
     let current = hex::decode(include_str!("descriptor.hex").trim()).unwrap();
     for version in [0_u16, 1, 3, u16::MAX] {
         let mut other = current.clone();

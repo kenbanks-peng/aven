@@ -1,3 +1,22 @@
+/// How an accepted change touches a task's deleted field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParentAction {
+    Create = 0,
+    Set = 1,
+    ForceResolve = 2,
+}
+
+impl ParentAction {
+    pub fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Create),
+            1 => Some(Self::Set),
+            2 => Some(Self::ForceResolve),
+            _ => None,
+        }
+    }
+}
+
 /// Accepted-order conservative retention, independent of decrypted task storage.
 #[derive(Default)]
 pub(crate) struct ParentState {
@@ -12,12 +31,14 @@ impl ParentState {
             self.version.is_none() || self.version.as_deref() != version || self.deleted != deleted;
     }
 
-    pub fn apply(&mut self, action: u8, id: &str, deleted: bool, version: Option<&str>) {
-        if action == 0 {
+    pub fn apply(&mut self, action: ParentAction, id: &str, deleted: bool, version: Option<&str>) {
+        if action == ParentAction::Create {
             if self.version.is_none() {
                 self.version = version.map(str::to_owned);
             }
-        } else if self.version.is_none() || (action == 1 && version != self.version.as_deref()) {
+        } else if self.version.is_none()
+            || (action == ParentAction::Set && version != self.version.as_deref())
+        {
             self.protected = true;
         } else {
             self.deleted = deleted;
@@ -36,7 +57,12 @@ mod tests {
     fn project(history: &[(&str, u8, bool, Option<&str>)]) -> bool {
         let mut state = ParentState::default();
         for (id, action, deleted, version) in history {
-            state.apply(*action, id, *deleted, *version);
+            state.apply(
+                ParentAction::from_byte(*action).unwrap(),
+                id,
+                *deleted,
+                *version,
+            );
         }
         state.deleted && state.version.is_some() && !state.protected
     }
