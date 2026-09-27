@@ -14,9 +14,6 @@ The sync server is not a backup. Only your devices hold the decryption keys;
 if all devices are lost, the server cannot restore your data. Keep
 [backups](/backups/) or add another device.
 
-A database that has not been set up or joined stays local. Everything except
-sync keeps working.
-
 In the TUI, the **Sync** dialog covers the same steps: open it with `:sync`,
 `C s`, or a click on the sync indicator in the header. Once sync is set up, it
 shows the sync status, the server, and whether automatic sync is on, plus
