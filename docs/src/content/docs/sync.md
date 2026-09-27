@@ -20,6 +20,12 @@ local data.
 
 ## Start a server
 
+The sync server is a single `aven server` process that you host yourself on a
+machine all your devices can reach. The recommended setup is a private network
+such as Tailscale or WireGuard: devices connect to the server's VPN address,
+and nothing is exposed to the internet. To reach the server over the public
+internet instead, put it behind a TLS reverse proxy.
+
 Prepare server storage once, giving the URL devices will use to reach it:
 
 ```sh
