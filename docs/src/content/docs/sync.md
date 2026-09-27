@@ -3,7 +3,7 @@ title: Sync across devices
 description: Synchronize Aven data with end-to-end encryption, resolve conflicts, and diagnose sync state.
 ---
 
-Sync keeps the same aven tasks available across laptops, agents, and other devices. Each client writes to its own local SQLite database first, so task capture and updates stay fast and offline-friendly.
+Sync keeps the same aven tasks available across laptops, agents, and other devices. Each client writes to its own local SQLite database first, so task capture and updates stay fast and work offline.
 
 Sync is end-to-end encrypted. Devices encrypt tasks, history, and images before
 upload; the self-hosted server stores ciphertext and cannot read your data. One
