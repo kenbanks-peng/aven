@@ -179,6 +179,29 @@ async fn filesystem_lookalike_keeps_wal_and_concurrent_connections() {
     pool.close().await;
 }
 
+#[test]
+fn concurrent_first_opens_of_one_file_all_succeed() {
+    for _ in 0..20 {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("aven.sqlite");
+        let opens: Vec<_> = (0..4)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(async { open_db(&path).await.map(|_| ()) })
+                })
+            })
+            .collect();
+        for open in opens {
+            open.join().unwrap().unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn recurrence_migration_enforces_schedule_immutability_and_task_conflict_compatibility() {
     let (_temp, mut conn) = crate::test_support::test_conn().await;
