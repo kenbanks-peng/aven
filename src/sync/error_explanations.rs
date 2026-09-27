@@ -199,12 +199,13 @@ pub(crate) fn explain(
             },
         });
     }
-    if let Some(explanation) = protected_key_store_explanation(error) {
+    if let Some(explanation) = protected_key_store_explanation(surface, error) {
         return Some(explanation);
     }
     if has("enrollment-protected-missing") {
         return Some(protected_key_store_kind_explanation(
             ProtectedLocalKeyStoreErrorKind::MissingAuthority,
+            surface,
         ));
     }
     if first(&[
@@ -217,11 +218,13 @@ pub(crate) fn explain(
     {
         return Some(protected_key_store_kind_explanation(
             ProtectedLocalKeyStoreErrorKind::Corrupt,
+            surface,
         ));
     }
     if has("enrollment-protected-write") {
         return Some(protected_key_store_kind_explanation(
             ProtectedLocalKeyStoreErrorKind::WriteFailed,
+            surface,
         ));
     }
     if has("sync-setup-storage-already-claimed") {
@@ -604,26 +607,43 @@ const BAD_RECORD: &[&str] = &[
     "encrypted-image-projection",
 ];
 
-fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
+fn protected_key_store_explanation(surface: ErrorSurface, error: &Error) -> Option<Explanation> {
     let kind = error.chain().find_map(|cause| {
         cause
             .downcast_ref::<ProtectedLocalKeyStoreError>()
             .map(ProtectedLocalKeyStoreError::kind)
     })?;
-    Some(protected_key_store_kind_explanation(kind))
+    Some(protected_key_store_kind_explanation(kind, surface))
 }
 
 #[cfg(target_os = "macos")]
-fn protected_storage_unavailable_next_step() -> &'static str {
-    "Unlock the login Keychain. After rebuilding Aven, run `aven sync` in a terminal and choose Always Allow on the Aven Keychain request."
+fn protected_storage_unavailable_next_step(surface: ErrorSurface) -> &'static str {
+    match surface {
+        ErrorSurface::Cli => {
+            "Unlock the login Keychain. Retry the command and choose Always Allow on the Aven Keychain request."
+        }
+        ErrorSurface::Tui => {
+            "Unlock the login Keychain. Choose Sync now, then choose Always Allow on the Aven Keychain request."
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn protected_storage_unavailable_next_step() -> &'static str {
-    "Check that the protected state directory is readable and writable only by your user, then retry the same command."
+fn protected_storage_unavailable_next_step(surface: ErrorSurface) -> &'static str {
+    match surface {
+        ErrorSurface::Cli => {
+            "Check that the protected state directory is readable and writable only by your user, then retry the same command."
+        }
+        ErrorSurface::Tui => {
+            "Check that the protected state directory is readable and writable only by your user, then retry the action."
+        }
+    }
 }
 
-fn protected_key_store_kind_explanation(kind: ProtectedLocalKeyStoreErrorKind) -> Explanation {
+fn protected_key_store_kind_explanation(
+    kind: ProtectedLocalKeyStoreErrorKind,
+    surface: ErrorSurface,
+) -> Explanation {
     match kind {
         ProtectedLocalKeyStoreErrorKind::MissingAuthority => Explanation {
             code: "protected-key-storage-missing",
@@ -633,7 +653,7 @@ fn protected_key_store_kind_explanation(kind: ProtectedLocalKeyStoreErrorKind) -
         ProtectedLocalKeyStoreErrorKind::Unavailable => Explanation {
             code: "protected-key-storage-unavailable",
             message: "Protected sync key storage is unavailable.",
-            next_step: protected_storage_unavailable_next_step(),
+            next_step: protected_storage_unavailable_next_step(surface),
         },
         ProtectedLocalKeyStoreErrorKind::Corrupt => Explanation {
             code: "protected-key-storage-unsafe",
@@ -676,6 +696,25 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
+
+    #[test]
+    fn unavailable_protected_storage_uses_surface_specific_recovery() {
+        let error = anyhow::Error::new(ProtectedLocalKeyStoreError::new(
+            ProtectedLocalKeyStoreErrorKind::Unavailable,
+        ));
+        let cli = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+        let tui = explain(ErrorAction::General, ErrorSurface::Tui, &error).unwrap();
+
+        assert!(!tui.next_step.contains("terminal"), "{}", tui.next_step);
+        assert!(!tui.next_step.contains("rebuild"), "{}", tui.next_step);
+        assert_ne!(cli.next_step, tui.next_step);
+        #[cfg(target_os = "macos")]
+        {
+            assert!(tui.next_step.contains("Sync now"), "{}", tui.next_step);
+            assert!(tui.next_step.contains("Always Allow"), "{}", tui.next_step);
+            assert!(!cli.next_step.contains("Sync now"), "{}", cli.next_step);
+        }
+    }
 
     #[test]
     fn network_explanation_keeps_stable_code_without_promising_an_outcome() {
