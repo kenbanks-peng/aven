@@ -142,6 +142,10 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
     }
+    let _setup = match storage {
+        DatabaseStorage::File => Some(lock_database_setup(options.get_filename()).await?),
+        DatabaseStorage::InMemory => None,
+    };
     options = options
         .create_if_missing(true)
         .foreign_keys(true)
@@ -171,6 +175,29 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
     crate::epic_membership::recover(&mut tx, false).await?;
     tx.commit().await?;
     Ok(pool)
+}
+
+/// Serializes opening one database file across connections and processes.
+/// Enabling WAL and running migrations are not safe to run concurrently.
+async fn lock_database_setup(path: &Path) -> Result<fs::File> {
+    let mut name = path
+        .file_name()
+        .context("database path has no file name")?
+        .to_os_string();
+    name.push(".aven-open.lock");
+    let lock_path = path.with_file_name(name);
+    tokio::task::spawn_blocking(move || {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("could not open {}", lock_path.display()))?;
+        lock.lock()
+            .with_context(|| format!("could not lock {}", lock_path.display()))?;
+        Ok(lock)
+    })
+    .await?
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
