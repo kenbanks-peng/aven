@@ -10,13 +10,9 @@ upload; the self-hosted server stores ciphertext and cannot read your data. One
 device starts the sync from its database, and each other device joins with an
 invitation from a device that already syncs.
 
-The sync server is not a backup. Only your devices hold the decryption keys;
-if all devices are lost, the server cannot restore your data. Keep
-[backups](/backups/) or add another device.
-
-Use [Configuration](/configuration/) for `sync.*` and `daemon.*` settings. See
-[Back up and restore](/backups/) when you need to preserve, move, or recover
-local data.
+The sync server is not a backup. Only your devices hold the decryption keys, so
+if every device is lost, the server cannot restore your data. Keep regular
+[backups](/backups/).
 
 ## Start a server
 
@@ -24,42 +20,24 @@ The sync server is a single `aven server` process that you host yourself on a
 machine all your devices can reach. The recommended setup is a private network
 such as Tailscale or WireGuard: devices connect to the server's VPN address,
 and nothing is exposed to the internet. To reach the server over the public
-internet instead, put it behind a TLS reverse proxy.
+internet instead, put it behind a TLS reverse proxy and use its HTTPS URL.
 
-Prepare server storage once, giving the URL devices will use to reach it:
-
-```sh
-aven server setup --data ~/.local/state/aven/sync-server.sqlite --url https://sync.example.com
-```
-
-The command prints a setup invitation. It expires after one hour; until a
-device claims the server, running setup again replaces it. Anyone with the
-invitation can claim the server, so hand it only to the device whose data
-should start the sync.
-
-Then serve the storage:
+Prepare server storage once, giving the URL devices will use to reach it, then
+serve it:
 
 ```sh
-aven server --data ~/.local/state/aven/sync-server.sqlite --bind 127.0.0.1:3746
+aven server setup --data ~/.local/state/aven/sync-server.sqlite --url http://100.100.20.30:3746
+aven server --data ~/.local/state/aven/sync-server.sqlite --bind 100.100.20.30:3746
 ```
 
-The server does not terminate TLS. The URL passed to `server setup` must be an
-HTTP or HTTPS origin, with no path, query, or credentials, and at most 255
-bytes. HTTPS works through a TLS reverse proxy. HTTP is supported for direct
-connections over a trusted VPN, where the VPN independently protects the
-connection.
+`server setup` prints a setup invitation for the next step. Anyone with it can
+claim the server, so use it only on the device whose data should start the
+sync. It expires after one hour; run `server setup` again for a new one.
 
-By default the server binds only to loopback. For direct VPN access, bind it to
-its VPN address, such as `--bind 100.100.20.30:3746`. Loopback, private, and VPN
-addresses need no additional flag. Public and wildcard addresses require
-`--unsafe-public-bind`. Device credentials, setup invitations, server
-identifiers, and traffic metadata are outside Aven's end-to-end encrypted
-payload, so every network hop must be protected by a trusted VPN, TLS, or an
-otherwise private network.
+See [`aven server`](/command-reference/#aven-server) for URL rules and bind
+options.
 
-Server storage used by the unencrypted sync of earlier releases is not
-supported. `aven server` and `aven server setup` refuse storage that holds
-change history; prepare a new path instead.
+### Run the server as a service
 
 Once sync works, run `aven server` under your operating system's service
 manager so it starts at boot. On Linux, a systemd user service works; save this
@@ -95,405 +73,217 @@ be up; if the server fails at boot, systemd retries it every five seconds.
 
 ## Set up sync from one device
 
-On the device whose data should start the sync, paste the setup invitation:
+On the device whose data should start the sync, run setup and paste the setup
+invitation:
 
 ```sh
 aven sync setup
 ```
 
-Setup previews the database and asks for confirmation. The preview checks the
-image files themselves; missing images are listed and published as unavailable
-instead of stopping setup. When standard input is not a terminal, pipe the
-invitation and pass `--yes`. Every other device starts from this data. Afterwards
-you can still create backups, but restore and import are refused on this
-database. Rerun the same command to resume an interrupted setup.
+Setup shows the server and what this database will publish, then asks for
+confirmation. Every other device starts from this data.
 
 In the TUI, open the Sync dialog with `:sync`, `C s`, or a click on the sync
-indicator in the header, choose **Set up sync**, and paste the invitation.
-The invitation is never displayed. Before anything starts, the dialog shows the
-server, the workspaces and tasks this database will publish, and any images
-missing on this computer, which other devices see as unavailable. Setup keeps
-running if you close the dialog, and the header shows it is syncing. If setup
-stops, for example because the server is unreachable, the dialog offers
-**Resume setup**, which continues the same setup instead of starting over. An
-unknown claim outcome keeps this resumable snapshot because the server may have
-accepted it before the connection failed. After restarting the TUI, resuming
-asks for the same invitation again.
+indicator in the header, and choose **Set up sync**.
 
-Setup claims the server before the database is marked as syncing. If the server
-already belongs to another sync, or definitely rejects the invitation, the
-database remains local-only and no setup snapshot is frozen. A setup invitation
-lasts one hour; when the server can tell that the pasted invitation expired, setup
-says so, and running `aven server setup` again prints a new one. After a rejected
-or expired invitation, the Sync dialog offers **Set up sync** to paste a new one. To use an
-existing sync, join it from an empty database instead. A database fenced by an older
-setup attempt can report that recovery is required after the server confirms it
-belongs to another sync. Local editing and export still work; back it up and
-restore it to a new path to recover a local-only copy.
+If setup is interrupted, run the same command again, or choose **Resume
+setup**, to continue.
 
 ## Add a device
 
-On a device that already syncs, create a device invitation and keep the command
+On a device that already syncs, create an invitation and leave the command
 running:
 
 ```sh
 aven sync invite
 ```
 
-The command prints an `AVEN:` invitation to standard output and, in
-an interactive terminal, also shows it as a QR code. Its eventual **Device
-added** message goes to standard error, so redirected standard output contains
-only the invitation. In the TUI, choose **Add device** in the
-Sync dialog, or `:add-device`, to show the QR code, the time left, and the join
-command for the other device. If the invitation can't be created, the page says
-why; press Enter to try again. The TUI keeps waiting after you close the overlay
-and shows the open invitation in the header and Sync dialog. To paste the
-invitation on another computer, press `c` in the overlay to copy it; the TUI
-never copies it otherwise. If clipboard support is unavailable, run
-`aven sync invite` in a terminal instead. Treat the copied invitation like a
-password and clear the clipboard after pasting.
+It prints the invitation and shows it as a QR code. In the TUI, choose **Add
+device** in the Sync dialog.
 
-On the new device, use an empty database and paste the invitation:
+:::caution[Keep invitations private]
+Anyone with the invitation can read all synced data and manage devices. It
+expires after ten minutes. To cancel it early, press Ctrl-C or run
+`aven sync invite --cancel`.
+:::
+
+On the new device, join from an empty database and paste the invitation:
 
 ```sh
 aven sync join
 ```
 
-On a terminal, Aven hides the pasted invitation, shows the server, and asks for
-confirmation. Use `--yes` when piping the invitation. In the TUI, choose **Join
-existing sync** in the Sync dialog, paste the invitation, and confirm the server. A database that already has tasks or other
-data cannot join, because existing local data cannot be merged with synced data
-yet; the dialog explains this and changes nothing. While joining waits for the
-inviting device and downloads tasks, the TUI pauses adding tasks, projects,
-labels, and workspaces. Once tasks arrive they appear in the list while images
-keep downloading. **Resume joining** or rerunning `aven sync join` continues an
-interrupted join without asking for the invitation. If the inviting device does not add this one in time, keep it waiting and
-resume. A timeout does not show whether the invitation expired. If it expired,
-create a new invitation on the same inviting device and continue with it:
-**Use a new invitation** in the TUI, or `aven sync join --new-invitation` on the
-command line. This device keeps its identity, and the earlier invitation is
-kept, so if the other device already added this one with it, joining finishes
-with that admission. If the database reaches its invitation limit, resuming
-still finishes if the other device added it with any retained invitation. If
-none was accepted, or local data was added while joining, it cannot finish
-joining; keep it as it is and join from a new, empty database.
+Confirm the server, and your tasks download, followed by their images. In the
+TUI, choose **Join existing sync**. If joining is interrupted, run
+`aven sync join` again, or choose **Resume joining**.
 
-Anyone with the invitation can access all synced data and manage devices. It
-expires after ten minutes. Rerunning `aven sync invite` resumes an open
-invitation, reports its declared expiry, and waits only for the time left.
-`aven sync status` reports whether an invitation is open and its expiry.
-
-Before keys have been sent, stop the CLI command with Ctrl-C or run
-`aven sync invite --cancel`; in the TUI choose **Cancel invitation**. This
-retires the invitation locally and asks the server to stop the waiting joiner.
-A running `aven sync invite` whose invitation is cancelled from another command
-or the TUI stops waiting and exits with an error (`sync-invitation-cancelled`).
-After keys may have been sent, cancellation cannot close it early: Aven reports
-its expiry, and the next sync changes keys after it expires.
-
-Sync on the inviting device keeps running while the invitation is open, so a
-device that receives keys can read changes made in the meantime. If the
-invitation expires after keys may have been sent to a device that never joined,
-the next sync changes keys before uploading new changes.
-Until that succeeds, sync still downloads changes from other devices but keeps
-changes made here waiting, and `aven sync` reports why. That device can still
-read anything it received.
-
-## Manage devices
-
-List the devices that take part in sync:
+A database that already has tasks cannot join, because Aven cannot merge
+existing local data into sync. Join with a new database path instead, and use
+that path from then on:
 
 ```sh
-aven sync device list
-aven sync device list --json
+aven --db /path/to/new.sqlite sync join
 ```
 
-The list combines the server's current membership with automatic labels kept
-inside the encrypted synced data. On macOS the label is the Computer Name from
-System Settings; on Linux it is the hostname. The server never sees the label.
-Older devices without one appear by ID prefix only, and duplicate labels remain
-distinguishable by that prefix. Text output is a compact table; JSON keeps the
-full `device_id` and `admission_sequence` and adds `label`.
+## Automate sync with the daemon
 
-Remove another device with its full ID or a unique prefix of at least four
-hexadecimal characters:
+The daemon syncs in the background: after local edits, periodically, and with
+retries after failures. Enable automatic sync and install it as a service:
 
 ```sh
-aven sync device remove DEVICE_ID
-aven sync device remove DEVICE_ID --json
+aven config set sync.enabled true
+aven daemon install
 ```
 
-Removal stops the device from syncing and rotates the keys for future
-changes. If a prefix matches more than one current device, the command lists
-the matches instead of choosing one. The result is `complete`, or `pending`
-while key rotation is unfinished; rerunning the command, or syncing any
-remaining device, finishes it. If the command is interrupted, use the full ID
-selected by the first attempt to resume. Removal does not erase anything on the
-removed device: it keeps the
-tasks and images it already downloaded. Devices must be removed from another
-device: a device cannot remove itself, and there is no leave command.
+On macOS this installs a user LaunchAgent; on Linux, a systemd user service.
+On Linux, run `loginctl enable-linger` so it keeps running after you log out.
+`aven daemon status` shows whether the service is installed and running. See
+[`aven daemon`](/command-reference/#aven-daemon) for the other subcommands.
 
-In the TUI, choose **Manage devices** in the Sync dialog. The list is checked
-with the server when it opens and says when it was checked. Each device appears
-on one row with its automatic label, when available, the shortest ID prefix
-that tells it apart, and **This device** for the current one. Select a device to
-see its name and ID, and press `y` to copy the full ID. Press Enter on another
-device and confirm to remove it; the current device can be removed only from
-another device. The dialog reports
-access removal and key rotation separately, and offers **Finish removal** while
-rotation is unfinished. A server refusal means the removal could not be
-confirmed, not that it happened.
-
-### Device change limit
-
-A sync supports a limited number of device changes over its lifetime. Adding a
-device is one change. Removing a device is two: the removal and the key
-rotation that follows it. Changing keys after an invitation expired when it may
-have sent keys also takes two. A sync allows 256 changes, and at most 63 of them
-can be key rotations. Inviting a device needs room for that key change, in case
-the invitation expires after sending keys. Once a limit
-is reached, devices can no longer be added or removed, and `aven sync invite`,
-`aven sync device remove` and the Sync dialog say so.
-
-To keep changing devices, start a new sync. Back up a device that is up to
-date with `aven backup`. Then follow
-[Recover from device loss](#recover-from-device-loss): restore the backup to a
-fresh database path, set up a new sync on new server storage, and join the
-other devices from empty databases.
-
-## Sync a client
+## Sync manually
 
 ```sh
 aven sync
-aven sync --json
 ```
 
-Each sync exchanges bounded rounds until tasks are up to date and image
-transfers settle. Text and JSON output report sent and received changes, open
-conflicts, and how many conflicts were newly created in that run. New conflicts
-are identified by their conflict identities, not by comparing counts. Sync
-always uses the server chosen during setup or join.
-
-In the TUI, press `S` to sync, or choose **Sync now** in the Sync dialog;
-progress shows in the status line and header. The dialog also shows the sync
-status, the server, whether automatic sync is on, and any pending changes and
-conflicts. Press `d` in it for diagnostic details.
-
-Check local state without contacting the server:
-
-```sh
-aven sync status
-aven sync status --json
-```
-
-The status report shows whether the database is set up, the server, whether
-local changes wait to sync, open conflicts, and pending image uploads and
-downloads. JSON includes `devices`, the count from local verified membership
-(or `null` when unavailable). With exactly one device, the CLI and TUI show a
-reminder to keep backups or add a device. Text output omits the internal server
-position; JSON retains it. If the
-server refuses this device's credentials, the status persists
-`access-refused` with the time of the refusal. This does not prove that the
-device was removed; check from another device. Local tasks and images remain
-available, and any later request the server accepts, such as a sync or device
-list, clears the refusal. Timeouts and server failures are not refusals. The TUI
-shows a red sync error and offers **Sync now** and cancelling an open
-invitation, but disables device management until a request succeeds. JSON is a versioned report intended for scripts and omits keys,
-invitations, and task content.
-
-CLI failures show a plain explanation, a next step, and a stable code in square
-brackets. Full internal error chains go to the log instead of standard error.
+The output lists the changes sent and received and any new conflicts. In the
+TUI, press `S`, or choose **Sync now** in the Sync dialog.
 
 ### Image attachments during sync
 
 Images sync after their tasks. If sync reports that images are still
-transferring, run `aven sync` again or let the running daemon finish in the
-background. An image added here that is missing from this computer blocks later
-changes from uploading until it is available.
+transferring, run `aven sync` again or let the daemon finish in the background.
 
-## Automate sync with the daemon
-
-The daemon performs background sync for the configured local SQLite database.
+## Check sync status
 
 ```sh
-aven daemon
+aven sync status
 ```
 
-Daemon sync requires `sync.enabled = true`. The wake address must be loopback.
-Until the database is set up or joined, the daemon waits without contacting any
-server.
+Status reads local state without contacting the server. It shows the server,
+local changes waiting to sync, open conflicts, and pending image transfers. The
+Sync dialog in the TUI shows the same overview and whether automatic sync is
+on.
 
-The daemon wakes after successful local mutations when possible, syncs
-periodically, continues promptly while work remains, and backs off after
-failures. Local edits do not bypass a pending retry delay. You can run
-`aven sync` to retry immediately.
+If the server refuses this device, status says so. This does not prove the
+device was removed; check from another device. Local tasks stay available.
 
-Inspect service installation, configuration, executable consistency, runtime,
-and log paths without changing the service:
+## Manage devices
+
+List the devices in the sync:
 
 ```sh
-aven daemon status
-aven daemon status --json
+aven sync device list
 ```
 
-Install it as a background service. On macOS this is a user LaunchAgent; on
-Linux it is a systemd user service, `aven-daemon.service`, which logs to the
-journal:
+Each device shows its name (the macOS Computer Name or Linux hostname) and a
+short ID. Names live in the encrypted data, so the server never sees them.
+
+Remove a device by its ID or a unique prefix of it:
 
 ```sh
-aven daemon install
-aven daemon restart
-aven daemon uninstall
+aven sync device remove 3f9a
 ```
 
-On Linux, the service stops when you log out unless lingering is enabled with
-`loginctl enable-linger`.
+Removal stops that device from syncing and changes the encryption keys, so it
+cannot read future changes. It keeps whatever it already downloaded. Run
+removal from another device; a device cannot remove itself. In the TUI, choose
+**Manage devices** in the Sync dialog.
 
-Package scripts can refresh an installed service after replacing the binary:
+To stop syncing this database but keep its data locally, use
+[`aven sync reset`](/command-reference/#aven-sync-reset). Reset does not remove
+the device from the sync; do that from another device.
+
+A sync allows a limited number of device additions and removals over its
+lifetime. When the limit is reached, Aven says so; start a new sync as in
+[Recover from device loss](#recover-from-device-loss).
+
+## Resolve conflicts
+
+Conflicts happen when two devices edit the same field of the same task between
+syncs. Aven keeps both values and asks you to choose:
 
 ```sh
-aven daemon repair --if-installed --program /path/to/aven
+aven conflict list
+aven conflict diff APP-7KQ9 description
+aven conflict resolve APP-7KQ9 description --use local
 ```
 
-The repair command succeeds without changes when the service is absent.
+See [`aven conflict`](/command-reference/#aven-conflict) for exporting both
+versions or resolving with a custom value. In the TUI, press `v c` to review
+tasks with conflicts.
 
-## Upgrade from unencrypted sync
+## Diagnose sync state
 
-Earlier releases synced without end-to-end encryption. Encrypted sync can't
-use that server storage or read its history, so every device moves to a new
-sync:
-
-1. Before upgrading, run `aven sync` with the old release on every device, so
-   the device you start from has all changes.
-2. Upgrade Aven everywhere, including the server.
-3. Prepare new server storage and serve it, as in [Start a server](#start-a-server).
-   Use a new `--data` path.
-4. On the device with the complete data, run `aven sync setup` with the new
-   setup invitation. The preview notes that the database stops using the old
-   server.
-5. Join each other device from an empty database, as in
-   [Add a device](#add-a-device). Point `--db` at a new path and use it from
-   then on; the old database stays readable locally.
-
-The old server storage still holds your data unencrypted. Delete it once every
-device has joined the new sync.
+`aven doctor` reports whether the database is set up, pending changes,
+conflicts, and daemon configuration. Sync errors explain what went wrong and
+the next step, with a stable code in square brackets.
 
 ## Recover from device loss
 
-A database that has set up or joined sync can create backups, including while
-setup or joining is incomplete. Those backups contain the local tasks and
-available images but no sync binding or keys.
+If one device is lost or broken, add a replacement as in
+[Add a device](#add-a-device), inviting it from a device that still syncs. No
+backup is needed. Then remove the lost device from the sync.
 
-`aven backup restore` and `aven import` are refused when the target database
-takes part in sync. Restore a backup to a fresh database path instead of
-replacing a syncing database.
-
-If one device is lost or broken, no backup is needed. Run `aven sync invite` on
-a device that still syncs, then run `aven sync join` on an empty database on
-the replacement device. See [Add a device](#add-a-device) for the full steps.
-
-If every syncing device is lost, restore the backup to a fresh database path:
+If every syncing device is lost, restore a backup to a fresh database path and
+start a new sync from it:
 
 ```sh
 aven --db /path/to/recovered.sqlite backup restore backup.aven-backup.tar.zst --yes
-```
-
-The restored data is available locally immediately. To sync it again, prepare
-a new server data path and serve it:
-
-```sh
-aven server setup --data /path/to/new-sync-server.sqlite --url https://sync.example.com
-aven server --data /path/to/new-sync-server.sqlite --bind 127.0.0.1:3746
-```
-
-Then use the setup invitation to start a new sync from the restored database:
-
-```sh
+aven server setup --data /path/to/new-sync-server.sqlite --url http://100.100.20.30:3746
+aven server --data /path/to/new-sync-server.sqlite --bind 100.100.20.30:3746
 aven --db /path/to/recovered.sqlite sync setup
 ```
 
 Do not reuse the old sync's server storage. Join every other device to the new
-sync from an empty database. Before discarding any old database you can still
-access, check it for changes made after the backup that never synced; those
-changes are not carried into the new sync.
+sync from an empty database. Changes made after the backup that never synced
+are not included; check any old database you can still access before
+discarding it.
 
-See [Back up and restore](/backups/) for backup contents and restore behavior.
+A syncing database cannot be restored over or imported into, so always restore
+to a new path. See [Back up and restore](/backups/) for backup contents.
 
 ## Rebuilding sync
 
-Sync stops on a device when it receives a change it can't apply. If this
-version of Aven doesn't understand the change, update Aven on that device; its
-edits sync after the update. If the change itself is damaged, every later sync
-stops at the same place. Local tasks stay safe and editable, and `aven sync`
-explains which case applies.
+Sync stops on a device when it receives a change it can't apply. If Aven on
+that device is out of date, update it. If the change itself is damaged, sync
+stops at the same place every time; `aven sync` says which case applies. Local
+tasks stay safe and editable.
 
-To keep syncing after a damaged change, rebuild sync on new server storage.
-Choose the device with the best data as the new starting point.
+To keep syncing after a damaged change, start a new sync on new server storage
+from the device with the best data:
 
-1. Prepare new server storage and serve it. Do not reuse the old storage:
-
-   ```sh
-   aven server setup --data /path/to/new-sync-server.sqlite --url https://sync.example.com
-   aven server --data /path/to/new-sync-server.sqlite --bind 127.0.0.1:3746
-   ```
-
-2. On the device with the best data, reset sync and set it up again with the
-   new setup invitation:
+1. Prepare new server storage and serve it, as in
+   [Start a server](#start-a-server). Do not reuse the old storage.
+2. On the device with the best data, reset sync and set it up again:
 
    ```sh
    aven sync reset
    aven sync setup
    ```
 
-3. On each other device, check for changes that never synced first:
-   `aven sync status` reports whether local changes wait to sync. Save anything
-   you need, for example with `aven export --output unsynced.json`. Then reset
-   and join the new sync from an empty database:
+3. On each other device, check `aven sync status` for local changes that never
+   synced, and save anything you need with
+   `aven export --output unsynced.json`. Then reset and join the new sync from a
+   new database path:
 
    ```sh
    aven sync reset
-   aven sync invite                  # on the device from step 2
    aven --db /path/to/new.sqlite sync join
    ```
 
-   Joining needs an empty database, so point `--db` at a new path and use it
-   from then on. The old database stays readable as a local database; add any
-   unsynced work from it to the new one.
+## Upgrade from unencrypted sync
 
-## Resolve conflicts
+Earlier releases synced without end-to-end encryption. Encrypted sync can't
+use that server storage, so every device moves to a new sync:
 
-Conflicts happen when multiple clients edit the same task field between syncs. They are explicit and field based. Inspect conflicts before resolving them.
+1. Before upgrading, run `aven sync` with the old release on every device.
+2. Upgrade Aven everywhere, including the server.
+3. Prepare and serve new server storage, as in
+   [Start a server](#start-a-server), with a new `--data` path.
+4. On the device with the complete data, run `aven sync setup`.
+5. Join each other device from a new database path, as in
+   [Add a device](#add-a-device).
 
-```sh
-aven conflict list
-aven conflict show APP-7KQ9 --field description
-aven conflict diff APP-7KQ9 description
-aven conflict export APP-7KQ9 description --dir conflicts
-aven conflict resolve APP-7KQ9 description --use local
-```
-
-Use `--value`, `--value-file`, or `--value-stdin` when neither variant is the desired final value.
-
-The TUI also has a conflicts view and conflict actions for human review.
-
-## Diagnose sync state
-
-```sh
-aven doctor
-aven doctor --integrity
-aven doctor --json
-```
-
-For sync specifically, doctor reports whether the database is set up, the sync cursor, pending changes, conflicts, daemon wake validity, and integrity status when requested. A missing current recurring task is repairable by running `aven recur list`. Other recurring-task integrity failures require preserving the database and recovering from a known-good backup.
-
-## Task source compatibility
-
-Task origins are `cli`, `tui`, `api`, `ios`, `android`, and `unknown`. New iOS queue
-captures use `ios`; generic API creation uses `api`. The `android` value is
-reserved as a known client origin, not an indication that an Android app ships.
-Existing sources stay unchanged because their original client cannot be reliably
-inferred. Missing source values in older sync records and exports default to
-`unknown`. Unrecognized values are rejected. Upgrade clients before opening an
-upgraded database or importing an export with an unsupported source. Keep a
-backup before upgrading if you need to return to an older release. Source is immutable, not an editable field or a
-dedicated list filter. Metadata named `source` is independent of task origin.
+The old server storage still holds your data unencrypted. Delete it once every
+device has joined the new sync.

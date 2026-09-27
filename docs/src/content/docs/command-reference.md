@@ -926,6 +926,13 @@ Refusals include `sync-device-id-invalid`, `sync-device-id-ambiguous`,
 itself. Removal does not erase data the removed device already downloaded. JSON
 output is versioned and omits keys, credentials, and invitations.
 
+A sync allows 256 device changes over its lifetime, at most 63 of them key
+rotations. Adding a device is one change. Removing a device, or changing keys
+after an invitation expired when it may have sent keys, is two: the change and
+its key rotation. Inviting a device requires room for one key rotation. Once a
+limit is reached, devices can no longer be added or removed; start a new sync
+from a backup as in [Recover from device loss](/sync/#recover-from-device-loss).
+
 #### `aven sync reset`
 
 Stop syncing this database and keep its data as a local database.
@@ -989,7 +996,7 @@ aven server setup --data <path> --url <url>
 | `--data <path>` | Required server SQLite database path. |
 | `--bind <ip:port>` | Listen address. Defaults to `127.0.0.1:3746`. Loopback, private, and VPN addresses are accepted directly. |
 | `--unsafe-public-bind` | Allow binding a public or wildcard address. Prints a warning because payload encryption does not protect credentials or setup invitations. |
-| `--url <url>` | For `setup`: the HTTP or HTTPS origin devices use to reach the server. |
+| `--url <url>` | For `setup`: the HTTP or HTTPS origin devices use to reach the server, with no path, query, or credentials, and at most 255 bytes. |
 
 `server setup` stores an expiring setup verifier, prints a setup invitation for
 `aven sync setup`, and prints a starting `aven server --data ... --bind ...`
@@ -997,8 +1004,10 @@ command to standard error. The suggested bind uses an HTTP URL's port; HTTPS
 uses port 3746 for the service behind its proxy. For direct VPN HTTP, replace
 the loopback bind with the server's VPN address. Running setup again before a
 device claims the server replaces the invitation. The server does not terminate
-TLS. Use HTTP only over a trusted VPN or another protected private network;
-otherwise put a TLS reverse proxy in front of it. Both commands refuse storage
+TLS. Device credentials, setup invitations, server identifiers, and traffic
+metadata are outside the end-to-end encrypted payload, so use HTTP only over a
+trusted VPN or another protected private network; otherwise put a TLS reverse
+proxy in front of it. Both commands refuse storage
 that holds
 change history, including storage from the unencrypted sync of earlier
 releases. The server shuts down gracefully on an operating-system termination
