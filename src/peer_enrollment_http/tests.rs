@@ -167,6 +167,12 @@ fn test_clock() -> Arc<AtomicU64> {
             .as_secs(),
     ))
 }
+/// A short expiry after the injected clock. Once the clock has advanced to a
+/// passed expiry the server's time high-water mark is there too, so a
+/// wall-clock expiry in the same second would register as already expired.
+fn soon_after(clock: &AtomicU64) -> u64 {
+    clock.load(Ordering::SeqCst) + 20
+}
 fn advance_clock(clock: &AtomicU64, to: u64) {
     clock.store(to, Ordering::SeqCst);
 }
@@ -1181,7 +1187,7 @@ async fn expired_unsent_invitation_retires_but_sent_candidate_stays_blocked() {
     drop(store.tail_inputs(&db, &origin).await.unwrap());
 
     // A candidate that may have been sent is never retired by expiry.
-    let expires = soon();
+    let expires = soon_after(&clock);
     let sent = client.invite(&store, &db, expires).await.unwrap();
     let (sent_db, sent_keys) = peer("sent").await;
     client
@@ -1305,7 +1311,7 @@ async fn expired_sent_invitation_withdraws_by_rotation_unless_admission_won() {
     let initial = generations(&store, &db, &origin).await;
 
     // A grant marked sent but never admitted.
-    let expires = soon();
+    let expires = soon_after(&clock);
     let invitation = client.invite(&store, &db, expires).await.unwrap();
     let (joiner_db, joiner_keys) = peer("joiner").await;
     client
@@ -1405,7 +1411,7 @@ async fn expired_sent_invitation_withdraws_by_rotation_unless_admission_won() {
     );
 
     // The automatic path fences, cancels over HTTP, freezes and rotates.
-    let expires = soon();
+    let expires = soon_after(&clock);
     let invitation = client.invite(&store, &db, expires).await.unwrap();
     let (other_db, other_keys) = peer("other").await;
     client
@@ -1433,7 +1439,7 @@ async fn expired_sent_invitation_withdraws_by_rotation_unless_admission_won() {
     assert!(!client.complete(&other_keys, &other_db).await.unwrap());
 
     // Admission that won before withdrawal resolves ready without rotating.
-    let expires = soon();
+    let expires = soon_after(&clock);
     let invitation = client.invite(&store, &db, expires).await.unwrap();
     let (late_db, late_keys) = peer("late").await;
     client
