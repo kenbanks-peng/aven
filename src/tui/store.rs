@@ -620,8 +620,11 @@ impl TuiStore {
         let fail_next_refresh = self.fail_next_refresh.take();
         let previous_undo_entry_id = self.latest_undo.as_ref().map(|undo| undo.entry_id.clone());
         let retained = RefreshRetainedState::from(&*self);
-        let mut replacement =
-            retained.with_projection(Self::fresh_projection(active_workspace, view_state));
+        let mut projection = Self::fresh_projection(active_workspace, view_state);
+        // Parts of the sync status may be unreadable mid-operation; the refresh
+        // keeps these last-known values until they can be read again.
+        projection.sync_status = self.sync_status.clone();
+        let mut replacement = retained.with_projection(projection);
         #[cfg(test)]
         {
             replacement.fail_next_refresh = fail_next_refresh;

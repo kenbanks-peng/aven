@@ -157,6 +157,14 @@ pub(crate) async fn association_status(
     engine::association_status(database, &DesktopHost::background(config)).await
 }
 
+/// The association, or `None` while a sync operation holds this database.
+pub(crate) async fn try_association_status(
+    database: &Database,
+    config: &AppConfig,
+) -> Result<Option<AssociationStatus>> {
+    engine::try_association_status(database, &DesktopHost::background(config)).await
+}
+
 pub(crate) async fn invitation_status(
     database: &Database,
     config: &AppConfig,

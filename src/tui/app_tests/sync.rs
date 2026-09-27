@@ -719,3 +719,55 @@ async fn sync_automatically_asks_before_changing_anything() {
     assert_eq!(*sync_page(&app), crate::tui::overlay::SyncPage::Home);
     assert!(!app.intake.config().sync.enabled);
 }
+
+#[tokio::test]
+async fn background_refresh_during_a_sync_operation_keeps_the_last_association() {
+    let mut app = test_app().await;
+    let database = app.store.database();
+    app.store
+        .create_task(test_task_draft("Installed while syncing"), None)
+        .await
+        .unwrap();
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", database.path().display()))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO local_peer_enrollment(singleton,identity,client_id,role) \
+         VALUES(1,?,(SELECT value FROM meta WHERE key='client_id'),'peer')",
+    )
+    .bind([7u8; 32].as_slice())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    app.store.sync_status.server = Some("https://sync.example.com".to_string());
+    app.store.sync_status.devices = Some(2);
+    app.store.tasks = Vec::new().into();
+    app.notification = None;
+
+    // Setup, joining, or another process holds the per-database sync lock.
+    let operation = aven_core::sync::client::coordination::try_acquire(&database)
+        .unwrap()
+        .expect("lock is free");
+    app.next_refresh_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    assert!(app.refresh_if_due().await.unwrap());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(app.notification.is_none(), "{:?}", toast_message(&app));
+    assert_eq!(app.store.tasks.len(), 1);
+    assert_eq!(
+        app.store.sync_status.server.as_deref(),
+        Some("https://sync.example.com")
+    );
+    assert_eq!(app.store.sync_status.devices, Some(2));
+    assert_eq!(
+        app.store.sync_status.phase,
+        crate::sync::encrypted::LocalPhase::JoinIncomplete
+    );
+
+    // Once the operation releases the lock, status is read afresh.
+    drop(operation);
+    app.store.refresh_sync_status().await.unwrap();
+    assert_eq!(app.store.sync_status.server, None);
+    assert_eq!(app.store.sync_status.devices, None);
+}

@@ -40,11 +40,21 @@ impl TuiStore {
             Err(error) => SyncStatusCheck::new(false, format!("{error:#}")),
         };
         let phase = crate::sync::encrypted::local_phase(&self.database).await?;
+        // A sync operation holds the association while it runs; keep the last
+        // snapshot until it finishes instead of waiting on or reporting it.
         let (association, protected_storage) =
-            match crate::sync::encrypted::association_status(&self.database, config).await {
-                Ok(association) => (
+            match crate::sync::encrypted::try_association_status(&self.database, config).await {
+                Ok(Some(association)) => (
                     association,
                     SyncStatusCheck::new(true, "available".to_string()),
+                ),
+                Ok(None) => (
+                    crate::sync::encrypted::AssociationStatus {
+                        server: self.sync_status.server.clone(),
+                        devices: self.sync_status.devices,
+                        invitation: self.sync_status.invitation,
+                    },
+                    self.sync_status.protected_storage.clone(),
                 ),
                 Err(error)
                     if error.chain().any(|source| {

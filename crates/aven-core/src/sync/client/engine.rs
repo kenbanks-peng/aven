@@ -382,6 +382,29 @@ pub async fn association_status(
     }
     let store = key_store(host, database).await?;
     let _guard = coordination::acquire(database).await?;
+    read_association(database, &store).await
+}
+
+/// Like [`association_status`], but `None` without waiting while another
+/// sync operation holds this database, so periodic observers stay responsive.
+pub async fn try_association_status(
+    database: &Database,
+    host: &dyn ClientHost,
+) -> Result<Option<AssociationStatus>> {
+    if !is_set_up(database).await? {
+        return Ok(Some(AssociationStatus::default()));
+    }
+    let Some(_guard) = coordination::try_acquire(database)? else {
+        return Ok(None);
+    };
+    let store = key_store(host, database).await?;
+    read_association(database, &store).await.map(Some)
+}
+
+async fn read_association(
+    database: &Database,
+    store: &ProtectedLocalKeyStore,
+) -> Result<AssociationStatus> {
     let Some((_, server)) = store.association(database).await? else {
         return Ok(AssociationStatus::default());
     };
