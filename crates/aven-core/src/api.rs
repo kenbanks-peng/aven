@@ -1531,6 +1531,9 @@ pub struct TaskActivity {
     pub created_at: String,
     pub kind: TaskActivityKind,
     pub summary: String,
+    /// RFC 3339 UTC instant a task was deferred to, for availability changes
+    /// that set one. Clients format it for display.
+    pub available_at: Option<String>,
     pub anchors_queue_idle: bool,
 }
 
@@ -1601,6 +1604,7 @@ impl TaskDetail {
                     _ => TaskActivityKind::Other,
                 },
                 summary: action.task_activity_summary(&item.task.title),
+                available_at: action.task_activity_available_at(),
                 anchors_queue_idle: anchor == Some(index),
             })
             .collect();

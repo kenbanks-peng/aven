@@ -3025,3 +3025,67 @@ async fn task_detail_reports_deleted_object_file_as_unavailable() {
         AttachmentAvailability::Present
     );
 }
+
+#[tokio::test]
+async fn task_detail_activity_reports_availability_as_structured_instant() {
+    use aven_core::api::TaskActivityKind;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("activity.sqlite"))
+        .await
+        .unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let task = store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "Deferred".to_string(),
+                description: String::new(),
+                project: "ios".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    for available_at in [
+        OptionalDateUpdate::Set("2026-07-20T06:00:00Z".to_string()),
+        OptionalDateUpdate::Clear,
+    ] {
+        store
+            .update_task(
+                &workspace.id,
+                &task.id,
+                UpdateTask {
+                    available_at,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let detail = store.task_detail(&workspace.id, &task.id).await.unwrap();
+    let availability = detail
+        .activity
+        .iter()
+        .filter(|action| action.kind == TaskActivityKind::Availability)
+        .map(|action| (action.summary.as_str(), action.available_at.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        availability,
+        [
+            ("cleared availability", None),
+            ("changed availability", Some("2026-07-20T06:00:00Z")),
+        ]
+    );
+    assert!(
+        detail
+            .activity
+            .iter()
+            .filter(|action| action.kind != TaskActivityKind::Availability)
+            .all(|action| action.available_at.is_none())
+    );
+}

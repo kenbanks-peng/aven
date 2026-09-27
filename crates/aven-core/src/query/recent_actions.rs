@@ -41,11 +41,21 @@ impl RecentActionItem {
             | crate::change_log::op_type::REMOVE_TASK_METADATA => true,
             crate::change_log::op_type::SET_FIELD => !matches!(
                 self.field.as_deref(),
-                Some("description" | "status" | "priority" | "deleted" | "is_epic")
+                Some(
+                    "description" | "status" | "priority" | "deleted" | "is_epic" | "available_at"
+                )
             ),
             _ => false,
         };
         include.then_some(detail)
+    }
+
+    pub fn task_activity_available_at(&self) -> Option<String> {
+        (self.op_type == crate::change_log::op_type::SET_FIELD
+            && self.field.as_deref() == Some("available_at"))
+        .then(|| self.detail.clone())
+        .flatten()
+        .filter(|detail| !detail.is_empty())
     }
 
     fn establishes_queue_activity(&self) -> bool {
