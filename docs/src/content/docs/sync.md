@@ -61,8 +61,37 @@ Server storage used by the unencrypted sync of earlier releases is not
 supported. `aven server` and `aven server setup` refuse storage that holds
 change history; prepare a new path instead.
 
-Run `aven server` under your operating system's service manager after
-confirming that sync works.
+Once sync works, run `aven server` under your operating system's service
+manager so it starts at boot. On Linux, a systemd user service works; save this
+as `~/.config/systemd/user/aven-server.service`, adjusting the binary path and
+bind address:
+
+```ini
+[Unit]
+Description=Aven sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/aven server --data %h/.local/state/aven/sync-server.sqlite --bind 100.100.20.30:3746
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then enable it, and enable lingering so it keeps running after you log out:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now aven-server
+loginctl enable-linger
+journalctl --user -u aven-server -f
+```
+
+Binding to a VPN address such as a Tailscale IP requires the VPN interface to
+be up; if the server fails at boot, systemd retries it every five seconds.
 
 ## Set up sync from one device
 
