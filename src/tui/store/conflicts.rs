@@ -147,7 +147,6 @@ impl TuiStore {
                 &target.task_id,
                 &target.field,
                 &value,
-                &format!("conflict {} {}", target.display_ref, target.field),
             )
             .await?;
         self.wake_after_mutation();

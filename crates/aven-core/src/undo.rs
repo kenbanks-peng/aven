@@ -51,44 +51,12 @@ impl PendingUndoPresentation {
 pub enum UndoContext {
     #[default]
     None,
-    Tui {
-        summary: String,
-    },
-    TuiTaskMutation {
-        single_summary: Option<String>,
-        batch_action: String,
-    },
+    Tui,
 }
 
 impl UndoContext {
-    pub fn tui(summary: impl Into<String>) -> Self {
-        Self::Tui {
-            summary: summary.into(),
-        }
-    }
-
-    pub fn tui_task_mutation(
-        single_summary: Option<String>,
-        batch_action: impl Into<String>,
-    ) -> Self {
-        Self::TuiTaskMutation {
-            single_summary,
-            batch_action: batch_action.into(),
-        }
-    }
-
-    pub(crate) fn task_mutation_summary(self, changed_count: usize) -> Option<String> {
-        match self {
-            Self::None => None,
-            Self::Tui { summary } => Some(summary),
-            Self::TuiTaskMutation {
-                single_summary,
-                batch_action,
-            } => single_summary.filter(|_| changed_count == 1).or_else(|| {
-                let noun = if changed_count == 1 { "task" } else { "tasks" };
-                Some(format!("{batch_action} {changed_count} {noun}"))
-            }),
-        }
+    pub fn tui() -> Self {
+        Self::Tui
     }
 }
 
@@ -420,7 +388,6 @@ pub(crate) async fn conflict_row_id(
 pub(crate) async fn record_tui_undo(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
-    summary: &str,
     payload: UndoPayload,
 ) -> Result<()> {
     if is_applying_undo() || !undo_payload_has_effect(&payload) {
@@ -428,6 +395,7 @@ pub(crate) async fn record_tui_undo(
     }
     let id = new_id();
     let created_at = now();
+    let summary = undo_operation(&payload.commands);
     let seq: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM tui_undo_entries WHERE workspace_id = ?",
     )
@@ -511,7 +479,15 @@ fn classify_undo_commands(id: String, commands: &[UndoCommand]) -> PendingUndoPr
         }
     }
 
-    let operation = if commands
+    PendingUndoPresentation {
+        id,
+        operation: undo_operation(commands).to_string(),
+        task_ids: task_ids.into_iter().collect(),
+    }
+}
+
+fn undo_operation(commands: &[UndoCommand]) -> &'static str {
+    if commands
         .iter()
         .any(|command| matches!(command, UndoCommand::DeleteCreatedTask { .. }))
     {
@@ -537,12 +513,6 @@ fn classify_undo_commands(id: String, commands: &[UndoCommand]) -> PendingUndoPr
             .iter()
             .find_map(undo_command_operation)
             .unwrap_or("last TUI mutation")
-    };
-
-    PendingUndoPresentation {
-        id,
-        operation: operation.to_string(),
-        task_ids: task_ids.into_iter().collect(),
     }
 }
 

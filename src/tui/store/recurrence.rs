@@ -176,7 +176,7 @@ impl TuiStore {
                 &self.active_workspace,
                 task_id,
                 RecurrenceOutcome::Skipped,
-                crate::undo::UndoContext::tui(format!("skip {series_ref}")),
+                crate::undo::UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();

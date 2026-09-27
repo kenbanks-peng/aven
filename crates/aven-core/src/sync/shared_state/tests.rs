@@ -911,7 +911,7 @@ async fn captured_history_blocks_general_and_recurrence_undo_atomically() {
                     ..Default::default()
                 },
             )],
-            UndoContext::tui("complete recurrence"),
+            UndoContext::tui(),
         )
         .await
         .unwrap();

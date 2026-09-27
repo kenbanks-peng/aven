@@ -151,7 +151,7 @@ async fn oversized_description_mutations_roll_back() {
                     },
                 ),
             ],
-            UndoContext::tui("edit"),
+            UndoContext::tui(),
         )
         .await;
     assert!(result.is_err(), "oversized description must be rejected");

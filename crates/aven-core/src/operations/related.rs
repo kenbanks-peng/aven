@@ -97,11 +97,10 @@ impl Database {
             linked,
         )
         .await?;
-        if let (Some(change_id), UndoContext::Tui { summary }) = (&outcome.change_id, undo) {
+        if let (Some(change_id), UndoContext::Tui) = (&outcome.change_id, undo) {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::SetTaskRelatedLink {
                         task_id: outcome.task.id.clone(),

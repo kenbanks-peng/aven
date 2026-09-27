@@ -165,13 +165,11 @@ impl Database {
             &crate::attachments::lifecycle::SystemClock,
         )
         .await?;
-        let changed_count = outcomes.iter().filter(|outcome| outcome.changed).count();
         append_created_label_undo_commands(&mut undo_commands, &created_labels);
-        if let Some(summary) = undo.task_mutation_summary(changed_count) {
+        if matches!(undo, UndoContext::Tui) {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: undo_commands,
                 },

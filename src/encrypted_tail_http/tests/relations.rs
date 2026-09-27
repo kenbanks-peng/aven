@@ -100,9 +100,7 @@ async fn labels_preserve_undo_and_later_intent_through_acceptance_reopen_and_pag
         .mutate_tasks(
             &w,
             vec![(task.clone(), label_update(false))],
-            UndoContext::Tui {
-                summary: "remove label".into(),
-            },
+            UndoContext::Tui,
         )
         .await
         .unwrap();
@@ -248,9 +246,7 @@ async fn labels_preserve_undo_and_later_intent_through_acceptance_reopen_and_pag
         .mutate_tasks(
             &w,
             vec![(task.clone(), label_update(true))],
-            UndoContext::Tui {
-                summary: "add label".into(),
-            },
+            UndoContext::Tui,
         )
         .await
         .unwrap();

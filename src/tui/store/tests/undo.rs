@@ -176,19 +176,75 @@ async fn single_task_undo_presentation_keeps_display_ref() {
 }
 
 #[tokio::test]
+async fn persisted_undo_summary_is_derived_from_payload() {
+    let (_dir, pool, mut store) = test_store_with_pool().await;
+    let (_, selected) = create_selected_task(&mut store, "Persisted summary").await;
+
+    store
+        .update_title(Some(selected), "Updated title".to_string())
+        .await
+        .unwrap();
+
+    let summary: String = sqlx::query_scalar(
+        "SELECT summary FROM tui_undo_entries
+         WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(&store.active_workspace.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(summary, "title change");
+}
+
+#[tokio::test]
+async fn batch_undo_presentation_uses_structured_payload_scope() {
+    let mut store = test_store().await;
+    let (first_id, _) = create_selected_task(&mut store, "First batch task").await;
+    let (second_id, _) = create_selected_task(&mut store, "Second batch task").await;
+
+    store
+        .update_status_for_tasks(None, &[first_id, second_id], "todo")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.latest_undo.as_ref().map(|undo| undo.phrase.as_str()),
+        Some("status change on 2 tasks")
+    );
+    let undo = store.undo_last(None).await.unwrap().unwrap();
+    assert_eq!(undo.message, "undid status change on 2 tasks");
+}
+
+#[tokio::test]
 async fn partially_unchanged_batch_undo_presentation_uses_changed_scope() {
     let mut store = test_store().await;
-    let (first_id, first) = create_selected_task(&mut store, "Already changed").await;
+    let (first_id, _) = create_selected_task(&mut store, "Already changed").await;
     let (second_id, _) = create_selected_task(&mut store, "Needs change").await;
+    let second_ref = store
+        .tasks
+        .iter()
+        .find(|item| item.task.id == second_id)
+        .unwrap()
+        .display_ref
+        .clone();
+    let first = store
+        .tasks
+        .iter()
+        .position(|item| item.task.id == first_id)
+        .unwrap();
     store.update_status(Some(first), "todo").await.unwrap();
 
     store
-        .update_status_for_tasks(None, &[first_id, second_id.clone()], "todo")
+        .update_status_for_tasks(None, &[first_id, second_id], "todo")
         .await
         .unwrap();
-    let expected = store.latest_undo.as_ref().unwrap().phrase.clone();
-    let undo = store.undo_last(None).await.unwrap().unwrap();
 
+    let expected = format!("status change on {second_ref}");
+    assert_eq!(
+        store.latest_undo.as_ref().map(|undo| undo.phrase.as_str()),
+        Some(expected.as_str())
+    );
+    let undo = store.undo_last(None).await.unwrap().unwrap();
     assert_eq!(undo.message, format!("undid {expected}"));
 }
 

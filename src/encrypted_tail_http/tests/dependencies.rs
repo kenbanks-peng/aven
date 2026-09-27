@@ -221,14 +221,7 @@ async fn dependencies_preserve_undo_and_later_intent_through_acceptance_reopen_a
     let client = Client::new(&f.origin).unwrap();
     drain(&client, &f.peer_store, &f.peer).await;
     f.seed
-        .remove_task_dependency_with_undo(
-            &w,
-            &task,
-            &target,
-            UndoContext::Tui {
-                summary: "remove dependency".into(),
-            },
-        )
+        .remove_task_dependency_with_undo(&w, &task, &target, UndoContext::Tui)
         .await
         .unwrap();
     let record = {
@@ -401,14 +394,7 @@ async fn dependencies_preserve_undo_and_later_intent_through_acceptance_reopen_a
     }
     // Accepted dependency undo appends compensation rather than deleting history.
     f.seed
-        .add_task_dependency_with_undo(
-            &w,
-            &task,
-            &target,
-            UndoContext::Tui {
-                summary: "add dependency".into(),
-            },
-        )
+        .add_task_dependency_with_undo(&w, &task, &target, UndoContext::Tui)
         .await
         .unwrap();
     converge(&f).await;

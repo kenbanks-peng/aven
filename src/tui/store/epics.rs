@@ -191,7 +191,7 @@ impl TuiStore {
                 &self.active_workspace,
                 &child_id,
                 &epic.epic_id,
-                UndoContext::tui(format!("add {child_ref} to {}", epic.display_ref)),
+                UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();
@@ -249,10 +249,7 @@ impl TuiStore {
                 &self.active_workspace,
                 &target.child.task_id,
                 &target.epic.epic_id,
-                UndoContext::tui(format!(
-                    "remove {} from {}",
-                    target.child.display_ref, target.epic.display_ref
-                )),
+                UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();
