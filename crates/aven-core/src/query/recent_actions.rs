@@ -15,6 +15,14 @@ impl RecentActionItem {
             .summary
             .strip_suffix(&format!(": {}", task_title))
             .unwrap_or(&self.summary);
+        // Clients render available_at themselves, so the instant stays out of
+        // the text.
+        let summary = match self.task_activity_available_at() {
+            Some(available_at) => summary
+                .strip_suffix(&format!(" to {available_at}"))
+                .unwrap_or(summary),
+            None => summary,
+        };
         let Some(detail) = self.task_activity_detail() else {
             return summary.to_string();
         };
@@ -647,7 +655,7 @@ fn resolved_field_action_text(
     };
     let summary = value
         .as_deref()
-        .filter(|value| !value.is_empty() && field != Some("available_at"))
+        .filter(|value| !value.is_empty())
         .map(|value| format!("resolved {field_label} conflict to {value}"))
         .unwrap_or_else(|| format!("resolved {field_label} conflict"));
     (
@@ -1204,6 +1212,10 @@ mod tests {
             accent,
             grouped_change_count: 1,
         };
+        assert_eq!(
+            action.summary,
+            "resolved availability conflict to 2026-07-20T06:00:00Z: subject"
+        );
         assert_eq!(
             action.task_activity_summary("subject"),
             "resolved availability conflict"

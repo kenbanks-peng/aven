@@ -213,8 +213,20 @@ pub(super) fn detail_metadata_lines_with_children(
                     conflict.field.clone(),
                     Style::new().fg(ORANGE).add_modifier(Modifier::BOLD),
                 )));
-                lines.push(Line::from(format!("current  {}", conflict.local_value)));
-                lines.push(Line::from(format!("incoming {}", conflict.remote_value)));
+                lines.push(Line::from(format!(
+                    "current  {}",
+                    crate::tui::time::conflict_value_display(
+                        &conflict.field,
+                        &conflict.local_value
+                    )
+                )));
+                lines.push(Line::from(format!(
+                    "incoming {}",
+                    crate::tui::time::conflict_value_display(
+                        &conflict.field,
+                        &conflict.remote_value
+                    )
+                )));
                 lines.push(Line::from(Span::styled(
                     "c a current · c r incoming · c m manual",
                     Style::new().fg(FG_MUTED),

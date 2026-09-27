@@ -70,8 +70,14 @@ impl App {
         let mut lines = Vec::new();
         for target in &targets {
             lines.push(target.field.clone());
-            lines.push(format!("current: {}", target.local_value));
-            lines.push(format!("incoming: {}", target.remote_value));
+            lines.push(format!(
+                "current: {}",
+                crate::tui::time::conflict_value_display(&target.field, &target.local_value)
+            ));
+            lines.push(format!(
+                "incoming: {}",
+                crate::tui::time::conflict_value_display(&target.field, &target.remote_value)
+            ));
             lines.push("resolve: c a current · c r incoming · c m manual".to_string());
             lines.push(String::new());
         }
@@ -219,7 +225,10 @@ impl App {
         let prompt = format!(
             "Keep the {side} {}? {}",
             target.field,
-            truncate_value_preview(&value, 60)
+            truncate_value_preview(
+                &crate::tui::time::conflict_value_display(&target.field, &value),
+                60
+            )
         );
         self.overlay = Some(OverlayState::confirm(
             ConfirmIntent::ResolveConflict { target, value },

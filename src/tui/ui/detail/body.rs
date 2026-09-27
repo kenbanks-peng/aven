@@ -437,7 +437,7 @@ pub(super) fn extend_activity_section(
             0
         };
         let summary = truncate_width(
-            &action.task_activity_summary(&item.task.title),
+            &crate::tui::time::task_activity_summary_display(action, &item.task.title),
             width.saturating_sub(prefix_width + reserved),
         );
         let mut spans = vec![
