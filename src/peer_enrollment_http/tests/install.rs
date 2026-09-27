@@ -127,6 +127,37 @@ async fn snapshot_download_refreshes_once_before_component_reads() {
 }
 
 #[tokio::test]
+async fn snapshot_download_reports_bytes_against_a_total_that_never_changes() {
+    let f = enrolled().await;
+    let log = std::sync::Mutex::new(Vec::new());
+    let record = |done, total| log.lock().unwrap().push((done, total));
+
+    f.client
+        .install_reporting(&f.store, &f.peer, &record)
+        .await
+        .unwrap();
+
+    let reports = std::mem::take(&mut *log.lock().unwrap());
+    assert_eq!(reports.first(), Some(&(0, None)));
+    let (done, total) = *reports.last().unwrap();
+    let total = total.expect("the total is known once catalogs arrive");
+    assert!(total > 0);
+    assert_eq!(done, total);
+    assert!(reports.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+    // The total appears once and then holds.
+    let known = reports.iter().position(|(_, t)| t.is_some()).unwrap();
+    assert!(reports[..known].iter().all(|(_, t)| t.is_none()));
+    assert!(reports[known..].iter().all(|(_, t)| *t == Some(total)));
+
+    // An installed snapshot is not downloaded again.
+    f.client
+        .install_reporting(&f.store, &f.peer, &record)
+        .await
+        .unwrap();
+    assert!(log.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn snapshot_download_refreshes_after_stale_and_keeps_one_retry_budget() {
     let f = enrolled().await;
     let peer = f

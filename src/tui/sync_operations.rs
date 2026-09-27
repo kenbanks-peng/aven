@@ -1,5 +1,5 @@
 //! Setup, joining and device management started from the Sync dialog. The
-//! controller owns in-flight work, its current stage and its latest result;
+//! controller owns in-flight work, its current progress and its latest result;
 //! the dialog only presents them, so closing it cancels nothing. Quitting the
 //! TUI drops the work, and the engine's durable state lets a later attempt
 //! resume it. One operation runs at a time.
@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 use crate::config::AppConfig;
 use crate::sync::encrypted::{
-    self, DeviceInvitation, DeviceListing, Removal, SetupInvitation, Stage,
+    self, Amount, DeviceInvitation, DeviceListing, Progress, Removal, SetupInvitation, Stage,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,8 @@ pub(crate) struct RunningOperation {
     pub(crate) kind: OperationKind,
     /// The latest engine stage, or `None` before the engine reports one.
     pub(crate) stage: Option<Stage>,
+    /// Work measured in the current stage, when the stage measures it.
+    pub(crate) amount: Option<Amount>,
     pub(crate) started_at: Instant,
 }
 
@@ -159,12 +161,14 @@ enum Done {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum OperationEvent {
     Stage(OperationKind, Stage),
+    /// Measured work advanced within the current stage.
+    Progressed,
     Finished(OperationKind, Option<OperationResult>),
 }
 
 pub(super) struct SyncOperations {
     task: Option<JoinHandle<Result<Done>>>,
-    stage: Arc<Mutex<Option<Stage>>>,
+    progress: Arc<Mutex<Option<Progress>>>,
     /// The submitted setup invitation, kept in memory so an interrupted setup
     /// can retry in this session without pasting it again.
     setup_invitation: Option<Zeroizing<String>>,
@@ -175,7 +179,7 @@ impl SyncOperations {
     pub(super) fn new() -> Self {
         Self {
             task: None,
-            stage: Arc::new(Mutex::new(None)),
+            progress: Arc::new(Mutex::new(None)),
             setup_invitation: None,
             activity: SyncActivity::default(),
         }
@@ -227,10 +231,10 @@ impl SyncOperations {
         self.setup_invitation = Some(text.clone());
         let database = database.clone();
         let config = config.clone();
-        let stage = self.stage.clone();
+        let latest = self.progress.clone();
         self.spawn(OperationKind::Setup, async move {
             let invitation = SetupInvitation::decode(&text)?;
-            let progress = |next| *stage.lock().expect("stage lock") = Some(next);
+            let progress = |next| *latest.lock().expect("progress lock") = Some(next);
             let outcome = encrypted::run_setup(&database, &config, &invitation, &progress).await?;
             Ok(Done::SetUp(invitation.server, outcome))
         })
@@ -247,9 +251,9 @@ impl SyncOperations {
     ) -> bool {
         let database = database.clone();
         let config = config.clone();
-        let stage = self.stage.clone();
+        let latest = self.progress.clone();
         self.spawn(OperationKind::Join, async move {
-            let progress = |next| *stage.lock().expect("stage lock") = Some(next);
+            let progress = |next| *latest.lock().expect("progress lock") = Some(next);
             let (server, outcome) = encrypted::run_join(
                 &database,
                 &config,
@@ -310,10 +314,11 @@ impl SyncOperations {
         if self.task.is_some() {
             return false;
         }
-        *self.stage.lock().expect("stage lock") = None;
+        *self.progress.lock().expect("progress lock") = None;
         self.activity.running = Some(RunningOperation {
             kind,
             stage: None,
+            amount: None,
             started_at: Instant::now(),
         });
         // A listing refreshes data without replacing the previous outcome.
@@ -347,12 +352,18 @@ impl SyncOperations {
             }
             return Some(OperationEvent::Finished(kind, result));
         }
-        let stage = *self.stage.lock().expect("stage lock");
-        if stage == running.stage {
+        let progress = (*self.progress.lock().expect("progress lock"))?;
+        let amount = progress.amount;
+        if Some(progress.stage) != running.stage {
+            running.stage = Some(progress.stage);
+            running.amount = amount;
+            return Some(OperationEvent::Stage(running.kind, progress.stage));
+        }
+        if amount.is_none() || amount == running.amount {
             return None;
         }
-        running.stage = stage;
-        stage.map(|stage| OperationEvent::Stage(running.kind, stage))
+        running.amount = amount;
+        Some(OperationEvent::Progressed)
     }
 
     /// Records finished work. Listing updates the device snapshot instead
@@ -486,6 +497,62 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
+    }
+
+    #[tokio::test]
+    async fn polling_reports_stage_changes_and_measured_work_once_each() {
+        let mut operations = SyncOperations::new();
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        assert!(operations.spawn(OperationKind::Join, async move {
+            let _ = finished.await;
+            Err(anyhow::anyhow!("error enrollment-network outcome-unknown"))
+        }));
+        assert_eq!(operations.poll().await, None);
+        let report = |operations: &SyncOperations, progress: Progress| {
+            *operations.progress.lock().unwrap() = Some(progress)
+        };
+        let bytes = |done| Amount::Bytes {
+            done,
+            total: Some(10),
+        };
+        let running = |operations: &SyncOperations| operations.activity.running.unwrap();
+
+        report(&operations, Stage::DownloadingTasks.into());
+        assert_eq!(
+            operations.poll().await,
+            Some(OperationEvent::Stage(
+                OperationKind::Join,
+                Stage::DownloadingTasks
+            ))
+        );
+        for done in [4, 10] {
+            report(
+                &operations,
+                Progress {
+                    stage: Stage::DownloadingTasks,
+                    amount: Some(bytes(done)),
+                },
+            );
+            assert_eq!(operations.poll().await, Some(OperationEvent::Progressed));
+            assert_eq!(running(&operations).amount, Some(bytes(done)));
+            assert_eq!(operations.poll().await, None);
+        }
+
+        // A new stage drops the previous stage's measurement.
+        report(&operations, Stage::CatchingUp.into());
+        assert!(matches!(
+            operations.poll().await,
+            Some(OperationEvent::Stage(_, Stage::CatchingUp))
+        ));
+        assert_eq!(running(&operations).amount, None);
+
+        // A retry starts without the failed attempt's progress.
+        finish.send(()).unwrap();
+        settle(&mut operations).await;
+        assert!(operations.spawn(OperationKind::Join, std::future::pending()));
+        assert_eq!(operations.poll().await, None);
+        assert_eq!(running(&operations).stage, None);
+        assert_eq!(running(&operations).amount, None);
     }
 
     #[tokio::test]

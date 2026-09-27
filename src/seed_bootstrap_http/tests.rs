@@ -790,6 +790,64 @@ async fn invalid_http_outcome_preserves_sealed_intent_and_capture_until_verified
 }
 
 #[tokio::test]
+async fn upload_reports_exact_bytes_and_restarts_counting_on_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let (db, store, seed, package) = fixture(root.path()).await;
+    let expected = budget(&package).bytes;
+    let server = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    e2ee_http::issue_setup(&server).await;
+    // After the claim, status, declaration and two stored chunks, the server
+    // fails the next request, so the first attempt stops partway through.
+    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let app = router(server.clone()).layer(axum::middleware::from_fn(
+        move |request: Request, next: axum::middleware::Next| {
+            let requests = requests.clone();
+            async move {
+                if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 5 {
+                    return axum::response::IntoResponse::into_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    );
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Client::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    http.claim(
+        seed.genesis(),
+        ClaimAuthentication::SetupSecret(&Secret::new([7; 32])),
+    )
+    .await
+    .unwrap();
+    let log = std::sync::Mutex::new(Vec::new());
+    let record = |done, total| log.lock().unwrap().push((done, total));
+    assert!(http.resume_reporting(&store, &db, &record).await.is_err());
+    task.abort();
+    let first = std::mem::take(&mut *log.lock().unwrap());
+    let (http, task) = serve(server).await;
+    assert!(http.resume_reporting(&store, &db, &record).await.unwrap());
+    task.abort();
+    let retry = std::mem::take(&mut *log.lock().unwrap());
+    // Two chunks were stored before the refusal; nothing claimed more.
+    assert_eq!(first.len(), 3);
+    assert!(first.last().unwrap().0 < expected);
+    // The retry uploads every chunk again, counting from zero.
+    assert_eq!(retry.len() as u64, budget(&package).chunks + 1);
+    assert_eq!(retry.last(), Some(&(expected, expected)));
+    for reports in [first, retry] {
+        assert_eq!(reports.first(), Some(&(0, expected)));
+        assert!(reports.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(reports.iter().all(|&(_, total)| total == expected));
+    }
+}
+
+#[tokio::test]
 async fn client_bounds_responses_and_rejects_redirects_and_unsafe_origins() {
     assert!(Client::new("http://100.100.20.30:3746").is_ok());
     assert!(Client::new("http://sync.private.example:3746").is_ok());

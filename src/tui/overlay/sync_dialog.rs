@@ -899,6 +899,7 @@ mod tests {
             running: Some(crate::tui::sync_operations::RunningOperation {
                 kind: crate::tui::sync_operations::OperationKind::Join,
                 stage: None,
+                amount: None,
                 started_at: std::time::Instant::now(),
             }),
             last: None,

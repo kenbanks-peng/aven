@@ -401,7 +401,7 @@ impl App {
             OperationEvent::Stage(OperationKind::Join, encrypted::Stage::CatchingUp) => {
                 self.refresh().await?;
             }
-            OperationEvent::Stage(..) => {}
+            OperationEvent::Stage(..) | OperationEvent::Progressed => {}
             OperationEvent::Finished(kind, result) => {
                 let refreshed = if kind.manages_devices() {
                     self.store.refresh_sync_status().await

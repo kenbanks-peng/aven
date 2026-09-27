@@ -339,7 +339,7 @@ pub(crate) fn database_stats_scroll_cap(frame_height: u16) -> u16 {
         .saturating_sub(visible_rows) as u16
 }
 
-fn format_bytes(bytes: i64) -> String {
+pub(super) fn format_bytes(bytes: i64) -> String {
     const KIB: i64 = 1024;
     const MIB: i64 = KIB * 1024;
     const GIB: i64 = MIB * 1024;

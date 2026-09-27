@@ -14,8 +14,9 @@ use anyhow::{Context, Result, bail, ensure};
 use aven_core::db::Database;
 use aven_core::sync::client::engine;
 pub(crate) use aven_core::sync::client::engine::{
-    Admission, AssociationStatus, Cancellation, DaemonRound, InvitationStatus, LocalPhase, Outcome,
-    PendingInvitation, SetupPreview, Stage, StatusReport, SyncState, local_phase, unix_now,
+    Admission, Amount, AssociationStatus, Cancellation, DaemonRound, InvitationStatus, LocalPhase,
+    Outcome, PendingInvitation, Progress, SetupPreview, Stage, StatusReport, SyncState,
+    local_phase, unix_now,
 };
 use aven_core::sync::client::keys::{ProtectedStorage, StoreResult};
 use aven_core::sync::client::tail::ImageTransfer;
@@ -132,7 +133,7 @@ pub(crate) async fn run_setup(
     database: &Database,
     config: &AppConfig,
     invitation: &SetupInvitation,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Outcome> {
     let host = DesktopHost::foreground(config);
     driver()?
@@ -235,7 +236,7 @@ pub(crate) async fn run_join(
     config: &AppConfig,
     invitation: impl FnOnce() -> Result<Option<DeviceInvitation>> + Send,
     replace: bool,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(String, Outcome)> {
     let host = DesktopHost::foreground(config);
     driver()?
@@ -295,7 +296,7 @@ pub(crate) async fn await_join(
     invitation: Option<aven_core::sync::seed_claim::membership::Invitation>,
     replace: bool,
     deadline: std::time::Instant,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<()> {
     client
         .transport
@@ -419,8 +420,8 @@ pub(crate) async fn setup(database: &Database, config: &AppConfig, args: SetupAr
         print_setup_preview(database, config, &invitation.server).await?;
         confirm_setup(args.yes)?;
     }
-    let outcome = run_setup(database, config, &invitation, &|stage| {
-        if stage == Stage::UploadingData {
+    let outcome = run_setup(database, config, &invitation, &|progress| {
+        if progress == Stage::UploadingData.into() {
             eprintln!("Uploading encrypted data...");
         }
     })
@@ -639,10 +640,16 @@ pub(crate) async fn join(database: &Database, config: &AppConfig, args: JoinArgs
         config,
         || Ok(invitation),
         args.new_invitation,
-        &|stage| match stage {
-            Stage::WaitingForInviter => eprintln!("Waiting for the inviting device..."),
-            Stage::DownloadingTasks => eprintln!("Downloading synced data..."),
-            _ => {}
+        &|progress| {
+            // Measured progress repeats a stage; each stage prints once.
+            if progress.amount.is_some() {
+                return;
+            }
+            match progress.stage {
+                Stage::WaitingForInviter => eprintln!("Waiting for the inviting device..."),
+                Stage::DownloadingTasks => eprintln!("Downloading synced data..."),
+                _ => {}
+            }
         },
     )
     .await

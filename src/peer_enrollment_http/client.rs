@@ -44,6 +44,16 @@ impl Client {
     ) -> Result<aven_core::sync::SharedStateInstallReport> {
         run!(self, |client| client.install(store, db))
     }
+    #[cfg(test)]
+    pub async fn install_reporting(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+        downloaded: &(dyn Fn(u64, Option<u64>) + Sync),
+    ) -> Result<aven_core::sync::SharedStateInstallReport> {
+        run!(self, |client| client
+            .install_reporting(store, db, downloaded))
+    }
     pub async fn invite(
         &self,
         store: &ProtectedLocalKeyStore,

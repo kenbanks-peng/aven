@@ -217,6 +217,18 @@ impl Client {
         store: &ProtectedLocalKeyStore,
         database: &Database,
     ) -> Result<bool> {
+        self.resume_reporting(store, database, &|_, _| {}).await
+    }
+
+    /// [`Self::resume`], reporting uploaded bytes of the package's exact
+    /// total after each stored chunk. Every attempt uploads from the first
+    /// chunk, so the count starts at zero each time.
+    pub async fn resume_reporting(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        database: &Database,
+        uploaded: &(dyn Fn(u64, u64) + Sync),
+    ) -> Result<bool> {
         let (seed, intent, package) = store.seed_http_inputs(database).await?;
         let publication = intent.publication(seed.genesis())?;
         let binding = publication.binding();
@@ -288,8 +300,11 @@ impl Client {
                 );
                 // Exact duplicate PUT is intentional: server status is not a
                 // reason to regenerate ciphertext or skip server-side checks.
+                let mut sent = 0;
+                uploaded(sent, budget.bytes);
                 for (component, chunks) in components {
                     for (index, bytes) in chunks.into_iter().enumerate() {
+                        let length = bytes.len() as u64;
                         let reply = self
                             .exchange(
                                 seed.genesis(),
@@ -307,6 +322,8 @@ impl Client {
                             matches!(reply, Reply::Stored),
                             "error bootstrap-upload-refused"
                         );
+                        sent += length;
+                        uploaded(sent, budget.bytes);
                     }
                 }
                 match self

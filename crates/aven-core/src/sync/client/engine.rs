@@ -98,8 +98,39 @@ pub async fn local_phase(database: &Database) -> Result<LocalPhase> {
     })
 }
 
-/// Setup and joining progress that a caller may present. Stages report where
-/// the engine is, not how much remains.
+/// Setup and joining progress that a caller may present: the current stage
+/// and, for stages that measure it, the work completed so far in this attempt.
+/// Amounts count only work this attempt performed, never item contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub stage: Stage,
+    pub amount: Option<Amount>,
+}
+
+impl From<Stage> for Progress {
+    fn from(stage: Stage) -> Self {
+        Self {
+            stage,
+            amount: None,
+        }
+    }
+}
+
+/// Completed work within one stage. Counts never decrease within a stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Amount {
+    /// Encrypted bytes transferred. `total` is exact once known and does not
+    /// change afterwards.
+    Bytes { done: u64, total: Option<u64> },
+    /// Metadata changes applied; the number still on the server is unknown.
+    Changes { done: u64 },
+    /// Images installed and images still waiting. Newly synced images can
+    /// raise `remaining`, so it is not a fixed total.
+    Images { done: u64, remaining: u64 },
+}
+
+/// Where setup or joining is. Stages report position, not how much remains;
+/// [`Progress::amount`] carries measured work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     PreparingData,
@@ -179,7 +210,7 @@ pub async fn run_setup(
     database: &Database,
     host: &dyn ClientHost,
     invitation: &SetupInvitation,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Outcome> {
     ensure_setup_available(database, host).await?;
     let blob_dir = host.blob_dir(database)?;
@@ -188,7 +219,7 @@ pub async fn run_setup(
     let bootstrap = bootstrap::Client::new(&invitation.server, link.clone())?;
     // A sealed publication intent means the claim and capture are complete.
     if database.seed_publication_intent_bytes().await?.is_none() {
-        progress(Stage::PreparingData);
+        progress(Stage::PreparingData.into());
         let seed = store
             .prepare_seed_claim(database, invitation.setup_id)
             .await
@@ -237,12 +268,20 @@ pub async fn run_setup(
             .package_seed_capture(database, &blob_dir, invitation.setup_id)
             .await?;
     }
-    progress(Stage::UploadingData);
+    progress(Stage::UploadingData.into());
     bootstrap
-        .resume(&store, database)
+        .resume_reporting(&store, database, &|done, total| {
+            progress(Progress {
+                stage: Stage::UploadingData,
+                amount: Some(Amount::Bytes {
+                    done,
+                    total: Some(total),
+                }),
+            })
+        })
         .await
         .map_err(explain_fenced_setup_refusal)?;
-    progress(Stage::FinishingSetup);
+    progress(Stage::FinishingSetup.into());
     // Binds this installation's enrollment identity to the server.
     enrollment::Client::new(&invitation.server, link.clone())?
         .refresh(&store, database)
@@ -559,7 +598,7 @@ pub async fn run_join(
     host: &dyn ClientHost,
     invitation: impl FnOnce() -> Result<Option<DeviceInvitation>>,
     replace: bool,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<(String, Outcome)> {
     host.ensure_sync_allowed()?;
     let store = key_store(host, database).await?;
@@ -602,11 +641,16 @@ pub async fn run_join(
         .await?;
         server
     };
-    progress(Stage::DownloadingTasks);
+    progress(Stage::DownloadingTasks.into());
     enrollment::Client::new(&server, link.clone())?
-        .install(&store, database)
+        .install_reporting(&store, database, &|done, total| {
+            progress(Progress {
+                stage: Stage::DownloadingTasks,
+                amount: Some(Amount::Bytes { done, total }),
+            })
+        })
         .await?;
-    progress(Stage::CatchingUp);
+    progress(Stage::CatchingUp.into());
     let client = tail::Client::new(&server, link.clone())?;
     let outcome = drain_reporting(
         &client,
@@ -615,11 +659,7 @@ pub async fn run_join(
         host,
         &blob_dir,
         ROUND_LIMIT,
-        &mut |round| {
-            if round.metadata_caught_up && round.images != ImageTransfer::Complete {
-                progress(Stage::DownloadingImages);
-            }
-        },
+        Some(progress),
     )
     .await?;
     Ok((server, outcome))
@@ -660,14 +700,14 @@ pub async fn await_join(
     invitation: Option<Invitation>,
     replace: bool,
     deadline: Instant,
-    progress: &(dyn Fn(Stage) + Sync),
+    progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<()> {
     let peer = client
         .prepare(store, database, invitation, replace)
         .await
         .map_err(explain_join_refusal)?;
     let mut posted = client.post(&peer).await;
-    progress(Stage::WaitingForInviter);
+    progress(Stage::WaitingForInviter.into());
     let others = client.has_other_attempts(store, database).await?;
     loop {
         if posted.as_ref().is_err_and(busy) {
@@ -902,16 +942,7 @@ pub async fn drain(
     blob_dir: &Path,
     round_limit: usize,
 ) -> Result<Outcome> {
-    drain_reporting(
-        client,
-        store,
-        database,
-        host,
-        blob_dir,
-        round_limit,
-        &mut |_| {},
-    )
-    .await
+    drain_reporting(client, store, database, host, blob_dir, round_limit, None).await
 }
 
 async fn drain_reporting(
@@ -921,7 +952,7 @@ async fn drain_reporting(
     host: &dyn ClientHost,
     blob_dir: &Path,
     round_limit: usize,
-    on_round: &mut (dyn FnMut(&Round) + Send),
+    progress: Option<&(dyn Fn(Progress) + Sync)>,
 ) -> Result<Outcome> {
     let conflicts_before = conflict_identities(database).await?;
     super::device_label::publish_if_missing(database, store, host).await?;
@@ -930,14 +961,24 @@ async fn drain_reporting(
     let mut image_retries = 0;
     let mut sent_changes = 0;
     let mut received_changes = 0;
+    let mut images_progress = None;
     let mut drain = Box::pin(client.start_drain(store, database)).await?;
     while rounds < round_limit {
         let round: Round =
             Box::pin(client.round_in_drain(store, database, blob_dir, &mut drain)).await?;
-        on_round(&round);
         rounds += 1;
         sent_changes += round.sent_changes;
         received_changes += round.received_changes;
+        if let Some(progress) = progress {
+            images_progress = report_round(
+                database,
+                &round,
+                received_changes,
+                images_progress,
+                progress,
+            )
+            .await?;
+        }
         last = Some(round);
         match round.images {
             ImageTransfer::Complete if round.metadata_caught_up => break,
@@ -965,6 +1006,43 @@ async fn drain_reporting(
         conflicts: conflicts_after.len(),
         new_conflicts: conflicts_after.difference(&conflicts_before).count(),
     })
+}
+
+/// Reports catch-up or image progress after a round. Images count as done
+/// when the number waiting drops, so a newly synced image never lowers the
+/// count, and a failed transfer leaves it unchanged. Counting waiting images
+/// costs one local query, made only while images are outstanding.
+async fn report_round(
+    database: &Database,
+    round: &Round,
+    received_changes: usize,
+    images: Option<(u64, u64)>,
+    progress: &(dyn Fn(Progress) + Sync),
+) -> Result<Option<(u64, u64)>> {
+    if !round.metadata_caught_up {
+        progress(Progress {
+            stage: Stage::CatchingUp,
+            amount: Some(Amount::Changes {
+                done: received_changes as u64,
+            }),
+        });
+        return Ok(images);
+    }
+    if round.images == ImageTransfer::Complete {
+        return Ok(images);
+    }
+    let remaining = database.encrypted_image_downloads_remaining().await?;
+    let done = images_done(images, remaining);
+    progress(Progress {
+        stage: Stage::DownloadingImages,
+        amount: Some(Amount::Images { done, remaining }),
+    });
+    Ok(Some((done, remaining)))
+}
+
+/// Images done after a round, given the previous `(done, remaining)` report.
+fn images_done(previous: Option<(u64, u64)>, remaining: u64) -> u64 {
+    previous.map_or(0, |(done, before)| done + before.saturating_sub(remaining))
 }
 
 async fn conflict_identities(database: &Database) -> Result<HashSet<String>> {
@@ -1103,6 +1181,17 @@ pub async fn status_report(database: &Database, host: &dyn ClientHost) -> Result
 mod tests {
     use super::*;
     use crate::sync::client::errors::has_code;
+
+    #[test]
+    fn images_done_counts_only_drops_in_remaining_images() {
+        assert_eq!(images_done(None, 10), 0);
+        assert_eq!(images_done(Some((0, 10)), 9), 1);
+        // A failed transfer leaves the count unchanged.
+        assert_eq!(images_done(Some((1, 9)), 9), 1);
+        // Newly synced images raise what remains, never lower what is done.
+        assert_eq!(images_done(Some((1, 9)), 12), 1);
+        assert_eq!(images_done(Some((1, 12)), 11), 2);
+    }
 
     #[test]
     fn seed_claim_only_labels_a_real_setup_mismatch_as_invitation_mismatch() {

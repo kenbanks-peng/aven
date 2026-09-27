@@ -1363,6 +1363,7 @@ impl ProtectedLocalKeyStore {
         db: &Database,
         transport: &crate::sync::client::enrollment::Client,
         locator: &str,
+        downloaded: &(dyn Fn(u64, Option<u64>) + Sync),
     ) -> Result<crate::sync::SharedStateInstallReport> {
         let guard = InstallationGuard::acquire(db.path())?;
         self.validate_database(db).await?;
@@ -1407,6 +1408,7 @@ impl ProtectedLocalKeyStore {
                 &peer,
                 &verified,
                 &evidence.descriptor,
+                downloaded,
             )
             .await?;
         let report = db

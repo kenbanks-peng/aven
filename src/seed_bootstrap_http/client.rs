@@ -67,4 +67,20 @@ impl Client {
             })
             .await
     }
+
+    #[cfg(test)]
+    pub async fn resume_reporting(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        database: &Database,
+        uploaded: &(dyn Fn(u64, u64) + Sync),
+    ) -> Result<bool> {
+        self.driver
+            .run(|link| async move {
+                bootstrap::Client::new(&self.origin, link)?
+                    .resume_reporting(store, database, uploaded)
+                    .await
+            })
+            .await
+    }
 }

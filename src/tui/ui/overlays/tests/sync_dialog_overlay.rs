@@ -1,5 +1,5 @@
 use super::*;
-use crate::sync::encrypted::{LocalPhase, SetupPreview, Stage};
+use crate::sync::encrypted::{Amount, LocalPhase, SetupPreview, Stage};
 use crate::tui::overlay::{AutomaticSyncService, InvitationKind, SecretText, SyncPage};
 use crate::tui::sync_operations::{
     DrainSummary, OperationFailure, OperationKind, OperationResult, RunningOperation, SyncActivity,
@@ -280,6 +280,7 @@ fn running(kind: OperationKind, stage: Option<Stage>) -> SyncActivity {
         running: Some(RunningOperation {
             kind,
             stage,
+            amount: None,
             started_at: std::time::Instant::now(),
         }),
         last: None,
@@ -603,6 +604,115 @@ fn setup_progress_marks_reached_stages_without_counts() {
     assert!(rendered.contains("close this dialog and keep working"));
     assert!(!rendered.contains('%'));
     assert!(!rendered.contains("Resume setup"));
+}
+
+fn measured(kind: OperationKind, stage: Stage, amount: Amount) -> SyncActivity {
+    let mut activity = running(kind, Some(stage));
+    activity.running.as_mut().unwrap().amount = Some(amount);
+    activity
+}
+
+#[test]
+fn setup_upload_shows_bytes_and_a_percentage_of_the_exact_total() {
+    let status = TuiSyncStatus {
+        set_up: true,
+        phase: LocalPhase::SetupIncomplete,
+        ..TuiSyncStatus::default()
+    };
+    let amount = |done| Amount::Bytes {
+        done,
+        total: Some(4 * 1024 * 1024),
+    };
+    let partway = render_page(
+        SyncPage::Home,
+        status.clone(),
+        measured(
+            OperationKind::Setup,
+            Stage::UploadingData,
+            amount(1024 * 1024 + 1),
+        ),
+    );
+    assert!(partway.contains("1.0 MiB of 4.0 MiB · 25%"), "{partway}");
+
+    // Rounding never reports completion before the last byte.
+    let almost = render_page(
+        SyncPage::Home,
+        status.clone(),
+        measured(
+            OperationKind::Setup,
+            Stage::UploadingData,
+            amount(4 * 1024 * 1024 - 1),
+        ),
+    );
+    assert!(almost.contains("· 99%"), "{almost}");
+    let done = render_page(
+        SyncPage::Home,
+        status,
+        measured(
+            OperationKind::Setup,
+            Stage::UploadingData,
+            amount(4 * 1024 * 1024),
+        ),
+    );
+    assert!(done.contains("4.0 MiB of 4.0 MiB · 100%"), "{done}");
+    assert!(done.contains("· Finishing setup"));
+}
+
+#[test]
+fn unknown_totals_show_counts_without_a_percentage() {
+    let joining = |stage, amount| {
+        render_page(
+            SyncPage::Home,
+            local_status(),
+            measured(OperationKind::Join, stage, amount),
+        )
+    };
+    let sizing = joining(
+        Stage::DownloadingTasks,
+        Amount::Bytes {
+            done: 2048,
+            total: None,
+        },
+    );
+    assert!(sizing.contains("2.0 KiB so far"), "{sizing}");
+    assert!(!sizing.contains('%'));
+
+    let catching_up = joining(Stage::CatchingUp, Amount::Changes { done: 1 });
+    assert!(catching_up.contains("1 change applied"), "{catching_up}");
+    assert!(!catching_up.contains('%'));
+
+    let images = joining(
+        Stage::DownloadingImages,
+        Amount::Images {
+            done: 3,
+            remaining: 40,
+        },
+    );
+    assert!(images.contains("3 done · 40 left"), "{images}");
+    assert!(!images.contains('%'));
+    // The count sits under the current step.
+    let state = borrow_value(SyncDialogState::default());
+    let view = activity_view(
+        state,
+        local_status(),
+        measured(
+            OperationKind::Join,
+            Stage::DownloadingImages,
+            Amount::Images {
+                done: 3,
+                remaining: 40,
+            },
+        ),
+    );
+    let lines: Vec<_> = sync_dialog_lines_for_test_width(&view, 60)
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let step = lines
+        .iter()
+        .position(|line| line.contains("Downloading images"))
+        .unwrap();
+    assert!(lines[step + 1].contains("3 done · 40 left"));
 }
 
 #[test]
@@ -972,6 +1082,7 @@ fn removal_results_do_not_claim_completion_before_rotation() {
         running: Some(RunningOperation {
             kind: OperationKind::RemoveDevice([0xb2; 32]),
             stage: None,
+            amount: None,
             started_at: std::time::Instant::now(),
         }),
         ..device_activity(false)
@@ -1007,6 +1118,7 @@ fn join_timeout_guidance_stays_visible_while_resuming_in_the_session() {
         running: Some(RunningOperation {
             kind: OperationKind::Join,
             stage: Some(Stage::WaitingForInviter),
+            amount: None,
             started_at: std::time::Instant::now(),
         }),
         last: None,

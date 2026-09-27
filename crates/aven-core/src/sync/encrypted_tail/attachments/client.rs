@@ -386,6 +386,17 @@ pub struct Download {
     sha256: String,
 }
 impl Database {
+    /// Images whose bytes this device still has to download. Counting reads
+    /// only local state and never consumes a selection turn.
+    pub async fn encrypted_image_downloads_remaining(&self) -> Result<u64> {
+        let mut conn = self.acquire_reader().await?;
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(DISTINCT o.object) {DOWNLOAD_CANDIDATES}"
+        )))
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(u64::try_from(count)?)
+    }
     /// Selects and advances past one pending object before transfer. The local
     /// cursor orders attempts, not acceptance, validation or content progress.
     pub async fn prepare_encrypted_image_download(

@@ -330,7 +330,10 @@ The in-app command catalog is the authoritative shortcut reference:
   expires.
   Closing the Sync dialog likewise hides progress without stopping setup,
   joining, or device removal; quitting the TUI interrupts them, and they can
-  be resumed later.
+  be resumed later. During setup and joining, the dialog shows how much has
+  transferred: encrypted data with a percentage once its size is known, and
+  images as done and left. A resumed setup uploads its data again, so the
+  count restarts from zero.
 - Prefix keys show their available continuations in the footer.
 
 | Prefix | Family |

@@ -972,6 +972,13 @@ async fn failed_first_image_does_not_starve_later_downloads(corrupt: bool) {
     let available_path = f.root.path().join("objects/sha256").join(&objects[1].1);
     assert!(!missing_path.exists() && !available_path.exists());
     for round in 0..3 {
+        if round == 1 {
+            // A failed attempt leaves both images remaining.
+            assert_eq!(
+                f.seed.encrypted_image_downloads_remaining().await.unwrap(),
+                2
+            );
+        }
         // Reopening the receiver cannot reset selection to the failing object.
         let receiver = Database::open(f.seed.path()).await.unwrap();
         let result = Client::new(&f.origin)
@@ -1001,6 +1008,11 @@ async fn failed_first_image_does_not_starve_later_downloads(corrupt: bool) {
         "an unavailable earlier object must not starve this image"
     );
     assert!(!missing_path.exists());
+    // Only the installed image stops counting as remaining.
+    assert_eq!(
+        f.seed.encrypted_image_downloads_remaining().await.unwrap(),
+        1
+    );
     // Observing pending demand never consumes a selection turn.
     let selector = f.seed.meta("e2ee_image_download_after").await.unwrap();
     let inputs = f.seed_store.tail_inputs(&f.seed, &f.origin).await.unwrap();

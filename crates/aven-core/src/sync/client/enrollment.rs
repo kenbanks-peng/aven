@@ -190,9 +190,23 @@ impl Client {
         store: &ProtectedLocalKeyStore,
         db: &Database,
     ) -> Result<crate::sync::SharedStateInstallReport> {
-        store.install_peer_snapshot(db, self, &self.locator).await
+        self.install_reporting(store, db, &|_, _| {}).await
     }
 
+    /// [`Self::install`], reporting downloaded snapshot bytes. The total is
+    /// `None` until the catalogs that size the rest have arrived.
+    pub async fn install_reporting(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+        downloaded: &(dyn Fn(u64, Option<u64>) + Sync),
+    ) -> Result<crate::sync::SharedStateInstallReport> {
+        store
+            .install_peer_snapshot(db, self, &self.locator, downloaded)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn download(
         &self,
         store: &ProtectedLocalKeyStore,
@@ -201,6 +215,7 @@ impl Client {
         peer: &membership::Joiner,
         verified: &membership::VerifiedEnrollment,
         descriptor: &[u8],
+        downloaded: &(dyn Fn(u64, Option<u64>) + Sync),
     ) -> Result<crate::sync::bootstrap_format::download::Metadata> {
         use crate::sync::{
             bootstrap_format::{self, download::Metadata},
@@ -267,6 +282,7 @@ impl Client {
         };
         let mut total = 0_u64;
         let mut chunks = 0_u64;
+        downloaded(0, None);
         for (i, recipe) in bootstrap_format::download::catalogs(descriptor)?
             .into_iter()
             .enumerate()
@@ -286,13 +302,21 @@ impl Client {
                     "error snapshot-limit"
                 );
                 package.catalogs[i].extend(bytes);
+                downloaded(total, None);
                 crate::sync::crash::Crash::Snapshot.at("download");
             }
         }
-        for recipe in bootstrap_format::download::artifacts(descriptor, &package.catalogs)? {
-            if matches!(recipe.component, Component::Image(_)) {
-                continue;
-            }
+        let artifacts: Vec<_> =
+            bootstrap_format::download::artifacts(descriptor, &package.catalogs)?
+                .into_iter()
+                .filter(|recipe| !matches!(recipe.component, Component::Image(_)))
+                .collect();
+        let expected = artifacts
+            .iter()
+            .flat_map(|recipe| &recipe.lengths)
+            .fold(total, |sum, length| sum.saturating_add(*length));
+        downloaded(total, Some(expected));
+        for recipe in artifacts {
             let mut records = Vec::new();
             for (index, length) in recipe.lengths.into_iter().enumerate() {
                 let bytes = read(Some(recipe.component), u64::try_from(index)?).await?;
@@ -308,6 +332,7 @@ impl Client {
                     total <= MAX_STORAGE_BYTES && chunks <= MAX_CHUNKS,
                     "error snapshot-limit"
                 );
+                downloaded(total, Some(expected));
                 records.push(bytes);
             }
             match recipe.component {
