@@ -326,6 +326,27 @@ aven daemon repair --if-installed --program /path/to/aven
 
 The repair command succeeds without changes when the service is absent.
 
+## Upgrade from unencrypted sync
+
+Earlier releases synced without end-to-end encryption. Encrypted sync can't
+use that server storage or read its history, so every device moves to a new
+sync:
+
+1. Before upgrading, run `aven sync` with the old release on every device, so
+   the device you start from has all changes.
+2. Upgrade Aven everywhere, including the server.
+3. Prepare new server storage and serve it, as in [Start a server](#start-a-server).
+   Use a new `--data` path.
+4. On the device with the complete data, run `aven sync setup` with the new
+   setup invitation. The preview notes that the database stops using the old
+   server.
+5. Join each other device from an empty database, as in
+   [Add a device](#add-a-device). Point `--db` at a new path and use it from
+   then on; the old database stays readable locally.
+
+The old server storage still holds your data unencrypted. Delete it once every
+device has joined the new sync.
+
 ## Recover from device loss
 
 A database that has set up or joined sync can create backups, including while
