@@ -186,6 +186,28 @@ pub(crate) fn explain(
     if let Some(explanation) = protected_key_store_explanation(error) {
         return Some(explanation);
     }
+    if has("enrollment-protected-missing") {
+        return Some(protected_key_store_kind_explanation(
+            ProtectedLocalKeyStoreErrorKind::MissingAuthority,
+        ));
+    }
+    if first(&[
+        "enrollment-protected-framing",
+        "enrollment-protected-corrupt",
+        "enrollment-protected-limit",
+        "enrollment-protected-conflict",
+    ])
+    .is_some()
+    {
+        return Some(protected_key_store_kind_explanation(
+            ProtectedLocalKeyStoreErrorKind::Corrupt,
+        ));
+    }
+    if has("enrollment-protected-write") {
+        return Some(protected_key_store_kind_explanation(
+            ProtectedLocalKeyStoreErrorKind::WriteFailed,
+        ));
+    }
     if has("sync-setup-storage-already-claimed") {
         return Some(Explanation {
             code: "sync-setup-storage-already-claimed",
@@ -556,7 +578,11 @@ fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
             .downcast_ref::<ProtectedLocalKeyStoreError>()
             .map(ProtectedLocalKeyStoreError::kind)
     })?;
-    Some(match kind {
+    Some(protected_key_store_kind_explanation(kind))
+}
+
+fn protected_key_store_kind_explanation(kind: ProtectedLocalKeyStoreErrorKind) -> Explanation {
+    match kind {
         ProtectedLocalKeyStoreErrorKind::MissingAuthority => Explanation {
             code: "protected-key-storage-missing",
             message: "Protected sync keys are missing from this device.",
@@ -592,7 +618,7 @@ fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
             message: "Protected sync key storage isn't supported on this platform.",
             next_step: "Use a supported macOS or Linux installation for encrypted sync.",
         },
-    })
+    }
 }
 
 fn access_refused(code: &'static str) -> Explanation {
@@ -703,6 +729,37 @@ mod tests {
         let rejected = explain(ErrorAction::General, ErrorSurface::Tui, &error).unwrap();
         assert!(rejected.message.contains("expired, was replaced"));
         assert!(rejected.next_step.contains("`aven server setup`"));
+    }
+
+    #[test]
+    fn enrollment_protected_storage_codes_use_actionable_storage_explanations() {
+        for (raw, code) in [
+            (
+                "enrollment-protected-missing",
+                "protected-key-storage-missing",
+            ),
+            (
+                "enrollment-protected-framing",
+                "protected-key-storage-unsafe",
+            ),
+            (
+                "enrollment-protected-corrupt",
+                "protected-key-storage-unsafe",
+            ),
+            ("enrollment-protected-limit", "protected-key-storage-unsafe"),
+            (
+                "enrollment-protected-conflict",
+                "protected-key-storage-unsafe",
+            ),
+            (
+                "enrollment-protected-write",
+                "protected-key-storage-write-failed",
+            ),
+        ] {
+            let error = anyhow!("error {raw}");
+            let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+            assert_eq!(explanation.code, code);
+        }
     }
 
     #[test]

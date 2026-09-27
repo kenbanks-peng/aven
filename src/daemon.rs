@@ -159,13 +159,27 @@ async fn run_loop(
                         backoff_seconds = (backoff_seconds * 2).min(300);
                         next_sync = Instant::now() + Duration::from_secs(retry_seconds);
                         retry_not_before = Some(next_sync);
-                        warn!(error = %err, retry_seconds, "daemon sync failed");
+                        warn!(error = %daemon_error(&err), retry_seconds, "daemon sync failed");
                     }
                 }
             }
         }
     }
     Ok(())
+}
+
+fn daemon_error(error: &anyhow::Error) -> String {
+    match crate::sync::error_explanations::explain(
+        crate::sync::error_explanations::ErrorAction::General,
+        crate::sync::error_explanations::ErrorSurface::Cli,
+        error,
+    ) {
+        Some(explanation) => format!(
+            "{} [{}] Next: {}",
+            explanation.message, explanation.code, explanation.next_step
+        ),
+        None => error.to_string(),
+    }
 }
 
 fn current_binary_fingerprint() -> Result<BinaryFingerprint> {
@@ -305,6 +319,18 @@ mod tests {
         config.daemon.wake_addr = Some("not-an-address".to_string());
 
         wake_if_enabled(&config);
+    }
+
+    #[test]
+    fn protected_storage_daemon_errors_are_actionable() {
+        let error = anyhow::Error::new(
+            crate::protected_local_keys::ProtectedLocalKeyStoreError::new(
+                crate::protected_local_keys::ProtectedLocalKeyStoreErrorKind::MissingAuthority,
+            ),
+        );
+        let message = daemon_error(&error);
+        assert!(message.contains("protected-key-storage-missing"));
+        assert!(message.contains("Do not replace them with new keys"));
     }
 
     #[test]

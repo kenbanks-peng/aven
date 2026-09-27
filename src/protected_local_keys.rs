@@ -72,9 +72,13 @@ fn production_storage(directory: std::path::PathBuf) -> StoreResult<Arc<dyn Prot
 mod keychain {
     use super::*;
     use std::collections::HashSet;
+    use std::sync::Mutex;
 
     use aven_core::sync::client::keys::{KEYRING_ITEM, ProtectedStorage, ProtectedStorageLock};
+    use security_framework::os::macos::keychain::SecKeychain;
     use zeroize::Zeroizing;
+
+    static KEYCHAIN_INTERACTION: Mutex<()> = Mutex::new(());
 
     /// Secret items are generic passwords named by service and namespace:
     /// the keyring uses `service`, every other item `service.item`.
@@ -106,11 +110,26 @@ mod keychain {
             options
         }
 
+        /// Keychain ACL checks can display UI; background clients must fail instead of waiting.
+        fn without_user_interaction<T>(
+            &self,
+            operation: impl FnOnce() -> security_framework::base::Result<T>,
+        ) -> StoreResult<security_framework::base::Result<T>> {
+            let _process_guard = KEYCHAIN_INTERACTION
+                .lock()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
+            let _interaction_guard = SecKeychain::disable_user_interaction()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
+            Ok(operation())
+        }
+
         fn load(&self, namespace: &str, item: &str) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
             use security_framework::passwords::generic_password;
             use security_framework_sys::base::errSecItemNotFound;
 
-            match generic_password(self.options(namespace, item)) {
+            match self
+                .without_user_interaction(|| generic_password(self.options(namespace, item)))?
+            {
                 Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
                 Err(source) if source.code() == errSecItemNotFound => Ok(None),
                 Err(_) => Err(error(ProtectedLocalKeyStoreErrorKind::Unavailable)),
@@ -148,7 +167,9 @@ mod keychain {
 
             // The caller has already observed absence. A process guard around this
             // operation serializes cooperating Aven hosts. Re-read before success.
-            match set_generic_password_options(bytes, self.options(namespace, item)) {
+            match self.without_user_interaction(|| {
+                set_generic_password_options(bytes, self.options(namespace, item))
+            })? {
                 Ok(()) => match self.load(namespace, item)? {
                     Some(saved) if saved.as_slice() == bytes => Ok(()),
                     _ => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
@@ -161,7 +182,9 @@ mod keychain {
             use security_framework::passwords::delete_generic_password_options;
             use security_framework_sys::base::errSecItemNotFound;
 
-            match delete_generic_password_options(self.options(namespace, item)) {
+            match self.without_user_interaction(|| {
+                delete_generic_password_options(self.options(namespace, item))
+            })? {
                 Ok(()) => Ok(()),
                 Err(source) if source.code() == errSecItemNotFound => Ok(()),
                 Err(_) => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
@@ -191,14 +214,15 @@ mod keychain {
             use security_framework::item::{CloudSync, ItemClass, ItemSearchOptions, Limit};
             use security_framework_sys::base::errSecItemNotFound;
 
-            let results = match ItemSearchOptions::new()
-                .class(ItemClass::generic_password())
-                .account(namespace)
-                .cloud_sync(CloudSync::MatchSyncNo)
-                .load_attributes(true)
-                .limit(Limit::All)
-                .search()
-            {
+            let results = match self.without_user_interaction(|| {
+                ItemSearchOptions::new()
+                    .class(ItemClass::generic_password())
+                    .account(namespace)
+                    .cloud_sync(CloudSync::MatchSyncNo)
+                    .load_attributes(true)
+                    .limit(Limit::All)
+                    .search()
+            })? {
                 Ok(results) => results,
                 Err(source) if source.code() == errSecItemNotFound => {
                     return Ok(HashSet::new());
@@ -239,8 +263,11 @@ mod keychain {
         struct Cleanup(KeychainStorage, String);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let _ = self.0.delete_secret(&self.1, KEYRING_ITEM);
-                let _ = self.0.delete_secret(&self.1, "seed");
+                if let Ok(items) = self.0.list_secrets(&self.1) {
+                    for item in items {
+                        let _ = self.0.delete_secret(&self.1, &item);
+                    }
+                }
             }
         }
 
@@ -318,6 +345,7 @@ mod keychain {
                 first.protected_storage_bytes(),
                 reopened.protected_storage_bytes()
             );
+            store.prepare_seed_source(&db).await.unwrap();
             cleanup.0.delete_secret(&cleanup.1, "seed").unwrap();
             assert!(store.prepare_seed_claim(&db, [9; 32]).await.is_err());
         }
