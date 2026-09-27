@@ -14,13 +14,6 @@ The sync server is not a backup. Only your devices hold the decryption keys;
 if all devices are lost, the server cannot restore your data. Keep
 [backups](/backups/) or add another device.
 
-In the TUI, the **Sync** dialog covers the same steps: open it with `:sync`,
-`C s`, or a click on the sync indicator in the header. Once sync is set up, it
-shows the sync status, the server, and whether automatic sync is on, plus
-pending changes and conflicts when there are any. **Sync now** shows its
-progress in the status line, as the header does. Press `d` for diagnostic
-details. Press `S` to sync immediately without opening the dialog.
-
 Use [Configuration](/configuration/) for `sync.*` and `daemon.*` settings. See
 [Back up and restore](/backups/) when you need to preserve, move, or recover
 local data.
@@ -80,7 +73,8 @@ invitation and pass `--yes`. Every other device starts from this data. Afterward
 you can still create backups, but restore and import are refused on this
 database. Rerun the same command to resume an interrupted setup.
 
-In the TUI, choose **Set up sync** in the Sync dialog and paste the invitation.
+In the TUI, open the Sync dialog with `:sync`, `C s`, or a click on the sync
+indicator in the header, choose **Set up sync**, and paste the invitation.
 The invitation is never displayed. Before anything starts, the dialog shows the
 server, the workspaces and tasks this database will publish, and any images
 missing on this computer, which other devices see as unavailable. Setup keeps
@@ -244,6 +238,11 @@ transfers settle. Text and JSON output report sent and received changes, open
 conflicts, and how many conflicts were newly created in that run. New conflicts
 are identified by their conflict identities, not by comparing counts. Sync
 always uses the server chosen during setup or join.
+
+In the TUI, press `S` to sync, or choose **Sync now** in the Sync dialog;
+progress shows in the status line and header. The dialog also shows the sync
+status, the server, whether automatic sync is on, and any pending changes and
+conflicts. Press `d` in it for diagnostic details.
 
 Check local state without contacting the server:
 
