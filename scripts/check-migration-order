@@ -23,7 +23,10 @@ if [[ ! -d "$migrations_dir" ]]; then
   exit 1
 fi
 
-mapfile -t migration_paths < <(find "$migrations_dir" -maxdepth 1 -type f -name '*.sql' -print | sort)
+migration_paths=()
+while IFS= read -r path; do
+  migration_paths+=("$path")
+done < <(find "$migrations_dir" -maxdepth 1 -type f -name '*.sql' -print | sort)
 
 previous_timestamp=""
 previous_path=""
@@ -50,7 +53,10 @@ if ! git -C "$repo_root" rev-parse --verify --quiet "$target_ref^{commit}" >/dev
   exit 0
 fi
 
-mapfile -t merge_bases < <(git -C "$repo_root" merge-base --all HEAD "$target_ref" 2>/dev/null || true)
+merge_bases=()
+while IFS= read -r merge_base; do
+  merge_bases+=("$merge_base")
+done < <(git -C "$repo_root" merge-base --all HEAD "$target_ref" 2>/dev/null || true)
 if [[ "${#merge_bases[@]}" -ne 1 ]]; then
   printf 'skip migration target-order check: expected one merge base with %s, got %s\n' \
     "$target_ref" \
@@ -59,7 +65,13 @@ if [[ "${#merge_bases[@]}" -ne 1 ]]; then
 fi
 merge_base="${merge_bases[0]}"
 
-mapfile -t target_migrations < <(git -C "$repo_root" ls-tree -r --name-only "$target_ref" -- migrations crates/aven-core/migrations '*.sql' | sort)
+target_migrations=()
+while IFS= read -r path; do
+  target_migrations+=("$path")
+done < <(
+  git -C "$repo_root" ls-tree -r --name-only "$target_ref" \
+    -- migrations crates/aven-core/migrations '*.sql' | sort
+)
 latest_target_timestamp=""
 for path in "${target_migrations[@]}"; do
   name="$(basename "$path")"
@@ -75,7 +87,10 @@ if [[ -z "$latest_target_timestamp" ]]; then
   exit 0
 fi
 
-mapfile -t added_migrations < <(
+added_migrations=()
+while IFS= read -r path; do
+  added_migrations+=("$path")
+done < <(
   {
     git -C "$repo_root" diff --name-status --diff-filter=AR "$merge_base" -- crates/aven-core/migrations \
       | awk '$1 == "A" { print $2 } $1 ~ /^R/ { print $3 }'
