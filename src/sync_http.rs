@@ -4,7 +4,6 @@
 //! response bodies are read up to one byte past the request's limit, so the
 //! engine sees and refuses anything larger. Diagnostics deliberately discard
 //! Reqwest URLs and bodies.
-use std::error::Error as _;
 use std::future::Future;
 
 use anyhow::Result;
@@ -156,7 +155,7 @@ mod tests {
             std::io::ErrorKind::InvalidData,
             rustls::Error::General("certificate failure".into()),
         );
-        let outer = std::io::Error::new(std::io::ErrorKind::Other, tls);
+        let outer = std::io::Error::other(tls);
         assert!(contains_rustls_error(&outer));
         assert!(!contains_rustls_error(&std::io::Error::from(
             std::io::ErrorKind::ConnectionRefused
