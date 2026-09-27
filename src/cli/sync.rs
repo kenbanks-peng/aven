@@ -15,7 +15,12 @@ of --value, --value-file, or --value-stdin."#;
 
 pub(super) const SERVER_HELP: &str = r#"Prepare storage with `aven server setup` first. The server does not terminate
 TLS. Bind it directly to a trusted VPN address for HTTP, or use a TLS reverse
-proxy. Public and wildcard binds require --unsafe-public-bind."#;
+proxy. Public and wildcard binds require --unsafe-public-bind.
+
+Storage defaults to $STATE_DIRECTORY/sync-server.sqlite when systemd sets
+StateDirectory=, otherwise ~/.local/state/aven/server/sync-server.sqlite
+(honoring $XDG_STATE_HOME). Pass the same --data PATH to setup and the server
+to use another location."#;
 
 pub(super) const SYNC_HELP: &str = r#"Sync is end-to-end encrypted. Start it on one device with `aven sync setup`
 and add other devices with `aven sync invite` and `aven sync join`. The server
@@ -154,7 +159,7 @@ pub(crate) struct ServerArgs {
     #[arg(long)]
     pub(crate) unsafe_public_bind: bool,
     /// SQLite path of storage prepared by `server setup`
-    #[arg(long, required = true)]
+    #[arg(long)]
     pub(crate) data: Option<PathBuf>,
 }
 
@@ -169,7 +174,7 @@ pub(crate) enum ServerSubcommand {
 pub(crate) struct ServerSetupArgs {
     /// SQLite path of the server storage
     #[arg(long)]
-    pub(crate) data: PathBuf,
+    pub(crate) data: Option<PathBuf>,
     /// HTTP or HTTPS origin that devices use to reach the server
     #[arg(long)]
     pub(crate) url: String,
@@ -179,7 +184,7 @@ pub(super) const SERVER_SETUP_HELP: &str = r#"The setup invitation lets one devi
 its database. It expires after one hour; until a device has claimed the
 server, running setup again replaces it. The replacement keeps the server's
 setup identity, so a device whose setup was interrupted resumes with the new
-invitation. Serve the storage with `aven server --data PATH --bind ADDRESS`;
+invitation. Serve the storage with `aven server --bind ADDRESS`;
 setup prints a suggested command. Bind the server directly to its trusted VPN
 address for HTTP, or put a TLS reverse proxy in front of it. Public and wildcard
 binds require --unsafe-public-bind."#;

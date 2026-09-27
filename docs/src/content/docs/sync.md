@@ -26,9 +26,14 @@ Prepare server storage once, giving the URL devices will use to reach it, then
 serve it:
 
 ```sh
-aven server setup --data ~/.local/state/aven/sync-server.sqlite --url http://100.100.20.30:3746
-aven server --data ~/.local/state/aven/sync-server.sqlite --bind 100.100.20.30:3746
+aven server setup --url http://100.100.20.30:3746
+aven server --bind 100.100.20.30:3746
 ```
+
+Storage goes in `~/.local/state/aven/server/sync-server.sqlite`, or in the
+directory systemd provides when the service declares `StateDirectory=`. Setup
+prints the path it used. To keep it elsewhere, pass the same `--data <path>` to
+both commands.
 
 `server setup` prints a setup invitation for the next step. Anyone with it can
 claim the server, so use it only on the device whose data should start the
@@ -51,7 +56,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/aven server --data %h/.local/state/aven/sync-server.sqlite --bind 100.100.20.30:3746
+ExecStart=/usr/local/bin/aven server --bind 100.100.20.30:3746
 Restart=on-failure
 RestartSec=5
 

@@ -164,7 +164,7 @@ fn complex_commands_keep_examples_and_safety_guidance() {
         (&["skill", "install"][..], "repeat for multiple"),
         (&["sync"][..], "end-to-end encrypted"),
         (&["server"][..], "trusted VPN address"),
-        (&["server", "setup"][..], "aven server --data PATH"),
+        (&["server", "setup"][..], "aven server --bind ADDRESS"),
     ];
 
     for (path, expected) in expectations {

@@ -987,19 +987,19 @@ than repeated on standard error.
 Serve end-to-end encrypted sync from storage prepared by `aven server setup`.
 
 ```sh
-aven server --data <path> [--bind <address>] [--unsafe-public-bind]
-aven server setup --data <path> --url <url>
+aven server [--data <path>] [--bind <address>] [--unsafe-public-bind]
+aven server setup [--data <path>] --url <url>
 ```
 
 | Option | Description |
 | --- | --- |
-| `--data <path>` | Required server SQLite database path. |
+| `--data <path>` | Server SQLite database path. Defaults to `$STATE_DIRECTORY/sync-server.sqlite` when systemd sets `StateDirectory=`, otherwise `$XDG_STATE_HOME/aven/server/sync-server.sqlite` (`~/.local/state/aven/server/sync-server.sqlite`). Pass the same path to both commands. |
 | `--bind <ip:port>` | Listen address. Defaults to `127.0.0.1:3746`. Loopback, private, and VPN addresses are accepted directly. |
 | `--unsafe-public-bind` | Allow binding a public or wildcard address. Prints a warning because payload encryption does not protect credentials or setup invitations. |
 | `--url <url>` | For `setup`: the HTTP or HTTPS origin devices use to reach the server, with no path, query, or credentials, and at most 255 bytes. |
 
 `server setup` stores an expiring setup verifier, prints a setup invitation for
-`aven sync setup`, and prints a starting `aven server --data ... --bind ...`
+`aven sync setup`, and prints the storage path and a starting `aven server --bind ...`
 command to standard error. The suggested bind uses an HTTP URL's port; HTTPS
 uses port 3746 for the service behind its proxy. For direct VPN HTTP, replace
 the loopback bind with the server's VPN address. Running setup again before a

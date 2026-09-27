@@ -112,7 +112,7 @@ pub(crate) fn explain(
         return Some(Explanation {
             code: "e2ee-server-already-claimed",
             message: "This server storage already belongs to an encrypted sync.",
-            next_step: "Start the existing server normally, or choose empty storage for a new sync.",
+            next_step: "Start the existing server normally. For a new sync, stop the server and move its storage aside, or pass a new --data path.",
         });
     }
     if has("e2ee-data-only-import-unavailable") {

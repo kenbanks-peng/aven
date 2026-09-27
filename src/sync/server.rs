@@ -1,10 +1,10 @@
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use aven_core::db::Database;
 use aven_core::sync::seed_claim::{Secret, StorageNotEmpty};
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -34,7 +34,7 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 const UNPREPARED_STORAGE: &str =
-    "error server-storage-unprepared hint=\"run `aven server setup --data PATH --url URL` first\"";
+    "error server-storage-unprepared hint=\"run `aven server setup --url URL` first\"";
 const INVALID_MEMBERSHIP: &str = "error server-membership-invalid hint=\"stored device membership failed verification; restore this path from a backup or prepare a new one with `aven server setup`\"";
 const UNSUPPORTED_STORAGE: &str = "error server-storage-unsupported hint=\"this storage holds unencrypted sync history, which is no longer supported; prepare a new path with `aven server setup`\"";
 
@@ -42,13 +42,22 @@ pub(crate) async fn run_server(args: ServerArgs, config: config::AppConfig) -> R
     if let Some(ServerSubcommand::Setup(setup)) = args.command {
         return setup_server(setup).await;
     }
-    let data = args.data.context("error server-data-required")?;
+    let data = server_data_path(args.data)?;
     serve(args.bind, args.unsafe_public_bind, &data, &config).await
+}
+
+fn server_data_path(flag: Option<PathBuf>) -> Result<PathBuf> {
+    match flag {
+        Some(path) => Ok(path),
+        None => config::default_server_data_path(),
+    }
 }
 
 async fn setup_server(args: ServerSetupArgs) -> Result<()> {
     let server = super::encrypted::server_origin(&args.url)?;
-    let database = Database::open(&args.data).await?;
+    let explicit_data = args.data.is_some();
+    let data = server_data_path(args.data)?;
+    let database = Database::open(&data).await?;
     let mut fresh_id = [0; 32];
     getrandom::fill(&mut fresh_id).map_err(|_| anyhow::anyhow!("error server-setup-entropy"))?;
     let secret = Secret::generate()?;
@@ -74,9 +83,14 @@ async fn setup_server(args: ServerSetupArgs) -> Result<()> {
     println!("{}", invitation.encode()?.as_str());
     eprintln!("Anyone with this invitation can claim this server. It expires in one hour.");
     eprintln!("Run `aven sync setup` on the device whose data should start the sync.");
+    eprintln!("Server storage: {}", data.display());
+    let data_arg = if explicit_data {
+        format!(" --data {}", data.display())
+    } else {
+        String::new()
+    };
     eprintln!(
-        "Then start the server: aven server --data {} --bind 127.0.0.1:{}",
-        args.data.display(),
+        "Then start the server: aven server{data_arg} --bind 127.0.0.1:{}",
         suggested_port(&args.url)
     );
     if args.url.starts_with("http://") && !origin_is_loopback(&args.url) {

@@ -22,8 +22,8 @@ pub use custom_commands::{
 };
 pub(crate) use paths::expand_tilde_from;
 pub use paths::{
-    config_dir_path, config_file_path, debug_db_path_from_env, default_db_path, expand_tilde,
-    resolve_blob_dir, resolve_db_path,
+    config_dir_path, config_file_path, debug_db_path_from_env, default_db_path,
+    default_server_data_path, expand_tilde, resolve_blob_dir, resolve_db_path,
 };
 pub use tui::{SidebarView, TableColumn, TaskColumnConfig, TaskTableConfig, TuiConfig};
 
