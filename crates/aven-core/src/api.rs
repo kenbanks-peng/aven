@@ -1532,7 +1532,8 @@ pub struct TaskActivity {
     pub kind: TaskActivityKind,
     pub summary: String,
     /// RFC 3339 UTC instant a task was deferred to, for availability changes
-    /// that set one. Clients format it for display.
+    /// and availability conflict resolutions that set one. Clients format it
+    /// for display.
     pub available_at: Option<String>,
     pub anchors_queue_idle: bool,
 }
