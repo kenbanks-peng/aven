@@ -172,7 +172,8 @@ pub(crate) enum ServerSubcommand {
 
 #[derive(Args)]
 pub(crate) struct ServerSetupArgs {
-    /// SQLite path of the server storage
+    /// SQLite path of the server storage; defaults to the standard location
+    /// described in `aven server --help`
     #[arg(long)]
     pub(crate) data: Option<PathBuf>,
     /// HTTP or HTTPS origin that devices use to reach the server
@@ -209,6 +210,11 @@ TLS. Bind it directly to a trusted VPN address for HTTP, or use a TLS reverse
 proxy. Public and wildcard binds require --unsafe-public-bind. Device
 credentials and setup invitations are not protected by Aven's end-to-end
 payload encryption.
+
+Storage defaults to $STATE_DIRECTORY/sync-server.sqlite when systemd sets
+StateDirectory=, otherwise ~/.local/state/aven/server/sync-server.sqlite
+(honoring $XDG_STATE_HOME). Pass the same --data PATH to setup and the server
+to use another location.
 "#;
 
 #[derive(Args)]
