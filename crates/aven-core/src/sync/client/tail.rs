@@ -116,6 +116,9 @@ impl Client {
                     Some("encrypted-tail-prefix-identity-collision") => {
                         tail::PrefixIdentityCollision.into()
                     }
+                    Some("attachment-quota-exceeded") => {
+                        anyhow::anyhow!("error attachment-quota-exceeded")
+                    }
                     _ => anyhow::anyhow!("error encrypted-tail-refused outcome-unknown"),
                 },
             })?;
@@ -207,7 +210,11 @@ impl Client {
         let ticket = match upload {
             Some(upload) => match self.upload_prepared_image(inputs, upload).await {
                 Ok(ticket) => Some(ticket),
-                Err(error) if is_stale(&error) || error.is::<PublishingBlocked>() => {
+                Err(error)
+                    if is_stale(&error)
+                        || error.is::<PublishingBlocked>()
+                        || super::errors::has_code(&error, "attachment-quota-exceeded") =>
+                {
                     return Err(error);
                 }
                 Err(_) => {

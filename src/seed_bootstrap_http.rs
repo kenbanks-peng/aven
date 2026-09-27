@@ -33,12 +33,13 @@ const CODES: http_admission::Codes = http_admission::codes!("bootstrap");
 struct Server {
     database: Database,
     admission: http_admission::Admission,
+    publication_policy: staging::PublicationPolicy,
 }
 
 /// A router serving only the bootstrap route.
 /// Claims use the storage's unexpired issued setup verifier.
 /// Bind loopback, a trusted VPN interface, or a TLS-protected private hop.
-pub fn router(database: Database) -> Router {
+pub fn router(database: Database, publication_policy: staging::PublicationPolicy) -> Router {
     Router::new()
         .route(PATH, post(handle))
         .fallback(|| async { http_admission::refusal(StatusCode::NOT_FOUND, "not-found") })
@@ -48,6 +49,7 @@ pub fn router(database: Database) -> Router {
         .with_state(Arc::new(Server {
             database,
             admission: http_admission::Admission::new(1),
+            publication_policy,
         }))
 }
 
@@ -200,7 +202,7 @@ async fn dispatch(server: &Server, secret: &Secret, e: Envelope) -> Result<Reply
                     descriptor_commitment: commitment,
                     record: &record,
                 },
-                staging::PublicationPolicy::default(),
+                server.publication_policy,
             )
             .await?
             .publication()

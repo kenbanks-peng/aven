@@ -220,6 +220,8 @@ pub(crate) fn operation_refusal(codes: &Codes, error: &anyhow::Error) -> Respons
         refusal(StatusCode::FORBIDDEN, codes.unauthorized)
     } else if aven_core::db::is_storage_error(error) {
         refusal(StatusCode::INTERNAL_SERVER_ERROR, codes.server_error)
+    } else if aven_core::sync::client::errors::has_code(error, "attachment-quota-exceeded") {
+        refusal(StatusCode::PAYLOAD_TOO_LARGE, "attachment-quota-exceeded")
     } else {
         refusal(StatusCode::BAD_REQUEST, codes.refused)
     }
@@ -289,7 +291,7 @@ pub(crate) fn no_store(mut response: Response) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{Body, HttpBody};
+    use axum::body::{Body, HttpBody, to_bytes};
     use std::{
         pin::Pin,
         sync::{
@@ -419,6 +421,17 @@ mod tests {
         .await;
         assert!(matches!(outcome, Outcome::PermitTimeout));
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn attachment_quota_refusal_keeps_its_stable_code() {
+        let response = operation_refusal(
+            &codes!("encrypted-image"),
+            &anyhow::anyhow!("error attachment-quota-exceeded"),
+        );
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(body, r#"{"error":"attachment-quota-exceeded"}"#);
     }
 
     #[tokio::test]

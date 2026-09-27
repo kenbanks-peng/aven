@@ -166,6 +166,9 @@ impl Client {
                 Some("bootstrap-setup-invitation-expired") if claim => {
                     anyhow::anyhow!("error bootstrap-setup-invitation-expired")
                 }
+                Some("attachment-quota-exceeded") => {
+                    anyhow::anyhow!("error attachment-quota-exceeded")
+                }
                 _ => anyhow::anyhow!("error bootstrap-refused outcome-unknown"),
             },
         })?;

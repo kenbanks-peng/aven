@@ -1764,6 +1764,12 @@ async fn client_reads_only_an_unauthorized_refusal_as_access_refusal() {
             "encrypted-tail-refused",
             false,
         ),
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "attachment-quota-exceeded",
+            "attachment-quota-exceeded",
+            false,
+        ),
     ] {
         let app = Router::new().route(
             PATH,

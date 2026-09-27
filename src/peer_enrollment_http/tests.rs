@@ -147,7 +147,7 @@ async fn serve_counted_with_clock(
     clock: Arc<AtomicU64>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     e2ee_http::issue_setup(&db).await;
-    let app = seed_bootstrap_http::router(db.clone())
+    let app = seed_bootstrap_http::router(db.clone(), Default::default())
         .merge(router_with_clock(db.clone(), clock))
         .merge(e2ee_http::tail_router(db));
     serve_counted_app(app, counts).await
@@ -391,7 +391,8 @@ async fn loopback_independent_peer_exact_reopen_and_current_authorization() {
     let listener = tokio::net::TcpListener::bind(origin.strip_prefix("http://").unwrap())
         .await
         .unwrap();
-    let app = seed_bootstrap_http::router(reopened_server.clone()).merge(router(reopened_server));
+    let app = seed_bootstrap_http::router(reopened_server.clone(), Default::default())
+        .merge(router(reopened_server));
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

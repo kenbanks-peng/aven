@@ -517,6 +517,20 @@ pub(crate) fn explain(
             next_step: "Remove it from another device in sync.",
         });
     }
+    if has("attachment-quota-exceeded") {
+        return Some(Explanation {
+            code: "attachment-quota-exceeded",
+            message: "The sync server's image storage limit for this workspace is full.",
+            next_step: "Remove images you no longer need, or ask the server operator to raise `local.attachment_lifecycle.server_workspace_quota_bytes`, then try again.",
+        });
+    }
+    if has("enrollment-store-unsupported") {
+        return Some(Explanation {
+            code: "enrollment-store-unsupported",
+            message: "This version of Aven can't read the protected sync data on this device.",
+            next_step: "Update Aven on this device. Do not replace or delete its protected sync keys.",
+        });
+    }
     if let Some(code) = first(UNSUPPORTED_CHANGE) {
         return Some(Explanation {
             code,
@@ -586,6 +600,8 @@ const BAD_RECORD: &[&str] = &[
     "encrypted-tail-same-id-divergence",
     "encrypted-tail-integrity-blocked",
     "encrypted-tail-prefix-identity-collision",
+    "encrypted-image-initial-catch-up",
+    "encrypted-image-projection",
 ];
 
 fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
@@ -864,5 +880,35 @@ mod tests {
                 None
             );
         }
+        let error = anyhow!("error encrypted-tail-network outcome-unknown")
+            .context("error encrypted-image-initial-catch-up");
+        let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "encrypted-tail-network");
+        assert!(!explanation.combined().contains("reset"));
+    }
+
+    #[test]
+    fn image_quota_names_the_server_setting() {
+        let error = anyhow!("error attachment-quota-exceeded").context("error sync-round");
+        for surface in [ErrorSurface::Cli, ErrorSurface::Tui] {
+            let explanation = explain(ErrorAction::General, surface, &error).unwrap();
+            assert_eq!(explanation.code, "attachment-quota-exceeded");
+            assert!(explanation.message.contains("sync server"));
+            assert!(
+                explanation
+                    .next_step
+                    .contains("server_workspace_quota_bytes")
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_protected_sync_data_asks_for_an_update() {
+        let error = anyhow!("error enrollment-store-unsupported");
+        let explanation = explain(ErrorAction::Join, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "enrollment-store-unsupported");
+        assert!(explanation.next_step.contains("Update Aven"));
+        assert!(explanation.next_step.contains("Do not replace"));
+        assert!(!explanation.combined().contains("reset"));
     }
 }

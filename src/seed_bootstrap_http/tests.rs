@@ -12,6 +12,35 @@ use std::{
 };
 
 #[tokio::test]
+async fn client_keeps_attachment_quota_refusal_code() {
+    use axum::{Router, routing::post};
+
+    let root = tempfile::tempdir().unwrap();
+    let (_db, _store, seed, _package) = fixture(root.path()).await;
+    let app = Router::new().route(
+        PATH,
+        post(|| async {
+            http_admission::refusal(StatusCode::PAYLOAD_TOO_LARGE, "attachment-quota-exceeded")
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = Client::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let result = client
+        .exchange(
+            seed.genesis(),
+            seed.bearer(),
+            Operation::Status { bootstrap: [0; 32] },
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("quota refusal was accepted")
+    };
+    assert_eq!(error.to_string(), "error attachment-quota-exceeded");
+    task.abort();
+}
+
+#[tokio::test]
 async fn client_retries_retryable_busy_response() {
     use axum::{Router, http::header, response::IntoResponse, routing::post};
     use std::sync::{
@@ -65,7 +94,7 @@ async fn client_retries_retryable_busy_response() {
 
 async fn serve(db: Database) -> (Client, tokio::task::JoinHandle<()>) {
     e2ee_http::issue_setup(&db).await;
-    let app = router(db);
+    let app = router(db, Default::default());
     let (origin, task) = e2ee_http::serve(app, "127.0.0.1:0").await;
     (Client::new(&origin).unwrap(), task)
 }
@@ -662,7 +691,7 @@ async fn server_worker() {
     let fault = std::env::var("AVEN_HTTP_TEST_FAULT").unwrap();
     let database = Database::open(&root.join("server.sqlite")).await.unwrap();
     e2ee_http::issue_setup(&database).await;
-    let app = router(database).layer(axum::middleware::from_fn(
+    let app = router(database, Default::default()).layer(axum::middleware::from_fn(
         move |request: Request, next: axum::middleware::Next| {
             let fault = fault.clone();
             async move {
@@ -721,7 +750,7 @@ async fn invalid_http_outcome_preserves_sealed_intent_and_capture_until_verified
         .await
         .unwrap();
     e2ee_http::issue_setup(&server).await;
-    let app = router(server.clone()).layer(axum::middleware::from_fn(
+    let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
         |request: Request, next: axum::middleware::Next| async move {
             let response = next.run(request).await;
             let (parts, body) = response.into_parts();
@@ -801,7 +830,7 @@ async fn upload_reports_exact_bytes_and_restarts_counting_on_retry() {
     // After the claim, status, declaration and two stored chunks, the server
     // fails the next request, so the first attempt stops partway through.
     let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let app = router(server.clone()).layer(axum::middleware::from_fn(
+    let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
         move |request: Request, next: axum::middleware::Next| {
             let requests = requests.clone();
             async move {

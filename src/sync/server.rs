@@ -189,8 +189,11 @@ async fn serve(
         .await
         .map_err(|error| error.context(INVALID_MEMBERSHIP))?;
     let image_policy = config.local.attachment_lifecycle.server_policy();
+    let publication_policy = aven_core::sync::bootstrap_staging::PublicationPolicy {
+        workspace_quota_bytes: u64::try_from(image_policy.quota_bytes).unwrap_or(0),
+    };
     tokio::spawn(prune_images(database.clone(), image_policy.grace));
-    let app = crate::seed_bootstrap_http::router(database.clone())
+    let app = crate::seed_bootstrap_http::router(database.clone(), publication_policy)
         .merge(crate::peer_enrollment_http::router(database.clone()))
         .merge(crate::encrypted_tail_http::router(database, image_policy));
     let listener = TcpListener::bind(bind).await?;
