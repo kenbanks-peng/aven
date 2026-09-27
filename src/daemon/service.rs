@@ -344,6 +344,7 @@ struct ServiceSpec {
     executable: PathBuf,
     db_path: PathBuf,
     config_dir: Option<PathBuf>,
+    state_home: Option<PathBuf>,
     path_env: String,
     log_dir: PathBuf,
     stdout_path: PathBuf,
@@ -371,6 +372,9 @@ impl ServiceSpec {
             .map(PathBuf::from)
             .map(absolute_path)
             .transpose()?;
+        let state_home = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
         let current_exe = std::env::current_exe().context("resolve current executable")?;
         let executable = match program {
             Some(program) => absolute_path(program)?,
@@ -381,6 +385,7 @@ impl ServiceSpec {
             executable,
             db_path: absolute_path(db_path)?,
             config_dir,
+            state_home,
             path_env: std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_string()),
             stdout_path: log_dir.join("daemon.out.log"),
             stderr_path: log_dir.join("daemon.err.log"),
@@ -638,6 +643,9 @@ fn render_plist(spec: &ServiceSpec) -> String {
     if let Some(path) = &spec.config_dir {
         env.push(("AVEN_CONFIG_DIR", path_str(path)));
     }
+    if let Some(path) = &spec.state_home {
+        env.push(("XDG_STATE_HOME", path_str(path)));
+    }
 
     let env_xml = env
         .into_iter()
@@ -739,6 +747,7 @@ mod tests {
             executable: PathBuf::from("/bin/aven&test"),
             db_path: PathBuf::from("/tmp/db.sqlite"),
             config_dir: Some(PathBuf::from("/tmp/config")),
+            state_home: Some(PathBuf::from("/tmp/state")),
             path_env: "/usr/bin:/bin".to_string(),
             log_dir: PathBuf::from("/tmp/logs"),
             stdout_path: PathBuf::from("/tmp/logs/out.log"),
@@ -754,6 +763,8 @@ mod tests {
         assert!(plist.contains("<string>/tmp/db.sqlite</string>"));
         assert!(plist.contains("<string>daemon</string>"));
         assert!(plist.contains("<key>AVEN_CONFIG_DIR</key>"));
+        assert!(plist.contains("<key>XDG_STATE_HOME</key>"));
+        assert!(plist.contains("<string>/tmp/state</string>"));
         assert!(plist.contains("<key>StandardErrorPath</key>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
@@ -983,6 +994,7 @@ mod tests {
             executable: PathBuf::from("/bin/aven"),
             db_path: PathBuf::from("/tmp/db.sqlite"),
             config_dir: None,
+            state_home: None,
             path_env: DEFAULT_PATH.to_string(),
             log_dir: dir.join("logs"),
             stdout_path: dir.join("logs/out.log"),

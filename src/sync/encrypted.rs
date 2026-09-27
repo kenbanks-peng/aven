@@ -8,7 +8,7 @@ use std::io::{IsTerminal, Read, Write};
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail, ensure};
 use aven_core::db::Database;
@@ -50,19 +50,65 @@ pub(crate) const SINGLE_DEVICE_HINT: &str =
 const INVITATION_CANCELLED: &str = "error sync-invitation-cancelled hint=\"another command cancelled this invitation; run `aven sync invite` again to add a device\"";
 
 /// The desktop's answers to what the engine asks of its host.
-pub(crate) struct DesktopHost<'a>(pub(crate) &'a AppConfig);
+pub(crate) struct DesktopHost<'a> {
+    pub(crate) config: &'a AppConfig,
+    keychain_interaction: crate::protected_local_keys::KeychainInteraction,
+    protected_storage: Mutex<Option<Arc<dyn ProtectedStorage>>>,
+}
+
+impl<'a> DesktopHost<'a> {
+    fn foreground(config: &'a AppConfig) -> Self {
+        let attended = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+        Self::new(
+            config,
+            if attended {
+                crate::protected_local_keys::KeychainInteraction::Allow
+            } else {
+                crate::protected_local_keys::KeychainInteraction::Deny
+            },
+        )
+    }
+
+    fn background(config: &'a AppConfig) -> Self {
+        Self::new(
+            config,
+            crate::protected_local_keys::KeychainInteraction::Deny,
+        )
+    }
+
+    fn new(
+        config: &'a AppConfig,
+        keychain_interaction: crate::protected_local_keys::KeychainInteraction,
+    ) -> Self {
+        Self {
+            config,
+            keychain_interaction,
+            protected_storage: Mutex::new(None),
+        }
+    }
+}
 
 impl ClientHost for DesktopHost<'_> {
     fn ensure_sync_allowed(&self) -> Result<()> {
-        self.0.ensure_sync_allowed()
+        self.config.ensure_sync_allowed()
     }
 
     fn protected_storage(&self) -> StoreResult<Arc<dyn ProtectedStorage>> {
-        crate::protected_local_keys::storage()
+        let mut storage = self.protected_storage.lock().map_err(|_| {
+            crate::protected_local_keys::ProtectedLocalKeyStoreError::new(
+                crate::protected_local_keys::ProtectedLocalKeyStoreErrorKind::Unavailable,
+            )
+        })?;
+        if let Some(storage) = storage.as_ref() {
+            return Ok(storage.clone());
+        }
+        let opened = crate::protected_local_keys::storage(self.keychain_interaction)?;
+        *storage = Some(opened.clone());
+        Ok(opened)
     }
 
     fn blob_dir(&self, database: &Database) -> Result<PathBuf> {
-        config::resolve_blob_dir(database.path(), self.0)
+        config::resolve_blob_dir(database.path(), self.config)
     }
 
     fn device_label(&self) -> Option<String> {
@@ -75,11 +121,11 @@ fn driver() -> Result<HttpDriver> {
 }
 
 pub(crate) async fn setup_preview(database: &Database, config: &AppConfig) -> Result<SetupPreview> {
-    engine::setup_preview(database, &DesktopHost(config)).await
+    engine::setup_preview(database, &DesktopHost::foreground(config)).await
 }
 
 pub(crate) async fn ensure_setup_available(database: &Database, config: &AppConfig) -> Result<()> {
-    engine::ensure_setup_available(database, &DesktopHost(config)).await
+    engine::ensure_setup_available(database, &DesktopHost::foreground(config)).await
 }
 
 pub(crate) async fn run_setup(
@@ -88,7 +134,7 @@ pub(crate) async fn run_setup(
     invitation: &SetupInvitation,
     progress: &(dyn Fn(Stage) + Sync),
 ) -> Result<Outcome> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::run_setup(link, database, &host, invitation, progress))
         .await
@@ -98,7 +144,7 @@ pub(crate) async fn create_invitation(
     database: &Database,
     config: &AppConfig,
 ) -> Result<PendingInvitation> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::create_invitation(link, database, &host))
         .await
@@ -108,7 +154,7 @@ pub(crate) async fn association_status(
     database: &Database,
     config: &AppConfig,
 ) -> Result<AssociationStatus> {
-    engine::association_status(database, &DesktopHost(config)).await
+    engine::association_status(database, &DesktopHost::background(config)).await
 }
 
 pub(crate) async fn invitation_status(
@@ -122,7 +168,7 @@ pub(crate) async fn cancel_invitation(
     database: &Database,
     config: &AppConfig,
 ) -> Result<Cancellation> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::cancel_invitation(link, database, &host))
         .await
@@ -133,7 +179,7 @@ pub(crate) async fn await_admission(
     config: &AppConfig,
     invitation: &PendingInvitation,
 ) -> Result<Admission> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::await_admission(link, &host, database, invitation))
         .await
@@ -147,7 +193,7 @@ async fn await_admission_until_interrupt(
     config: &AppConfig,
     invitation: &PendingInvitation,
 ) -> Result<Option<Admission>> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     let driver = driver()?;
     let mut session = aven_core::sync::client::Session::new(|link| {
         engine::await_admission(link, &host, database, invitation)
@@ -173,7 +219,7 @@ async fn await_admission_until_interrupt(
 }
 
 pub(crate) async fn ensure_join_available(database: &Database, config: &AppConfig) -> Result<()> {
-    engine::ensure_join_available(database, &DesktopHost(config)).await
+    engine::ensure_join_available(database, &DesktopHost::foreground(config)).await
 }
 
 pub(crate) async fn run_join(
@@ -183,14 +229,14 @@ pub(crate) async fn run_join(
     replace: bool,
     progress: &(dyn Fn(Stage) + Sync),
 ) -> Result<(String, Outcome)> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::run_join(link, database, &host, invitation, replace, progress))
         .await
 }
 
 pub(crate) async fn run_to_completion(database: &Database, config: &AppConfig) -> Result<Outcome> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::run_to_completion(link, database, &host))
         .await
@@ -201,14 +247,14 @@ pub(crate) async fn daemon_round(
     config: &AppConfig,
     round_limit: usize,
 ) -> Result<DaemonRound> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::background(config);
     driver()?
         .run(|link| engine::daemon_round(link, database, &host, round_limit))
         .await
 }
 
 pub(crate) async fn status_report(database: &Database, config: &AppConfig) -> Result<StatusReport> {
-    engine::status_report(database, &DesktopHost(config)).await
+    engine::status_report(database, &DesktopHost::background(config)).await
 }
 
 /// Drains over a desktop tail client with the default configuration.
@@ -221,7 +267,7 @@ pub(crate) async fn drain(
     round_limit: usize,
 ) -> Result<Outcome> {
     let config = AppConfig::default();
-    let host = DesktopHost(&config);
+    let host = DesktopHost::foreground(&config);
     client
         .transport
         .driver
@@ -398,7 +444,7 @@ pub(crate) async fn reset(database: &Database, config: &AppConfig, args: ResetAr
         "error sync-reset-confirmation-required hint=\"rerun with --yes to confirm\"",
         "error sync-reset-canceled",
     )?;
-    let (state, message) = match engine::reset(database, &DesktopHost(config)).await? {
+    let (state, message) = match engine::reset(database, &DesktopHost::foreground(config)).await? {
         engine::Reset::Reset => ("reset", "Sync reset. This database is now local only."),
         engine::Reset::NotSetUp => (
             "not-set-up",

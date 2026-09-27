@@ -40,8 +40,35 @@ impl TuiStore {
             Err(error) => SyncStatusCheck::new(false, format!("{error:#}")),
         };
         let phase = crate::sync::encrypted::local_phase(&self.database).await?;
-        let association =
-            crate::sync::encrypted::association_status(&self.database, config).await?;
+        let (association, protected_storage) =
+            match crate::sync::encrypted::association_status(&self.database, config).await {
+                Ok(association) => (
+                    association,
+                    SyncStatusCheck::new(true, "available".to_string()),
+                ),
+                Err(error)
+                    if error.chain().any(|source| {
+                        source
+                            .downcast_ref::<
+                                crate::protected_local_keys::ProtectedLocalKeyStoreError,
+                            >()
+                            .is_some()
+                    }) =>
+                {
+                    let message = crate::sync::error_explanations::explain(
+                        crate::sync::error_explanations::ErrorAction::General,
+                        crate::sync::error_explanations::ErrorSurface::Tui,
+                        &error,
+                    )
+                    .map(crate::sync::error_explanations::Explanation::combined)
+                    .unwrap_or_else(|| "Protected sync key storage is unavailable.".to_string());
+                    (
+                        crate::sync::encrypted::AssociationStatus::default(),
+                        SyncStatusCheck::new(false, message),
+                    )
+                }
+                Err(error) => return Err(error),
+            };
         let access_refused_at = self
             .database
             .sync_access_refusal()
@@ -54,6 +81,7 @@ impl TuiStore {
             phase,
             interval_seconds: config.sync_interval_seconds(),
             daemon_wake,
+            protected_storage,
             pending_changes: persistence.pending_changes,
             conflicts: persistence.conflicts,
             sync_cursor: persistence.sync_cursor,

@@ -7,6 +7,7 @@ use crate::tui::theme::{FG_DIM, GREEN, ORANGE, RED};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SyncHealth {
     AccessRefused,
+    ProtectedStorageUnavailable,
     Attention,
     RuntimeDisabled,
     NotSetUp,
@@ -33,6 +34,7 @@ impl SyncStatusSummary {
     pub(super) fn headline(&self) -> &'static str {
         match self.health {
             SyncHealth::AccessRefused => "Sync access unconfirmed",
+            SyncHealth::ProtectedStorageUnavailable => "Sync keys unavailable",
             SyncHealth::Attention => "Sync needs attention",
             SyncHealth::RuntimeDisabled => "Sync disabled",
             SyncHealth::NotSetUp => "Local only",
@@ -44,7 +46,7 @@ impl SyncStatusSummary {
 
     pub(super) fn color(&self) -> Color {
         match self.health {
-            SyncHealth::AccessRefused => RED,
+            SyncHealth::AccessRefused | SyncHealth::ProtectedStorageUnavailable => RED,
             SyncHealth::Attention | SyncHealth::Unfinished | SyncHealth::Pending(_) => ORANGE,
             SyncHealth::Idle => GREEN,
             SyncHealth::RuntimeDisabled | SyncHealth::NotSetUp => FG_DIM,
@@ -64,7 +66,9 @@ impl SyncStatusSummary {
             }
         }
         match self.health {
-            SyncHealth::AccessRefused => (RED, "sync error".to_string()),
+            SyncHealth::AccessRefused | SyncHealth::ProtectedStorageUnavailable => {
+                (RED, "sync error".to_string())
+            }
             SyncHealth::Attention | SyncHealth::Unfinished => (ORANGE, "sync!".to_string()),
             SyncHealth::RuntimeDisabled => (FG_DIM, "sync off".to_string()),
             SyncHealth::NotSetUp => (FG_DIM, "local".to_string()),
@@ -82,8 +86,16 @@ pub(super) fn sync_status_summary(status: &TuiSyncStatus) -> SyncStatusSummary {
             value: status.daemon_wake.value.clone(),
         });
     }
+    if status.set_up && !status.protected_storage.ok {
+        issues.push(SyncIssue {
+            label: "Protected keys",
+            value: status.protected_storage.value.clone(),
+        });
+    }
     let health = if !status.set_up {
         SyncHealth::NotSetUp
+    } else if !status.protected_storage.ok {
+        SyncHealth::ProtectedStorageUnavailable
     } else if status.access_refused_at.is_some() {
         SyncHealth::AccessRefused
     } else if !status.runtime_allowed {
@@ -155,6 +167,21 @@ mod tests {
 
         assert_eq!(summary.health, SyncHealth::AccessRefused);
         assert_eq!(summary.badge(&status), (RED, "sync error".to_string()));
+        assert!(summary.can_manual_sync);
+    }
+
+    #[test]
+    fn unavailable_protected_storage_is_visible_and_can_be_authorized() {
+        let status = TuiSyncStatus {
+            protected_storage: SyncStatusCheck::new(false, "choose Always Allow"),
+            ..set_up()
+        };
+
+        let summary = sync_status_summary(&status);
+
+        assert_eq!(summary.health, SyncHealth::ProtectedStorageUnavailable);
+        assert_eq!(summary.badge(&status), (RED, "sync error".to_string()));
+        assert_eq!(summary.issues[0].label, "Protected keys");
         assert!(summary.can_manual_sync);
     }
 

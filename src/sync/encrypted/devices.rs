@@ -40,7 +40,7 @@ struct RemovalReport {
 }
 
 pub(crate) async fn load_devices(database: &Database, config: &AppConfig) -> Result<DeviceListing> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::load_devices(link, database, &host))
         .await
@@ -186,7 +186,7 @@ pub(crate) async fn remove_other_device(
     config: &AppConfig,
     target: [u8; 32],
 ) -> Result<Removal> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::remove_other_device(link, database, &host, target))
         .await
@@ -195,7 +195,7 @@ pub(crate) async fn remove_other_device(
 /// Continues an unfinished removal or key rotation, as an ordinary sync
 /// round would. Returns whether rotation is still pending.
 pub(crate) async fn finish_removal(database: &Database, config: &AppConfig) -> Result<bool> {
-    let host = DesktopHost(config);
+    let host = DesktopHost::foreground(config);
     driver()?
         .run(|link| engine::finish_removal(link, database, &host))
         .await

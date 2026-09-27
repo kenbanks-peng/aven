@@ -581,6 +581,16 @@ fn protected_key_store_explanation(error: &Error) -> Option<Explanation> {
     Some(protected_key_store_kind_explanation(kind))
 }
 
+#[cfg(target_os = "macos")]
+fn protected_storage_unavailable_next_step() -> &'static str {
+    "Unlock the login Keychain. After rebuilding Aven, run `aven sync` in a terminal and choose Always Allow on the Aven Keychain request."
+}
+
+#[cfg(not(target_os = "macos"))]
+fn protected_storage_unavailable_next_step() -> &'static str {
+    "Check that the protected state directory is readable and writable only by your user, then retry the same command."
+}
+
 fn protected_key_store_kind_explanation(kind: ProtectedLocalKeyStoreErrorKind) -> Explanation {
     match kind {
         ProtectedLocalKeyStoreErrorKind::MissingAuthority => Explanation {
@@ -591,7 +601,7 @@ fn protected_key_store_kind_explanation(kind: ProtectedLocalKeyStoreErrorKind) -
         ProtectedLocalKeyStoreErrorKind::Unavailable => Explanation {
             code: "protected-key-storage-unavailable",
             message: "Protected sync key storage is unavailable.",
-            next_step: "Make the system key store available, then retry the same command.",
+            next_step: protected_storage_unavailable_next_step(),
         },
         ProtectedLocalKeyStoreErrorKind::Corrupt => Explanation {
             code: "protected-key-storage-unsafe",

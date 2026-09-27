@@ -1,9 +1,9 @@
 //! Desktop persistence for the core protected local key store.
 //!
-//! On macOS key material lives in non-synchronizing login Keychain items; on
-//! Linux in owner-only files below the application state directory. Markers,
-//! evidence and the store lock are owner-only files in that directory on
-//! both. Other platforms are unsupported.
+//! On macOS one non-synchronizing login Keychain key encrypts the secret files
+//! for each database. Linux stores those secrets directly in owner-only files.
+//! Markers, evidence and the store lock are owner-only files below the
+//! application state directory on both. Other platforms are unsupported.
 pub use aven_core::sync::client::keys::{
     EnrollmentReadiness, ProtectedLocalKeyStore, ProtectedLocalKeyStoreError,
     ProtectedLocalKeyStoreErrorKind, peer, rotation,
@@ -21,10 +21,21 @@ const STORE_DIRECTORY: &str = "protected-keys";
 #[cfg(not(test))]
 const KEYCHAIN_SERVICE: &str = "fi.zendit.Aven.local-package-keyring";
 
+/// Whether protected storage may ask an attended macOS user for Keychain access.
+#[derive(Clone, Copy)]
+pub enum KeychainInteraction {
+    /// Allow Keychain authorization UI.
+    Allow,
+    /// Return an unavailable-storage error instead of displaying UI.
+    Deny,
+}
+
 /// This installation's protected key storage.
-pub fn storage() -> StoreResult<Arc<dyn ProtectedStorage>> {
+pub fn storage(interaction: KeychainInteraction) -> StoreResult<Arc<dyn ProtectedStorage>> {
     #[cfg(not(test))]
-    return production_storage(protected_store_directory()?);
+    return production_storage(protected_store_directory()?, interaction);
+    #[cfg(test)]
+    let _ = interaction;
     // Tests never reach the login Keychain; CLI test workers name isolated files.
     #[cfg(test)]
     Ok(Arc::new(FileProtectedStorage::new(
@@ -49,16 +60,21 @@ fn protected_store_directory() -> StoreResult<std::path::PathBuf> {
 }
 
 #[cfg(not(test))]
-fn production_storage(directory: std::path::PathBuf) -> StoreResult<Arc<dyn ProtectedStorage>> {
+fn production_storage(
+    directory: std::path::PathBuf,
+    interaction: KeychainInteraction,
+) -> StoreResult<Arc<dyn ProtectedStorage>> {
     #[cfg(target_os = "macos")]
     {
         Ok(Arc::new(keychain::KeychainStorage::new(
             KEYCHAIN_SERVICE.to_string(),
             FileProtectedStorage::new(directory),
+            interaction,
         )))
     }
     #[cfg(target_os = "linux")]
     {
+        let _ = interaction;
         Ok(Arc::new(FileProtectedStorage::new(directory)))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -78,6 +94,7 @@ mod keychain {
     use chacha20poly1305::aead::array::Array;
     use chacha20poly1305::aead::{Aead, KeyInit, Payload};
     use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+    use core_foundation::data::CFData;
     use security_framework::os::macos::keychain::SecKeychain;
     use zeroize::Zeroizing;
 
@@ -95,14 +112,20 @@ mod keychain {
     pub(super) struct KeychainStorage {
         service: String,
         files: FileProtectedStorage,
+        interaction: KeychainInteraction,
         cached_keys: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
     }
 
     impl KeychainStorage {
-        pub(super) fn new(service: String, files: FileProtectedStorage) -> Self {
+        pub(super) fn new(
+            service: String,
+            files: FileProtectedStorage,
+            interaction: KeychainInteraction,
+        ) -> Self {
             Self {
                 service,
                 files,
+                interaction,
                 cached_keys: Mutex::new(HashMap::new()),
             }
         }
@@ -115,24 +138,29 @@ mod keychain {
             options
         }
 
-        /// Keychain ACL checks can display UI; background clients must fail instead of waiting.
-        fn without_user_interaction<T>(
+        /// Keychain ACL checks may display UI only for an attended foreground command.
+        fn keychain_operation<T>(
             &self,
             operation: impl FnOnce() -> security_framework::base::Result<T>,
         ) -> StoreResult<security_framework::base::Result<T>> {
             let _process_guard = KEYCHAIN_INTERACTION
                 .lock()
                 .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
-            let _interaction_guard = SecKeychain::disable_user_interaction()
-                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
-            Ok(operation())
+            match self.interaction {
+                KeychainInteraction::Allow => Ok(operation()),
+                KeychainInteraction::Deny => {
+                    let _interaction_guard = SecKeychain::disable_user_interaction()
+                        .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
+                    Ok(operation())
+                }
+            }
         }
 
         fn load_keychain_key(&self, namespace: &str) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
             use security_framework::passwords::generic_password;
             use security_framework_sys::base::errSecItemNotFound;
 
-            match self.without_user_interaction(|| generic_password(self.options(namespace)))? {
+            match self.keychain_operation(|| generic_password(self.options(namespace)))? {
                 Ok(bytes) if bytes.len() == MASTER_KEY_BYTES => Ok(Some(Zeroizing::new(bytes))),
                 Ok(_) => Err(error(ProtectedLocalKeyStoreErrorKind::Corrupt)),
                 Err(source) if source.code() == errSecItemNotFound => Ok(None),
@@ -166,7 +194,8 @@ mod keychain {
         }
 
         fn create_key(&self, namespace: &str) -> StoreResult<Zeroizing<Vec<u8>>> {
-            use security_framework::passwords::set_generic_password_options;
+            use security_framework::item::{ItemAddOptions, ItemAddValue, ItemClass};
+            use security_framework_sys::base::errSecDuplicateItem;
 
             if let Some(key) = self.cached_key(namespace)? {
                 return Ok(key);
@@ -177,18 +206,21 @@ mod keychain {
             let mut key = Zeroizing::new(vec![0_u8; MASTER_KEY_BYTES]);
             getrandom::fill(&mut key)
                 .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
-            match self.without_user_interaction(|| {
-                set_generic_password_options(&key, self.options(namespace))
-            })? {
+            let mut options = ItemAddOptions::new(ItemAddValue::Data {
+                class: ItemClass::generic_password(),
+                data: CFData::from_buffer(&key),
+            });
+            options
+                .set_service(&self.service)
+                .set_account_name(namespace);
+            match self.keychain_operation(|| options.add())? {
                 Ok(()) => {}
+                Err(source) if source.code() == errSecDuplicateItem => {}
                 Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
             }
             let saved = self
                 .load_keychain_key(namespace)?
                 .ok_or_else(|| error(ProtectedLocalKeyStoreErrorKind::WriteFailed))?;
-            if saved.as_slice() != key.as_slice() {
-                return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed));
-            }
             self.cache_key(namespace, saved.clone())?;
             Ok(saved)
         }
@@ -197,9 +229,9 @@ mod keychain {
             use security_framework::passwords::delete_generic_password_options;
             use security_framework_sys::base::errSecItemNotFound;
 
-            match self.without_user_interaction(|| {
-                delete_generic_password_options(self.options(namespace))
-            })? {
+            match self
+                .keychain_operation(|| delete_generic_password_options(self.options(namespace)))?
+            {
                 Ok(()) => {}
                 Err(source) if source.code() == errSecItemNotFound => {}
                 Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
@@ -308,7 +340,7 @@ mod keychain {
             use security_framework::item::{CloudSync, ItemClass, ItemSearchOptions, Limit};
             use security_framework_sys::base::errSecItemNotFound;
 
-            let results = match self.without_user_interaction(|| {
+            let results = match self.keychain_operation(|| {
                 ItemSearchOptions::new()
                     .class(ItemClass::generic_password())
                     .account(namespace)
@@ -381,12 +413,12 @@ mod keychain {
         }
 
         fn delete_secret(&self, namespace: &str, item: &str) -> StoreResult<()> {
-            self.files
-                .delete_secret(namespace, &Self::wrapped_name(item))?;
-            if self.wrapped_items(namespace)?.is_empty() {
+            let wrapped_items = self.wrapped_items(namespace)?;
+            if wrapped_items.len() == 1 && wrapped_items.contains(item) {
                 self.delete_key(namespace)?;
             }
-            Ok(())
+            self.files
+                .delete_secret(namespace, &Self::wrapped_name(item))
         }
 
         fn read_record(
@@ -441,6 +473,7 @@ mod keychain {
             let storage = Arc::new(KeychainStorage::new(
                 format!("fi.zendit.Aven.tests.{id}"),
                 FileProtectedStorage::new(root.join("markers")),
+                KeychainInteraction::Allow,
             ));
             ProtectedLocalKeyStore::open(database, storage)
                 .await
@@ -460,6 +493,7 @@ mod keychain {
                 KeychainStorage::new(
                     format!("fi.zendit.Aven.tests.{id}"),
                     FileProtectedStorage::new(temp.path().join("markers")),
+                    KeychainInteraction::Allow,
                 ),
                 store.account().to_string(),
             );
@@ -548,6 +582,7 @@ mod keychain {
                 KeychainStorage::new(
                     format!("fi.zendit.Aven.tests.{id}"),
                     FileProtectedStorage::new(temp.path().join("markers")),
+                    KeychainInteraction::Allow,
                 ),
                 store.account().to_string(),
             );
