@@ -71,41 +71,46 @@ fn production_storage(directory: std::path::PathBuf) -> StoreResult<Arc<dyn Prot
 #[cfg(target_os = "macos")]
 mod keychain {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
-    use aven_core::sync::client::keys::{KEYRING_ITEM, ProtectedStorage, ProtectedStorageLock};
+    use aven_core::sync::client::keys::{ProtectedStorage, ProtectedStorageLock};
+    use chacha20poly1305::aead::array::Array;
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
     use security_framework::os::macos::keychain::SecKeychain;
     use zeroize::Zeroizing;
 
     static KEYCHAIN_INTERACTION: Mutex<()> = Mutex::new(());
+    const MASTER_KEY_BYTES: usize = 32;
+    const WRAPPED_MAGIC: &[u8; 8] = b"AVENKCS1";
+    const NONCE_BYTES: usize = 24;
+    const TAG_BYTES: usize = 16;
+    const WRAPPED_OVERHEAD: usize = WRAPPED_MAGIC.len() + NONCE_BYTES + TAG_BYTES;
+    const WRAPPED_PREFIX: &str = "wrapped-secret-";
 
-    /// Secret items are generic passwords named by service and namespace:
-    /// the keyring uses `service`, every other item `service.item`.
-    /// Everything nonsecret stays in `files`.
+    /// One generic password per database holds a wrapping key. Secret values are
+    /// encrypted into owner-only files; nonsecret records stay in the same
+    /// directory without the wrapped-secret prefix.
     pub(super) struct KeychainStorage {
         service: String,
         files: FileProtectedStorage,
+        cached_keys: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
     }
 
     impl KeychainStorage {
         pub(super) fn new(service: String, files: FileProtectedStorage) -> Self {
-            Self { service, files }
+            Self {
+                service,
+                files,
+                cached_keys: Mutex::new(HashMap::new()),
+            }
         }
 
-        fn options(
-            &self,
-            namespace: &str,
-            item: &str,
-        ) -> security_framework::passwords::PasswordOptions {
+        fn options(&self, namespace: &str) -> security_framework::passwords::PasswordOptions {
             use security_framework::passwords::PasswordOptions;
 
-            let service = if item == KEYRING_ITEM {
-                self.service.clone()
-            } else {
-                format!("{}.{item}", self.service)
-            };
-            let mut options = PasswordOptions::new_generic_password(&service, namespace);
+            let mut options = PasswordOptions::new_generic_password(&self.service, namespace);
             options.set_access_synchronized(Some(false));
             options
         }
@@ -123,17 +128,211 @@ mod keychain {
             Ok(operation())
         }
 
-        fn load(&self, namespace: &str, item: &str) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
+        fn load_keychain_key(&self, namespace: &str) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
             use security_framework::passwords::generic_password;
             use security_framework_sys::base::errSecItemNotFound;
 
-            match self
-                .without_user_interaction(|| generic_password(self.options(namespace, item)))?
-            {
-                Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            match self.without_user_interaction(|| generic_password(self.options(namespace)))? {
+                Ok(bytes) if bytes.len() == MASTER_KEY_BYTES => Ok(Some(Zeroizing::new(bytes))),
+                Ok(_) => Err(error(ProtectedLocalKeyStoreErrorKind::Corrupt)),
                 Err(source) if source.code() == errSecItemNotFound => Ok(None),
                 Err(_) => Err(error(ProtectedLocalKeyStoreErrorKind::Unavailable)),
             }
+        }
+
+        fn cached_key(&self, namespace: &str) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
+            let cached = self
+                .cached_keys
+                .lock()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?
+                .get(namespace)
+                .cloned();
+            if cached.is_some() {
+                return Ok(cached);
+            }
+            let Some(key) = self.load_keychain_key(namespace)? else {
+                return Ok(None);
+            };
+            self.cache_key(namespace, key.clone())?;
+            Ok(Some(key))
+        }
+
+        fn cache_key(&self, namespace: &str, key: Zeroizing<Vec<u8>>) -> StoreResult<()> {
+            self.cached_keys
+                .lock()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?
+                .insert(namespace.to_string(), key);
+            Ok(())
+        }
+
+        fn create_key(&self, namespace: &str) -> StoreResult<Zeroizing<Vec<u8>>> {
+            use security_framework::passwords::set_generic_password_options;
+
+            if let Some(key) = self.cached_key(namespace)? {
+                return Ok(key);
+            }
+            if !self.files.list_records(namespace)?.is_empty() {
+                return Err(error(ProtectedLocalKeyStoreErrorKind::MissingAuthority));
+            }
+            let mut key = Zeroizing::new(vec![0_u8; MASTER_KEY_BYTES]);
+            getrandom::fill(&mut key)
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
+            match self.without_user_interaction(|| {
+                set_generic_password_options(&key, self.options(namespace))
+            })? {
+                Ok(()) => {}
+                Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
+            }
+            let saved = self
+                .load_keychain_key(namespace)?
+                .ok_or_else(|| error(ProtectedLocalKeyStoreErrorKind::WriteFailed))?;
+            if saved.as_slice() != key.as_slice() {
+                return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed));
+            }
+            self.cache_key(namespace, saved.clone())?;
+            Ok(saved)
+        }
+
+        fn delete_key(&self, namespace: &str) -> StoreResult<()> {
+            use security_framework::passwords::delete_generic_password_options;
+            use security_framework_sys::base::errSecItemNotFound;
+
+            match self.without_user_interaction(|| {
+                delete_generic_password_options(self.options(namespace))
+            })? {
+                Ok(()) => {}
+                Err(source) if source.code() == errSecItemNotFound => {}
+                Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
+            }
+            self.cached_keys
+                .lock()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?
+                .remove(namespace);
+            Ok(())
+        }
+
+        fn wrapped_name(item: &str) -> String {
+            format!("{WRAPPED_PREFIX}{}", hex::encode(item))
+        }
+
+        fn wrapped_item(name: &str) -> StoreResult<Option<String>> {
+            let Some(encoded) = name.strip_prefix(WRAPPED_PREFIX) else {
+                return Ok(None);
+            };
+            let bytes = hex::decode(encoded)
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))?;
+            String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))
+        }
+
+        fn aad(namespace: &str, item: &str) -> Vec<u8> {
+            let mut aad = b"aven-macos-keychain-secret-v1\0".to_vec();
+            aad.extend_from_slice(namespace.as_bytes());
+            aad.push(0);
+            aad.extend_from_slice(item.as_bytes());
+            aad
+        }
+
+        fn encrypt(
+            &self,
+            namespace: &str,
+            item: &str,
+            key: &[u8],
+            bytes: &[u8],
+        ) -> StoreResult<Zeroizing<Vec<u8>>> {
+            let mut nonce = [0_u8; NONCE_BYTES];
+            getrandom::fill(&mut nonce)
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
+            let key: &[u8; MASTER_KEY_BYTES] = key
+                .try_into()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))?;
+            let cipher = XChaCha20Poly1305::new(&Array(*key));
+            let ciphertext = cipher
+                .encrypt(
+                    &XNonce::from(nonce),
+                    Payload {
+                        msg: bytes,
+                        aad: &Self::aad(namespace, item),
+                    },
+                )
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::WriteFailed))?;
+            let mut wrapped = Zeroizing::new(Vec::with_capacity(WRAPPED_OVERHEAD + bytes.len()));
+            wrapped.extend_from_slice(WRAPPED_MAGIC);
+            wrapped.extend_from_slice(&nonce);
+            wrapped.extend_from_slice(&ciphertext);
+            Ok(wrapped)
+        }
+
+        fn decrypt(
+            &self,
+            namespace: &str,
+            item: &str,
+            key: &[u8],
+            wrapped: &[u8],
+        ) -> StoreResult<Zeroizing<Vec<u8>>> {
+            if wrapped.len() < WRAPPED_OVERHEAD || &wrapped[..WRAPPED_MAGIC.len()] != WRAPPED_MAGIC
+            {
+                return Err(error(ProtectedLocalKeyStoreErrorKind::Corrupt));
+            }
+            let key: &[u8; MASTER_KEY_BYTES] = key
+                .try_into()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))?;
+            let nonce_offset = WRAPPED_MAGIC.len();
+            let nonce: [u8; NONCE_BYTES] = wrapped[nonce_offset..nonce_offset + NONCE_BYTES]
+                .try_into()
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))?;
+            let cipher = XChaCha20Poly1305::new(&Array(*key));
+            cipher
+                .decrypt(
+                    &XNonce::from(nonce),
+                    Payload {
+                        msg: &wrapped[nonce_offset + NONCE_BYTES..],
+                        aad: &Self::aad(namespace, item),
+                    },
+                )
+                .map(Zeroizing::new)
+                .map_err(|_| error(ProtectedLocalKeyStoreErrorKind::Corrupt))
+        }
+
+        fn wrapped_items(&self, namespace: &str) -> StoreResult<HashSet<String>> {
+            self.files
+                .list_secrets(namespace)?
+                .into_iter()
+                .filter_map(|name| Self::wrapped_item(&name).transpose())
+                .collect()
+        }
+
+        #[cfg(test)]
+        fn keychain_services(&self, namespace: &str) -> StoreResult<HashSet<String>> {
+            use security_framework::item::{CloudSync, ItemClass, ItemSearchOptions, Limit};
+            use security_framework_sys::base::errSecItemNotFound;
+
+            let results = match self.without_user_interaction(|| {
+                ItemSearchOptions::new()
+                    .class(ItemClass::generic_password())
+                    .account(namespace)
+                    .cloud_sync(CloudSync::MatchSyncNo)
+                    .load_attributes(true)
+                    .limit(Limit::All)
+                    .search()
+            })? {
+                Ok(results) => results,
+                Err(source) if source.code() == errSecItemNotFound => {
+                    return Ok(HashSet::new());
+                }
+                Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::Unavailable)),
+            };
+            results
+                .into_iter()
+                .filter_map(|result| {
+                    result
+                        .simplify_dict()
+                        .and_then(|attributes| attributes.get("svce").cloned())
+                        .filter(|service| service == &self.service)
+                        .map(Ok)
+                })
+                .collect()
         }
     }
 
@@ -152,43 +351,42 @@ mod keychain {
             item: &str,
             expected_len: usize,
         ) -> StoreResult<Option<Zeroizing<Vec<u8>>>> {
-            let bytes = self.load(namespace, item)?;
-            if bytes
-                .as_ref()
-                .is_some_and(|bytes| bytes.len() != expected_len)
-            {
+            let Some(wrapped) = self.files.load_secret(
+                namespace,
+                &Self::wrapped_name(item),
+                expected_len + WRAPPED_OVERHEAD,
+            )?
+            else {
+                return Ok(None);
+            };
+            let key = self
+                .cached_key(namespace)?
+                .ok_or_else(|| error(ProtectedLocalKeyStoreErrorKind::MissingAuthority))?;
+            let bytes = self.decrypt(namespace, item, &key, &wrapped)?;
+            if bytes.len() != expected_len {
                 return Err(error(ProtectedLocalKeyStoreErrorKind::Corrupt));
             }
-            Ok(bytes)
+            Ok(Some(bytes))
         }
 
         fn create_secret(&self, namespace: &str, item: &str, bytes: &[u8]) -> StoreResult<()> {
-            use security_framework::passwords::set_generic_password_options;
-
-            // The caller has already observed absence. A process guard around this
-            // operation serializes cooperating Aven hosts. Re-read before success.
-            match self.without_user_interaction(|| {
-                set_generic_password_options(bytes, self.options(namespace, item))
-            })? {
-                Ok(()) => match self.load(namespace, item)? {
-                    Some(saved) if saved.as_slice() == bytes => Ok(()),
-                    _ => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
-                },
-                Err(_) => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
+            let key = self.create_key(namespace)?;
+            let wrapped = self.encrypt(namespace, item, &key, bytes)?;
+            self.files
+                .create_secret(namespace, &Self::wrapped_name(item), &wrapped)?;
+            match self.load_secret(namespace, item, bytes.len())? {
+                Some(saved) if saved.as_slice() == bytes => Ok(()),
+                _ => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
             }
         }
 
         fn delete_secret(&self, namespace: &str, item: &str) -> StoreResult<()> {
-            use security_framework::passwords::delete_generic_password_options;
-            use security_framework_sys::base::errSecItemNotFound;
-
-            match self.without_user_interaction(|| {
-                delete_generic_password_options(self.options(namespace, item))
-            })? {
-                Ok(()) => Ok(()),
-                Err(source) if source.code() == errSecItemNotFound => Ok(()),
-                Err(_) => Err(error(ProtectedLocalKeyStoreErrorKind::WriteFailed)),
+            self.files
+                .delete_secret(namespace, &Self::wrapped_name(item))?;
+            if self.wrapped_items(namespace)?.is_empty() {
+                self.delete_key(namespace)?;
             }
+            Ok(())
         }
 
         fn read_record(
@@ -208,50 +406,17 @@ mod keychain {
             self.files.remove_record(namespace, name)
         }
 
-        /// Items of this service under `namespace`. The query scope matches
-        /// `options()` except for the service, which is filtered by prefix.
         fn list_secrets(&self, namespace: &str) -> StoreResult<HashSet<String>> {
-            use security_framework::item::{CloudSync, ItemClass, ItemSearchOptions, Limit};
-            use security_framework_sys::base::errSecItemNotFound;
-
-            let results = match self.without_user_interaction(|| {
-                ItemSearchOptions::new()
-                    .class(ItemClass::generic_password())
-                    .account(namespace)
-                    .cloud_sync(CloudSync::MatchSyncNo)
-                    .load_attributes(true)
-                    .limit(Limit::All)
-                    .search()
-            })? {
-                Ok(results) => results,
-                Err(source) if source.code() == errSecItemNotFound => {
-                    return Ok(HashSet::new());
-                }
-                Err(_) => return Err(error(ProtectedLocalKeyStoreErrorKind::Unavailable)),
-            };
-            let prefix = format!("{}.", self.service);
-            let mut items = HashSet::new();
-            for result in results {
-                let attributes = result
-                    .simplify_dict()
-                    .ok_or_else(|| error(ProtectedLocalKeyStoreErrorKind::Unavailable))?;
-                match attributes.get("svce") {
-                    Some(service) if *service == self.service => {
-                        items.insert(KEYRING_ITEM.to_string());
-                    }
-                    Some(service) => {
-                        if let Some(item) = service.strip_prefix(&prefix) {
-                            items.insert(item.to_string());
-                        }
-                    }
-                    None => {}
-                }
-            }
-            Ok(items)
+            self.wrapped_items(namespace)
         }
 
         fn list_records(&self, namespace: &str) -> StoreResult<HashSet<String>> {
-            self.files.list_records(namespace)
+            Ok(self
+                .files
+                .list_records(namespace)?
+                .into_iter()
+                .filter(|name| !name.starts_with(WRAPPED_PREFIX))
+                .collect())
         }
     }
 
@@ -306,9 +471,40 @@ mod keychain {
             for item in ["listed-a", "listed-b"] {
                 storage.create_secret(namespace, item, b"x").unwrap();
             }
+            let wrapped = std::fs::read(
+                storage
+                    .files
+                    .path(namespace, &KeychainStorage::wrapped_name("listed-a")),
+            )
+            .unwrap();
+            assert_eq!(wrapped.len(), WRAPPED_OVERHEAD + 1);
+            assert_eq!(&wrapped[..WRAPPED_MAGIC.len()], WRAPPED_MAGIC);
+            assert_ne!(wrapped.as_slice(), b"x");
+            assert_eq!(
+                storage.keychain_services(namespace).unwrap(),
+                HashSet::from([storage.service.clone()])
+            );
+
             let other = format!("{namespace}-other");
             storage.create_secret(&other, "listed-other", b"x").unwrap();
+            assert_eq!(
+                storage.keychain_services(&other).unwrap(),
+                HashSet::from([storage.service.clone()])
+            );
             let listed = storage.list_secrets(namespace);
+            let wrapped_path = storage
+                .files
+                .path(namespace, &KeychainStorage::wrapped_name("listed-a"));
+            let mut tampered = std::fs::read(&wrapped_path).unwrap();
+            *tampered.last_mut().unwrap() ^= 1;
+            std::fs::write(&wrapped_path, tampered).unwrap();
+            assert_eq!(
+                storage
+                    .load_secret(namespace, "listed-a", 1)
+                    .unwrap_err()
+                    .kind(),
+                ProtectedLocalKeyStoreErrorKind::Corrupt
+            );
             storage.delete_secret(namespace, "listed-a").unwrap();
             let after_delete = storage.list_secrets(namespace);
             storage.delete_secret(namespace, "listed-b").unwrap();
@@ -321,10 +517,26 @@ mod keychain {
                 after_delete.unwrap(),
                 HashSet::from(["keyring", "listed-b"].map(String::from))
             );
+
+            storage.delete_key(namespace).unwrap();
+            assert_eq!(
+                storage
+                    .create_secret(namespace, "replacement", b"x")
+                    .unwrap_err()
+                    .kind(),
+                ProtectedLocalKeyStoreErrorKind::MissingAuthority
+            );
+            assert!(storage.keychain_services(namespace).unwrap().is_empty());
+            let reopened = isolated(&database, temp.path()).await;
+            let error = reopened.load_required().unwrap_err();
+            assert_eq!(
+                error.kind(),
+                ProtectedLocalKeyStoreErrorKind::MissingAuthority
+            );
         }
 
         #[tokio::test]
-        #[ignore = "uses two unique test-only macOS Keychain items and temporary markers"]
+        #[ignore = "uses one unique test-only macOS Keychain item and temporary files"]
         async fn isolated_seed_keychain_reopen() {
             let temp = tempfile::tempdir().unwrap();
             let db = Database::open(&temp.path().join("db.sqlite"))

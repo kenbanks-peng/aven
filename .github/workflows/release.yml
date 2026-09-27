@@ -54,6 +54,13 @@ jobs:
           else
             cargo build --release --locked --target "${{ matrix.target }}"
           fi
+      - name: Sign macOS binary
+        if: runner.os == 'macOS'
+        env:
+          APPLE_DEVELOPER_ID_CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+        run: scripts/sign-macos-release "target/${{ matrix.target }}/release/${BIN_NAME}"
       - name: Package
         run: |
           bin="target/${{ matrix.target }}/release/${BIN_NAME}"
