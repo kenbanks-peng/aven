@@ -112,6 +112,11 @@ impl Store {
         })
     }
 
+    /// See [`Database::close`].
+    pub async fn close(&self) {
+        self.database.close().await;
+    }
+
     pub fn initialize_storage(&self) -> Result<StorageLayout, Error> {
         let root = crate::attachments::default_blob_dir(self.database.path());
         let objects = root.join("objects").join("sha256");

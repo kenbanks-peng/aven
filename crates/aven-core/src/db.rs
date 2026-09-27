@@ -97,6 +97,14 @@ impl Database {
         &self.path
     }
 
+    /// Closes every connection, including those held by clones, and waits
+    /// until SQLite has released the files. Dropping a database closes its
+    /// connections in the background instead, so delete or replace the files
+    /// only after this returns.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     #[doc(hidden)]
     pub fn file_identity(&self) -> Option<&Path> {
         self.file_identity.as_deref()
