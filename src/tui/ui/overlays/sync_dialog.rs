@@ -749,24 +749,19 @@ fn devices_lines(body: &mut Body, view: &SyncDialogView<'_>, width: usize) {
         lines.push(row);
     }
 
-    if let Some(device) = selected_device {
+    let reserved_detail_rows = devices
+        .iter()
+        .map(|device| device_detail_lines(device, width).len())
+        .max()
+        .unwrap_or(0);
+    if reserved_detail_rows > 0 {
         lines.push(Line::from(""));
-        if let Some(label) = &device.label {
-            lines.extend(wrapped_row("Name", label, Style::new().fg(FG), width));
-        }
-        lines.extend(wrapped_row(
-            "Device ID",
-            &elide_middle(&hex::encode(device.id), width.saturating_sub(LABEL_WIDTH)),
-            Style::new().fg(FG),
-            width,
-        ));
-        if device.current {
-            lines.extend(paragraph(
-                "Remove it from another device.",
-                Style::new().fg(FG_DIM),
-                width,
-            ));
-        }
+        let details = selected_device
+            .map(|device| device_detail_lines(device, width))
+            .unwrap_or_default();
+        let padding = reserved_detail_rows.saturating_sub(details.len());
+        lines.extend(details);
+        lines.extend((0..padding).map(|_| Line::from("")));
     }
     if view.state.details
         && let Some(OperationResult::Failed(failure)) = activity.device_result()
@@ -779,6 +774,30 @@ fn devices_lines(body: &mut Body, view: &SyncDialogView<'_>, width: usize) {
             width,
         ));
     }
+}
+
+fn device_detail_lines(
+    device: &crate::sync::encrypted::Device,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if let Some(label) = &device.label {
+        lines.extend(wrapped_row("Name", label, Style::new().fg(FG), width));
+    }
+    lines.extend(wrapped_row(
+        "Device ID",
+        &elide_middle(&hex::encode(device.id), width.saturating_sub(LABEL_WIDTH)),
+        Style::new().fg(FG),
+        width,
+    ));
+    if device.current {
+        lines.extend(paragraph(
+            "Remove it from another device.",
+            Style::new().fg(FG_DIM),
+            width,
+        ));
+    }
+    lines
 }
 
 const UNNAMED_DEVICE: &str = "Unnamed device";

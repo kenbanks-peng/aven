@@ -997,6 +997,25 @@ fn selecting_another_device_offers_removal_in_the_footer() {
 }
 
 #[test]
+fn device_selection_keeps_the_dialog_height_stable() {
+    let current = borrow_value(SyncDialogState::page(SyncPage::Devices));
+    let other = borrow_value(SyncDialogState {
+        selected: 1,
+        ..SyncDialogState::page(SyncPage::Devices)
+    });
+    let current_lines = sync_dialog_lines_for_test_width(
+        &activity_view(current, sync_status(), device_activity(false)),
+        59,
+    );
+    let other_lines = sync_dialog_lines_for_test_width(
+        &activity_view(other, sync_status(), device_activity(false)),
+        59,
+    );
+
+    assert_eq!(current_lines.len(), other_lines.len());
+}
+
+#[test]
 fn narrow_device_list_elides_names_and_ids_instead_of_wrapping() {
     let mut activity = device_activity(false);
     activity.devices.as_mut().unwrap().listing.devices[0].label =
