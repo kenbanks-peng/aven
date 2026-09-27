@@ -155,10 +155,16 @@ impl Client {
                 exchange::Failure::Network => {
                     anyhow::anyhow!("error enrollment-network outcome-unknown")
                 }
+                exchange::Failure::SecureTransport => {
+                    anyhow::anyhow!("error enrollment-tls outcome-unknown")
+                }
                 exchange::Failure::Malformed => {
                     anyhow::anyhow!("error enrollment-server outcome-unknown")
                 }
                 exchange::Failure::TooLarge => anyhow::anyhow!("error enrollment-limit"),
+                exchange::Failure::RequestBodyLimit => {
+                    anyhow::anyhow!("error sync-request-body-limit")
+                }
                 // Only an authentication refusal says anything about this
                 // device's access; timeouts and server failures stay
                 // ordinary errors.

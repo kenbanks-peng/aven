@@ -42,6 +42,34 @@ sync. It expires after one hour; run `server setup` again for a new one.
 See [`aven server`](/command-reference/#aven-server) for URL rules and bind
 options.
 
+### Use a public TLS proxy
+
+The server does not terminate TLS. Give `server setup` the public HTTPS origin
+with no path prefix, then route that origin to the server's loopback address. A
+Caddy proxy needs only the upstream:
+
+```caddyfile
+sync.example.com {
+    reverse_proxy 127.0.0.1:3746
+}
+```
+
+For nginx, allow the encrypted image and bootstrap chunks. Keep send and read
+timeouts longer than Aven's 35-second request deadline; the connection timeout
+can stay shorter:
+
+```nginx
+location / {
+    client_max_body_size 2m;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 40s;
+    proxy_read_timeout 40s;
+    proxy_pass http://127.0.0.1:3746;
+}
+```
+
+Default Caddy body and timeout settings need no changes.
+
 ### Run the server as a service
 
 Once sync works, run `aven server` under your operating system's service

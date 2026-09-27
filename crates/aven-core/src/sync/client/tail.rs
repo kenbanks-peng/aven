@@ -96,8 +96,14 @@ impl Client {
                 exchange::Failure::Network => {
                     anyhow::anyhow!("error encrypted-tail-network outcome-unknown")
                 }
+                exchange::Failure::SecureTransport => {
+                    anyhow::anyhow!("error encrypted-tail-tls outcome-unknown")
+                }
                 exchange::Failure::Malformed => anyhow::anyhow!("error encrypted-tail-http"),
                 exchange::Failure::TooLarge => anyhow::anyhow!("error encrypted-tail-limit"),
+                exchange::Failure::RequestBodyLimit => {
+                    anyhow::anyhow!("error sync-request-body-limit")
+                }
                 exchange::Failure::Refused { code, .. } => match code.as_deref() {
                     Some("membership-stale") => {
                         crate::sync::seed_claim::membership::StaleContext.into()

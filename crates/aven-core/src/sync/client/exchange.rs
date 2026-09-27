@@ -119,7 +119,9 @@ pub enum Step<T> {
 
 /// The request never produced a complete response.
 #[derive(Debug)]
-pub(crate) struct TransportFailure;
+pub(crate) struct TransportFailure {
+    secure: bool,
+}
 
 enum Outgoing {
     Request(PreparedRequest),
@@ -312,7 +314,15 @@ impl<'a, T> Session<'a, T> {
 
     /// Answers the outstanding request that produced no complete response.
     pub fn register_transport_failure(&mut self, context: RequestContext) -> Result<()> {
-        self.link.answer(context, Err(TransportFailure))
+        self.link
+            .answer(context, Err(TransportFailure { secure: false }))
+    }
+
+    /// Answers an HTTPS request that could not establish or retain its secure
+    /// connection. Hosts need not expose certificate or endpoint details.
+    pub fn register_secure_transport_failure(&mut self, context: RequestContext) -> Result<()> {
+        self.link
+            .answer(context, Err(TransportFailure { secure: true }))
     }
 }
 
@@ -324,8 +334,12 @@ const REFUSAL_LIMIT: usize = 1024;
 /// Why a JSON exchange produced no reply.
 #[derive(Debug)]
 pub(crate) enum Failure {
-    /// No complete response arrived.
+    /// No complete response arrived over HTTP.
     Network,
+    /// No complete response arrived over HTTPS.
+    SecureTransport,
+    /// An unstructured 413 response, distinct from server limit codes.
+    RequestBodyLimit,
     /// A non-success status with the `{"error":"<code>"}` body's code, if
     /// readable. A busy server was already retried.
     Refused { status: u16, code: Option<String> },
@@ -358,7 +372,13 @@ pub(crate) async fn post_json(
                 response_limit,
             )
             .await
-            .map_err(|TransportFailure| Failure::Network)?;
+            .map_err(|failure| {
+                if failure.secure {
+                    Failure::SecureTransport
+                } else {
+                    Failure::Network
+                }
+            })?;
         if response.status == 200 {
             if !response.is_json() || response.has_header("content-encoding") {
                 return Err(Failure::Malformed);
@@ -380,9 +400,13 @@ pub(crate) async fn post_json(
             attempt += 1;
             continue;
         }
+        let code = refusal_code(&response);
+        if response.status == 413 && code.is_none() {
+            return Err(Failure::RequestBodyLimit);
+        }
         return Err(Failure::Refused {
             status: response.status,
-            code: refusal_code(&response),
+            code,
         });
     }
 }
@@ -438,7 +462,7 @@ mod tests {
                 .await
             {
                 Ok(response) => statuses.push(response.status),
-                Err(TransportFailure) => statuses.push(0),
+                Err(TransportFailure { .. }) => statuses.push(0),
             }
             link.wait(Duration::from_millis(5)).await;
         }
@@ -486,6 +510,49 @@ mod tests {
             matches!(session.next().await.unwrap(), Step::Done(statuses) if statuses == [204, 0])
         );
         assert!(session.next().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn secure_transport_failures_remain_distinct() {
+        let url = url::Url::parse("https://sync.example.com/x").unwrap();
+        let mut session = Session::new(|link| async move {
+            Ok(matches!(
+                post_json(&link, &url, None, vec![], 8).await,
+                Err(Failure::SecureTransport)
+            ))
+        });
+        let Step::Request(request) = session.next().await.unwrap() else {
+            panic!("expected a request");
+        };
+        session
+            .register_secure_transport_failure(request.context)
+            .unwrap();
+        assert!(matches!(session.next().await.unwrap(), Step::Done(true)));
+    }
+
+    #[tokio::test]
+    async fn unstructured_413_is_a_request_body_limit() {
+        let url = url::Url::parse("https://sync.example.com/x").unwrap();
+        let mut session = Session::new(|link| async move {
+            Ok(matches!(
+                post_json(&link, &url, None, vec![], 8).await,
+                Err(Failure::RequestBodyLimit)
+            ))
+        });
+        let Step::Request(request) = session.next().await.unwrap() else {
+            panic!("expected a request");
+        };
+        session
+            .accept_response(
+                request.context,
+                HttpResponse {
+                    status: 413,
+                    headers: vec![],
+                    body: b"request too large".to_vec(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(session.next().await.unwrap(), Step::Done(true)));
     }
 
     #[test]

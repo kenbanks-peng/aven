@@ -148,8 +148,14 @@ impl Client {
             exchange::Failure::Network => {
                 anyhow::anyhow!("error bootstrap-network outcome-unknown")
             }
+            exchange::Failure::SecureTransport => {
+                anyhow::anyhow!("error bootstrap-tls outcome-unknown")
+            }
             exchange::Failure::Malformed => anyhow::anyhow!("error bootstrap-response"),
             exchange::Failure::TooLarge => anyhow::anyhow!("error bootstrap-response-limit"),
+            exchange::Failure::RequestBodyLimit => {
+                anyhow::anyhow!("error sync-request-body-limit")
+            }
             exchange::Failure::Refused { code, .. } => match code.as_deref() {
                 Some("bootstrap-storage-already-claimed") => {
                     anyhow::anyhow!("error bootstrap-storage-already-claimed")

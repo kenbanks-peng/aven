@@ -47,6 +47,22 @@ pub(crate) fn explain(
     // Codes that share one explanation; the first present one is displayed.
     let first = |family: &[&'static str]| family.iter().copied().find(|code| has(code));
 
+    if all.iter().any(|code| code.ends_with("-tls")) {
+        let code =
+            first(&["enrollment-tls", "bootstrap-tls", "encrypted-tail-tls"]).unwrap_or("sync-tls");
+        return Some(Explanation {
+            code,
+            message: "Couldn't establish a secure connection to the sync server.",
+            next_step: "Check that the server is reachable and its TLS certificate is valid for this host and trusted by this device. Local work continues.",
+        });
+    }
+    if has("sync-request-body-limit") {
+        return Some(Explanation {
+            code: "sync-request-body-limit",
+            message: "The sync request was rejected as too large.",
+            next_step: "If a reverse proxy is in use, raise its request body limit to at least 2 MB, then try again. Local work continues.",
+        });
+    }
     if all.iter().any(|code| code.ends_with("-network")) {
         let code = first(&[
             "enrollment-network",
@@ -653,6 +669,31 @@ mod tests {
         assert_eq!(explanation.code, "enrollment-network");
         assert!(explanation.combined().contains("Local work continues"));
         assert!(!explanation.combined().contains("nothing changed"));
+    }
+
+    #[test]
+    fn tls_explanation_names_certificate_checks() {
+        let error = anyhow!("error bootstrap-tls outcome-unknown")
+            .context("error sync-setup-outcome-unknown");
+        let explanation = explain(ErrorAction::Setup, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "bootstrap-tls");
+        assert!(explanation.message.contains("secure connection"));
+        assert!(explanation.next_step.contains("certificate"));
+        assert!(explanation.next_step.contains("trusted"));
+    }
+
+    #[test]
+    fn request_limit_explanation_qualifies_proxy_guidance() {
+        let error = anyhow!("error sync-request-body-limit");
+        let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "sync-request-body-limit");
+        assert!(explanation.message.contains("request"));
+        assert!(
+            explanation
+                .next_step
+                .contains("If a reverse proxy is in use")
+        );
+        assert!(explanation.next_step.contains("2 MB"));
     }
 
     #[test]

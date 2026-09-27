@@ -297,6 +297,7 @@ dependencies = [
  "qrcode",
  "ratatui",
  "reqwest",
+ "rustls",
  "security-framework",
  "security-framework-sys",
  "semver",
