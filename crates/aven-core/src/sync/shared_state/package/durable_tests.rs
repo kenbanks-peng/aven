@@ -571,3 +571,53 @@ async fn failed_freeze_marker_write_rolls_back_bytes_but_retains_capture_and_pin
     assert_eq!(retry.candidate_id(), capture.candidate_id());
     publication::validate_keyless(&retry.upload_package()).unwrap();
 }
+
+#[tokio::test]
+async fn stored_package_matches_only_the_exact_rows() {
+    let (dir, database, task) = source_with_history().await;
+    add_selected_images(dir.path(), &database, &task).await;
+    database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    let package = database
+        .package_local_shared_state_never_dispatched(
+            dir.path(),
+            package_context(),
+            &package_key(),
+            [7; 32],
+        )
+        .await
+        .unwrap();
+    let candidate = package.candidate_id().to_string();
+    let changes = [
+        "UPDATE local_shared_capture_package_records SET record = record || x'00'
+         WHERE component = 'state' AND chunk_index = 0",
+        "UPDATE local_shared_capture_package_records SET record = x'ff' || substr(record, 2)
+         WHERE component = 'image' AND chunk_index = 0
+           AND object_id = (SELECT max(object_id) FROM local_shared_capture_package_records)",
+        "DELETE FROM local_shared_capture_package_records WHERE component = 'manifest'",
+        "INSERT INTO local_shared_capture_package_records
+         SELECT candidate_id, component, object_id, chunk_index + 1, record
+         FROM local_shared_capture_package_records
+         WHERE component = 'manifest'",
+        "UPDATE local_shared_capture_publication SET image_catalog = image_catalog || x'00'",
+        "UPDATE local_shared_capture_journal SET frozen_descriptor_commitment = zeroblob(32)",
+    ];
+    let mut conn = database.acquire_writer().await.unwrap();
+    assert!(stored_package_matches(&mut conn, &package).await.unwrap());
+    for change in changes {
+        let mut tx = sqlx::Connection::begin(&mut *conn).await.unwrap();
+        sqlx::query(change).execute(&mut *tx).await.unwrap();
+        assert!(
+            !stored_package_matches(&mut tx, &package).await.unwrap(),
+            "{change}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    assert!(stored_package_matches(&mut conn, &package).await.unwrap());
+    assert_eq!(
+        load_package(&mut conn, &candidate).await.unwrap().unwrap(),
+        package
+    );
+}

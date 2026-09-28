@@ -273,14 +273,10 @@ impl Database {
                 .await;
         }
         persist_package(&mut tx, &package, &capture, &attachments).await?;
-        let stored = load_package(&mut tx, &candidate_id)
-            .await?
-            .context("error encrypted-local-shared-package-write-incomplete")?;
         ensure!(
-            stored == package,
+            stored_package_matches(&mut tx, &package).await?,
             "error encrypted-local-shared-package-write-mismatch"
         );
-        drop(stored);
         let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments).await?;
         tx.commit().await?;
         Ok((package, proof))
@@ -1111,6 +1107,80 @@ async fn persist_package(
     super::validated::record_freeze(conn, capture, attachments).await
 }
 
+/// Descriptor and the data, prefix and image catalogs.
+type PublicationRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
+/// Whether the stored rows are exactly `package` under its freeze commitment,
+/// so [`load_package`] would return it. Records are read one at a time rather
+/// than as a second copy of the package.
+async fn stored_package_matches(
+    conn: &mut sqlx::SqliteConnection,
+    package: &EncryptedLocalSharedStatePackage,
+) -> Result<bool> {
+    let upload = &package.upload;
+    let frozen: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT frozen_descriptor_commitment FROM local_shared_capture_journal
+         WHERE candidate_id = ?",
+    )
+    .bind(&package.candidate_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    if frozen.as_deref() != Some(codec::hash(&upload.descriptor).as_slice()) {
+        return Ok(false);
+    }
+    let publication: Option<PublicationRow> = sqlx::query_as(
+        "SELECT descriptor, data_catalog, prefix_catalog, image_catalog
+         FROM local_shared_capture_publication WHERE candidate_id = ?",
+    )
+    .bind(&package.candidate_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if publication.is_none_or(|(descriptor, data, prefix, images)| {
+        descriptor != upload.descriptor || [data, prefix, images] != upload.catalogs
+    }) {
+        return Ok(false);
+    }
+    let components = [
+        (STATE_COMPONENT, &[][..], &upload.state),
+        (MANIFEST_COMPONENT, &[][..], &upload.manifest),
+    ]
+    .into_iter()
+    .chain(
+        upload
+            .images
+            .iter()
+            .map(|image| (IMAGE_COMPONENT, &image.object_id[..], &image.records)),
+    );
+    let mut expected = 0_i64;
+    for (component, object_id, records) in components {
+        for (index, record) in records.iter().enumerate() {
+            let stored: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT record FROM local_shared_capture_package_records
+                 WHERE candidate_id = ? AND component = ? AND object_id = ?
+                   AND chunk_index = ?",
+            )
+            .bind(&package.candidate_id)
+            .bind(component)
+            .bind(object_id)
+            .bind(i64::try_from(index)?)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if stored.as_ref() != Some(record) {
+                return Ok(false);
+            }
+            expected += 1;
+        }
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM local_shared_capture_package_records WHERE candidate_id = ?",
+    )
+    .bind(&package.candidate_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(count == expected)
+}
+
 /// Loads the frozen package and verifies every record against the committed
 /// descriptor and catalogs. Missing or corrupt bytes fail without replacement.
 pub(super) async fn load_package(
@@ -1125,7 +1195,6 @@ pub(super) async fn load_package(
     .fetch_optional(&mut *conn)
     .await?
     .flatten();
-    type PublicationRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
     let publication: Option<PublicationRow> = sqlx::query_as(
         "SELECT descriptor, data_catalog, prefix_catalog, image_catalog
          FROM local_shared_capture_publication WHERE candidate_id = ?",
