@@ -18,7 +18,10 @@ impl ProtectedLocalKeyStore {
     )> {
         let mut proofs = ProofCache::default();
         let (seed, intent) = self.seed_resume_intent(database, &mut proofs).await?;
-        let upload = self.seed_upload(database, &intent, &mut proofs).await?;
+        let upload = match self.seed_upload(database, &intent, &mut proofs).await? {
+            Some(upload) => Some(upload.package(database).await?),
+            None => None,
+        };
         Ok((seed, intent, upload))
     }
 
@@ -45,7 +48,7 @@ impl ProtectedLocalKeyStore {
         database: &Database,
         intent: &SeedPublicationIntent,
         proofs: &mut ProofCache,
-    ) -> anyhow::Result<Option<crate::sync::bootstrap_format::Package>> {
+    ) -> anyhow::Result<Option<crate::sync::shared_state::package::upload::FrozenUpload>> {
         let _installation = InstallationGuard::acquire(database.path())?;
         self.validate_database(database).await?;
         let package = self.load_required()?;

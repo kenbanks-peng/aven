@@ -341,10 +341,53 @@ impl Database {
         auth: &Authentication<'_>,
         request: PutChunk<'_>,
     ) -> Result<()> {
+        self.put_bootstrap_batch(
+            auth,
+            PutBatch {
+                bootstrap_id: request.bootstrap_id,
+                descriptor_commitment: request.descriptor_commitment,
+                records: vec![(request.component, request.index, request.bytes)],
+            },
+        )
+        .await
+    }
+
+    /// Stores every record of the batch in one transaction, each checked
+    /// against its slot in the frozen descriptor, or stores nothing. Records
+    /// already held must match exactly, so an exact retry succeeds and any
+    /// conflicting record rolls back the whole batch.
+    pub async fn put_bootstrap_batch(
+        &self,
+        auth: &Authentication<'_>,
+        request: PutBatch<'_>,
+    ) -> Result<()> {
+        let slots = &request.records;
         ensure!(
-            request.bytes.len() <= MAX_REQUEST_BYTES,
+            !slots.is_empty() && slots.len() <= batch::MAX_RECORDS,
+            "error bootstrap-batch-shape"
+        );
+        ensure!(
+            slots
+                .iter()
+                .all(|(_, _, bytes)| bytes.len() <= MAX_REQUEST_BYTES),
             "error bootstrap-request-limit"
         );
+        let catalogs = slots
+            .iter()
+            .filter(|(component, _, _)| component.catalog().is_some())
+            .count();
+        ensure!(
+            catalogs == 0 || catalogs == slots.len(),
+            "error bootstrap-batch-mixed"
+        );
+        for (position, (component, index, _)) in slots.iter().enumerate() {
+            ensure!(
+                slots[..position]
+                    .iter()
+                    .all(|(c, i, _)| (c, i) != (component, index)),
+                "error bootstrap-batch-shape"
+            );
+        }
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         authorize(self, &mut tx, auth).await?;
@@ -355,65 +398,88 @@ impl Database {
         let d = c.declaration()?;
         let layout = layout(&mut tx, id, &d).await?;
         layout.check_budget(c.budget)?;
-        let lengths = &layout
-            .components
-            .iter()
-            .find(|(component, _)| *component == request.component)
-            .ok_or_else(|| anyhow::anyhow!("error bootstrap-catalog-required"))?
-            .1;
-        let index = usize::try_from(request.index)?;
-        ensure!(
-            lengths.get(index) == Some(&(request.bytes.len() as u64)),
-            "error bootstrap-chunk-shape"
-        );
-        let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT bytes FROM server_bootstrap_chunks WHERE bootstrap = ? AND component = ? AND chunk_index = ?")
-            .bind(id.as_slice()).bind(request.component.key()).bind(i64::try_from(index)?)
-            .fetch_optional(&mut *tx).await?;
-        if let Some(bytes) = existing {
-            ensure!(bytes == request.bytes, "error bootstrap-chunk-conflict");
+        let lengths = |component: Component| {
+            layout
+                .components
+                .iter()
+                .find(|(c, _)| *c == component)
+                .map(|(_, lengths)| lengths)
+                .ok_or_else(|| anyhow::anyhow!("error bootstrap-catalog-required"))
+        };
+        // Every length matches its slot before any record bytes are examined.
+        for (component, index, bytes) in slots {
+            ensure!(
+                lengths(*component)?.get(usize::try_from(*index)?) == Some(&(bytes.len() as u64)),
+                "error bootstrap-chunk-shape"
+            );
+        }
+        let mut fresh = Vec::new();
+        for (component, index, bytes) in slots {
+            let index = usize::try_from(*index)?;
+            let existing: Option<Vec<u8>> = sqlx::query_scalar("SELECT bytes FROM server_bootstrap_chunks WHERE bootstrap = ? AND component = ? AND chunk_index = ?")
+                .bind(id.as_slice()).bind(component.key()).bind(i64::try_from(index)?)
+                .fetch_optional(&mut *tx).await?;
+            if let Some(existing) = existing {
+                ensure!(existing == *bytes, "error bootstrap-chunk-conflict");
+                continue;
+            }
+            let artifact = layout.artifacts.iter().find(|a| a.component == *component);
+            match (component.catalog(), artifact) {
+                (Some(class), _) => d.verify_slice(class, index, bytes)?,
+                (None, Some(artifact)) => artifact.verify_chunk(index, bytes)?,
+                (None, None) => anyhow::bail!("error bootstrap-catalog-required"),
+            }
+            fresh.push((*component, index, *bytes));
+        }
+        if fresh.is_empty() {
             tx.commit().await?;
             return Ok(());
         }
-        let artifact = layout
-            .artifacts
-            .iter()
-            .find(|a| a.component == request.component);
-        match (request.component.catalog(), artifact) {
-            (Some(class), _) => d.verify_slice(class, index, request.bytes)?,
-            (None, Some(artifact)) => artifact.verify_chunk(index, request.bytes)?,
-            (None, None) => anyhow::bail!("error bootstrap-catalog-required"),
-        }
+        let added: u64 = fresh.iter().map(|(_, _, bytes)| bytes.len() as u64).sum();
         let (bytes, chunks): (i64, i64) = sqlx::query_as("SELECT coalesce(sum(length(bytes)), 0), count(*) FROM server_bootstrap_chunks WHERE bootstrap = ?")
             .bind(id.as_slice()).fetch_one(&mut *tx).await?;
         ensure!(
             (bytes as u64)
-                .checked_add(request.bytes.len() as u64)
+                .checked_add(added)
                 .is_some_and(|n| n <= c.budget.bytes)
                 && (chunks as u64)
-                    .checked_add(1)
+                    .checked_add(fresh.len() as u64)
                     .is_some_and(|n| n <= c.budget.chunks),
             "error bootstrap-budget"
         );
-        sqlx::query("INSERT INTO server_bootstrap_chunks(bootstrap, component, chunk_index, bytes) VALUES (?, ?, ?, ?)")
-            .bind(id.as_slice()).bind(request.component.key()).bind(i64::try_from(index)?)
-            .bind(request.bytes).execute(&mut *tx).await?;
-        let stored: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM server_bootstrap_chunks WHERE bootstrap = ? AND component = ?",
-        )
-        .bind(id.as_slice())
-        .bind(request.component.key())
-        .fetch_one(&mut *tx)
-        .await?;
-        if usize::try_from(stored)? == lengths.len() {
-            // Completion errors roll back this insert with the transaction.
-            match artifact {
-                Some(artifact) => {
-                    artifact.verify(&records(&mut tx, id, request.component).await?)?
-                }
-                None => self::layout(&mut tx, id, &d)
-                    .await?
-                    .check_budget(c.budget)?,
+        for (component, index, bytes) in &fresh {
+            sqlx::query("INSERT INTO server_bootstrap_chunks(bootstrap, component, chunk_index, bytes) VALUES (?, ?, ?, ?)")
+                .bind(id.as_slice()).bind(component.key()).bind(i64::try_from(*index)?)
+                .bind(*bytes).execute(&mut *tx).await?;
+        }
+        // Completion errors roll back every insert with the transaction.
+        let mut touched: Vec<Component> = Vec::new();
+        for (component, _, _) in &fresh {
+            if !touched.contains(component) {
+                touched.push(*component);
             }
+        }
+        let mut catalog_completed = false;
+        for component in touched {
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM server_bootstrap_chunks WHERE bootstrap = ? AND component = ?",
+            )
+            .bind(id.as_slice())
+            .bind(component.key())
+            .fetch_one(&mut *tx)
+            .await?;
+            if usize::try_from(stored)? != lengths(component)?.len() {
+                continue;
+            }
+            match layout.artifacts.iter().find(|a| a.component == component) {
+                Some(artifact) => artifact.verify(&records(&mut tx, id, component).await?)?,
+                None => catalog_completed = true,
+            }
+        }
+        if catalog_completed {
+            self::layout(&mut tx, id, &d)
+                .await?
+                .check_budget(c.budget)?;
         }
         tx.commit().await?;
         Ok(())

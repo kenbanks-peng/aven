@@ -4,6 +4,7 @@ use crate::sync::seed_claim::{ClaimAuthentication, Secret, SeedAuthority};
 use crate::sync::{LocalSharedStatePackageContext, LocalSharedStatePackageKey, bootstrap_format};
 use sha2::{Digest, Sha256};
 
+mod batch;
 mod failures;
 
 struct Fixture {

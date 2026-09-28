@@ -8,7 +8,8 @@
 //!
 //! Declaration freezes the exact profile-1 descriptor and explicit total byte and
 //! chunk budgets, including all three catalogs. One candidate may be active. PUTs
-//! carry its descriptor commitment; exact retries are idempotent.
+//! carry its descriptor commitment; exact retries are idempotent. A batch PUT
+//! stores all of its records or none, and never mixes catalog slices with data.
 //! Every PUT is checked against its descriptor slot before it is stored, and a
 //! slice that completes a catalog is stored only if the whole catalog verifies.
 //! Data requires its complete describing catalog. Manifest descriptors are
@@ -25,6 +26,7 @@
 //! plus framing and one catalog (16 MiB); callers must separately bound concurrent
 //! requests.
 
+pub mod batch;
 mod persistence;
 
 pub use crate::sync::seed_claim::{Publication, PublicationOutcome};
@@ -79,6 +81,10 @@ pub enum Component {
 }
 
 impl Component {
+    pub fn is_catalog(self) -> bool {
+        self.catalog().is_some()
+    }
+
     fn catalog(self) -> Option<usize> {
         match self {
             Self::DataCatalog => Some(0),
@@ -97,6 +103,19 @@ impl Component {
             Self::State => vec![4],
             Self::Image(id) => std::iter::once(5).chain(id).collect(),
         }
+    }
+
+    /// The component whose [`Self::key`] is `key`.
+    pub(crate) fn from_key(key: &[u8]) -> Option<Self> {
+        Some(match key {
+            [0] => Self::DataCatalog,
+            [1] => Self::PrefixCatalog,
+            [2] => Self::ImageCatalog,
+            [3] => Self::Manifest,
+            [4] => Self::State,
+            [5, id @ ..] => Self::Image(id.try_into().ok()?),
+            _ => return None,
+        })
     }
 }
 
@@ -131,6 +150,13 @@ pub enum Status {
     /// Immutable accepted intent. Callers validate it against pinned expectations.
     Published(PublicationOutcome),
     Staging(StagingStatus),
+}
+
+/// Records for several slots of one candidate, stored all or nothing.
+pub struct PutBatch<'a> {
+    pub bootstrap_id: [u8; 32],
+    pub descriptor_commitment: [u8; 32],
+    pub records: Vec<(Component, u64, &'a [u8])>,
 }
 
 pub struct PutChunk<'a> {

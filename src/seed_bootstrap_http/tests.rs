@@ -299,12 +299,19 @@ async fn loopback_rejects_bad_authority_context_and_bytes_without_mutation() {
             .await
             .is_err()
     ); // incomplete catalogs/artifacts
-    let put = |bytes| Operation::Put {
-        bootstrap: b.bootstrap_id,
-        commitment: b.descriptor_commitment,
-        component: staging::Component::DataCatalog,
-        index: 0,
-        bytes,
+    let put = |bytes: Vec<u8>| {
+        let header = batch::Header {
+            vault: seed.genesis().context().vault_id,
+            genesis: seed.genesis().commitment(),
+            bootstrap: b.bootstrap_id,
+            commitment: b.descriptor_commitment,
+            records: vec![batch::Slot {
+                component: staging::Component::DataCatalog,
+                index: 0,
+                len: bytes.len() as u64,
+            }],
+        };
+        (header, bytes)
     };
     let mut changed = package.descriptor.clone();
     changed[0] ^= 1;
@@ -357,13 +364,10 @@ async fn loopback_rejects_bad_authority_context_and_bytes_without_mutation() {
         )
         .unwrap()
     );
-    http.exchange(
-        seed.genesis(),
-        seed.bearer(),
-        put(package.catalogs[0].clone()),
-    )
-    .await
-    .unwrap();
+    let (header, bytes) = put(package.catalogs[0].clone());
+    http.put_batch(seed.bearer(), &header, &[&bytes])
+        .await
+        .unwrap();
     let before = serde_json::to_vec(
         &http
             .exchange(seed.genesis(), seed.bearer(), status())
@@ -373,8 +377,9 @@ async fn loopback_rejects_bad_authority_context_and_bytes_without_mutation() {
     .unwrap();
     let mut changed = package.catalogs[0].clone();
     changed[0] ^= 1;
+    let (header, changed) = put(changed);
     assert!(
-        http.exchange(seed.genesis(), seed.bearer(), put(changed))
+        http.put_batch(seed.bearer(), &header, &[&changed])
             .await
             .is_err()
     );
@@ -696,12 +701,14 @@ async fn server_worker() {
             let fault = fault.clone();
             async move {
                 let (parts, body) = request.into_parts();
-                let bytes = to_bytes(body, REQUEST_LIMIT).await.unwrap();
-                let envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
-                let should_exit = matches!(
-                    (&*fault, &envelope.operation),
-                    ("put", Operation::Put { .. }) | ("publish", Operation::Publish { .. })
-                );
+                let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
+                let should_exit = match serde_json::from_slice::<Envelope>(&bytes) {
+                    Ok(envelope) => {
+                        fault == "publish"
+                            && matches!(envelope.operation, Operation::Publish { .. })
+                    }
+                    Err(_) => fault == "put",
+                };
                 let response = next
                     .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
                     .await;
@@ -819,7 +826,7 @@ async fn invalid_http_outcome_preserves_sealed_intent_and_capture_until_verified
 }
 
 #[tokio::test]
-async fn upload_reports_exact_bytes_and_restarts_counting_on_retry() {
+async fn resumed_upload_reports_held_bytes_and_sends_only_missing_slots() {
     let root = tempfile::tempdir().unwrap();
     let (db, store, seed, package) = fixture(root.path()).await;
     let expected = budget(&package).bytes;
@@ -827,8 +834,8 @@ async fn upload_reports_exact_bytes_and_restarts_counting_on_retry() {
         .await
         .unwrap();
     e2ee_http::issue_setup(&server).await;
-    // After the claim, status, declaration and two stored chunks, the server
-    // fails the next request, so the first attempt stops partway through.
+    // After the claim, status, declaration and two stored batches (the
+    // catalogs, then the manifest), the server fails the next request.
     let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
         move |request: Request, next: axum::middleware::Next| {
@@ -859,18 +866,73 @@ async fn upload_reports_exact_bytes_and_restarts_counting_on_retry() {
     assert!(http.resume_reporting(&store, &db, &record).await.is_err());
     task.abort();
     let first = std::mem::take(&mut *log.lock().unwrap());
-    let (http, task) = serve(server).await;
+    let stored = |server: &Database| {
+        let server = server.clone();
+        async move {
+            let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
+            let (bytes, chunks): (i64, i64) = sqlx::query_as(
+                "SELECT coalesce(sum(length(bytes)), 0), count(*) FROM server_bootstrap_chunks",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+            (bytes as u64, chunks as u64)
+        }
+    };
+    let (held, held_chunks) = stored(&server).await;
+    assert!(held > 0 && held < expected);
+    // Two batches were stored before the refusal; nothing claimed more.
+    assert_eq!(first.len(), 3);
+    assert_eq!(first.first(), Some(&(0, expected)));
+    assert_eq!(first.last(), Some(&(held, expected)));
+
+    // Staging expired meanwhile; the retry ensures it again, then sends only
+    // the slots the server does not hold.
+    let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
+    sqlx::query("UPDATE server_bootstrap_candidates SET expires_at = 0")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = batches.clone();
+    let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
+        move |request: Request, next: axum::middleware::Next| {
+            let seen = seen.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
+                if let Ok(decoded) = batch::decode(&bytes) {
+                    seen.lock().unwrap().extend(decoded.header.records);
+                }
+                next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                    .await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = Client::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     assert!(http.resume_reporting(&store, &db, &record).await.unwrap());
     task.abort();
     let retry = std::mem::take(&mut *log.lock().unwrap());
-    // Two chunks were stored before the refusal; nothing claimed more.
-    assert_eq!(first.len(), 3);
-    assert!(first.last().unwrap().0 < expected);
-    // The retry uploads every chunk again, counting from zero.
-    assert_eq!(retry.len() as u64, budget(&package).chunks + 1);
+    let resent = std::mem::take(&mut *batches.lock().unwrap());
+    assert_eq!(
+        resent.iter().map(|slot| slot.len).sum::<u64>(),
+        expected - held
+    );
+    assert_eq!(resent.len() as u64, budget(&package).chunks - held_chunks);
+    assert!(
+        resent
+            .iter()
+            .all(|slot| !slot.component.is_catalog()
+                && slot.component != staging::Component::Manifest)
+    );
+    assert_eq!(retry.first(), Some(&(held, expected)));
     assert_eq!(retry.last(), Some(&(expected, expected)));
     for reports in [first, retry] {
-        assert_eq!(reports.first(), Some(&(0, expected)));
         assert!(reports.windows(2).all(|pair| pair[0].0 < pair[1].0));
         assert!(reports.iter().all(|&(_, total)| total == expected));
     }
@@ -938,20 +1000,4 @@ async fn client_bounds_responses_and_rejects_redirects_and_unsafe_origins() {
         assert_eq!(error.to_string(), message);
         task.abort();
     }
-}
-
-#[test]
-fn maximal_chunk_put_fits_request_limit() {
-    let put = Envelope {
-        vault: [255; 32],
-        genesis: [255; 32],
-        operation: Operation::Put {
-            bootstrap: [255; 32],
-            commitment: [255; 32],
-            component: staging::Component::Image([255; 32]),
-            index: u64::MAX,
-            bytes: vec![255; staging::MAX_REQUEST_BYTES],
-        },
-    };
-    assert!(serde_json::to_vec(&put).unwrap().len() <= REQUEST_LIMIT);
 }

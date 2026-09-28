@@ -67,12 +67,27 @@ pub(crate) async fn dispatch<T, F>(
 where
     F: Future<Output = T>,
 {
+    dispatch_with(admission, timeout, BODY_TIMEOUT, request, limit, operate).await
+}
+
+/// [`dispatch`] with a body collection timeout of `body_timeout`.
+pub(crate) async fn dispatch_with<T, F>(
+    admission: &Admission,
+    timeout: Duration,
+    body_timeout: Duration,
+    request: Request,
+    limit: usize,
+    operate: impl FnOnce(HeaderMap, Option<Bytes>) -> F,
+) -> Outcome<T>
+where
+    F: Future<Output = T>,
+{
     let deadline = tokio::time::Instant::now() + timeout;
     let Ok(_ingress) = admission.ingress.try_acquire() else {
         return Outcome::PermitTimeout;
     };
     let (parts, body) = request.into_parts();
-    let body_deadline = deadline.min(tokio::time::Instant::now() + BODY_TIMEOUT);
+    let body_deadline = deadline.min(tokio::time::Instant::now() + body_timeout);
     let Ok(bytes) = tokio::time::timeout_at(body_deadline, to_bytes(body, limit)).await else {
         return Outcome::DispatchTimeout;
     };

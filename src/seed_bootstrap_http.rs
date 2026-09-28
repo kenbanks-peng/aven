@@ -1,7 +1,8 @@
 //! Server side of seed bootstrap: claiming a server and publishing the seed's
 //! frozen snapshot. The wire framing is documented in
 //! `aven_core::sync::client::bootstrap`. One active request per router bounds
-//! concurrent core materialization.
+//! concurrent core materialization. Batch bodies are framed and bounded
+//! before a request waits for that permit.
 
 use crate::http_admission;
 #[cfg(test)]
@@ -13,7 +14,7 @@ pub(crate) use aven_core::sync::client::bootstrap::{
 use aven_core::{
     db::Database,
     sync::{
-        bootstrap_staging as staging,
+        bootstrap_staging::{self as staging, batch},
         seed_claim::{ClaimAuthentication, ClaimRefusal, Genesis, Secret},
     },
 };
@@ -21,13 +22,22 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
     routing::post,
 };
 use std::{sync::Arc, time::Duration};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
+/// Slowest upload rate a request body is given time for.
+const MIN_UPLOAD_BYTES_PER_SECOND: u64 = 256 * 1024;
+/// Bodies are collected up to the larger of the two framings; each framing
+/// then enforces its own limit.
+const COLLECT_LIMIT: usize = if REQUEST_LIMIT > batch::MAX_BYTES {
+    REQUEST_LIMIT
+} else {
+    batch::MAX_BYTES
+};
 const CODES: http_admission::Codes = http_admission::codes!("bootstrap");
 
 struct Server {
@@ -55,36 +65,78 @@ pub fn router(database: Database, publication_policy: staging::PublicationPolicy
 
 async fn handle(State(server): State<Arc<Server>>, request: Request) -> Response {
     let server = &*server;
-    let outcome = http_admission::dispatch(
+    // Time to receive the declared body at the slowest supported rate.
+    let transfer = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<u64>().ok())
+        .map_or(Duration::ZERO, |length| {
+            Duration::from_millis(
+                length.min(COLLECT_LIMIT as u64) * 1000 / MIN_UPLOAD_BYTES_PER_SECOND,
+            )
+        });
+    let outcome = http_admission::dispatch_with(
         &server.admission,
-        TIMEOUT,
+        TIMEOUT + transfer,
+        http_admission::BODY_TIMEOUT + transfer,
         request,
-        REQUEST_LIMIT,
+        COLLECT_LIMIT,
         |headers, bytes| handle_bounded(server, headers, bytes),
     )
     .await;
     http_admission::respond(&CODES, outcome)
 }
 
+/// A request whose framing was checked before it waited for a permit.
+enum Framed {
+    Json(Envelope),
+    Batch(Bytes),
+}
+
+fn is_batch(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        == Some(batch::CONTENT_TYPE)
+        && !headers.contains_key(header::CONTENT_ENCODING)
+}
+
 fn framing(
     headers: &HeaderMap,
     bytes: Option<Bytes>,
-) -> Result<(Secret, Envelope), http_admission::Refusal> {
+) -> Result<(Secret, Framed), http_admission::Refusal> {
+    if is_batch(headers) {
+        let bytes = bytes.ok_or_else(|| CODES.too_large())?;
+        let secret = CODES.bearer(headers)?;
+        batch::decode(&bytes)
+            .map_err(|_| http_admission::Refusal::new(StatusCode::BAD_REQUEST, CODES.malformed))?;
+        return Ok((secret, Framed::Batch(bytes)));
+    }
     let bytes = CODES.json_body(headers, bytes)?;
+    if bytes.len() > REQUEST_LIMIT {
+        return Err(CODES.too_large());
+    }
     let secret = CODES.bearer(headers)?;
-    Ok((secret, CODES.parse(&bytes)?))
+    Ok((secret, Framed::Json(CODES.parse(&bytes)?)))
 }
 
 async fn handle_bounded(server: &Server, headers: HeaderMap, bytes: Option<Bytes>) -> Response {
-    let (secret, envelope) = match framing(&headers, bytes) {
+    let (secret, framed) = match framing(&headers, bytes) {
         Ok(framed) => framed,
         Err(refusal) => return http_admission::operation_refusal(&CODES, &refusal.into()),
     };
     let claim = matches!(
-        &envelope.operation,
-        Operation::ClaimSetup { .. } | Operation::ClaimBearer { .. }
+        &framed,
+        Framed::Json(Envelope {
+            operation: Operation::ClaimSetup { .. } | Operation::ClaimBearer { .. },
+            ..
+        })
     );
-    let reply = match dispatch(server, &secret, envelope).await {
+    let result = match framed {
+        Framed::Json(envelope) => dispatch(server, &secret, envelope).await,
+        Framed::Batch(bytes) => store_batch(server, &secret, &bytes).await,
+    };
+    let reply = match result {
         Ok(reply) => reply,
         // Only a refusal decided inside the claim transaction is definite; any
         // other claim error, such as a storage timeout, leaves the outcome
@@ -170,26 +222,6 @@ async fn dispatch(server: &Server, secret: &Secret, e: Envelope) -> Result<Reply
         Operation::Cancel { bootstrap } => {
             db.cancel_bootstrap_staging(&auth, bootstrap).await?.into()
         }
-        Operation::Put {
-            bootstrap,
-            commitment,
-            component,
-            index,
-            bytes,
-        } => {
-            db.put_bootstrap_chunk(
-                &auth,
-                staging::PutChunk {
-                    bootstrap_id: bootstrap,
-                    descriptor_commitment: commitment,
-                    component,
-                    index,
-                    bytes: &bytes,
-                },
-            )
-            .await?;
-            Reply::Stored
-        }
         Operation::Publish {
             bootstrap,
             commitment,
@@ -210,6 +242,31 @@ async fn dispatch(server: &Server, secret: &Secret, e: Envelope) -> Result<Reply
             .to_vec(),
         ),
     })
+}
+
+async fn store_batch(server: &Server, secret: &Secret, bytes: &[u8]) -> Result<Reply> {
+    let batch::Batch { header, records } = batch::decode(bytes)?;
+    server
+        .database
+        .put_bootstrap_batch(
+            &staging::Authentication {
+                vault_id: header.vault,
+                genesis_commitment: header.genesis,
+                bearer: secret,
+            },
+            staging::PutBatch {
+                bootstrap_id: header.bootstrap,
+                descriptor_commitment: header.commitment,
+                records: header
+                    .records
+                    .iter()
+                    .zip(records)
+                    .map(|(slot, bytes)| (slot.component, slot.index, bytes))
+                    .collect(),
+            },
+        )
+        .await?;
+    Ok(Reply::Stored)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 pub mod publication;
+pub mod upload;
 
 use std::fmt;
 use std::path::Path;

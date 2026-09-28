@@ -1,14 +1,18 @@
 //! Seed bootstrap: claiming a server for a new sync and publishing the
 //! seed's frozen snapshot.
 //!
-//! HTTP framing: POST /e2ee/bootstrap/v1, application/json, one
-//! externally tagged operation in a context envelope. Base64 strings carry exact
-//! existing codec bytes, never a second encrypted package representation. Setup
-//! and device credentials use Authorization: Bearer <64 lowercase hex digits>;
-//! only ClaimSetup uses setup authority. IDs and payloads never enter URLs.
-//! Requests are bounded at the base64 length of one chunk plus 4096 bytes of
-//! framing. Status responses are bounded at 1 MiB. Busy callers retry a
-//! bounded number of times.
+//! HTTP framing: POST /e2ee/bootstrap/v1. Control operations are
+//! application/json, one externally tagged operation in a context envelope.
+//! Package records travel only in binary batches (see
+//! [`staging::batch`]), each carrying its context in the batch header; the
+//! server answers a stored batch with `Stored`. Base64 strings and batch
+//! records carry exact existing codec bytes, never a second encrypted package
+//! representation. Setup and device credentials use Authorization: Bearer <64
+//! lowercase hex digits>; only ClaimSetup uses setup authority. IDs and
+//! payloads never enter URLs. JSON requests are bounded at the base64 length
+//! of one chunk plus 4096 bytes of framing, batches at
+//! [`staging::batch::MAX_BYTES`]. Status responses are bounded at 1 MiB. Busy
+//! callers retry a bounded number of times.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
@@ -84,14 +88,6 @@ pub enum Operation {
     Cancel {
         bootstrap: [u8; 32],
     },
-    Put {
-        bootstrap: [u8; 32],
-        commitment: [u8; 32],
-        component: staging::Component,
-        index: u64,
-        #[serde(with = "crate::sync::base64_bytes")]
-        bytes: Vec<u8>,
-    },
     Publish {
         bootstrap: [u8; 32],
         commitment: [u8; 32],
@@ -162,10 +158,38 @@ impl Client {
             bytes.len() <= REQUEST_LIMIT,
             "error bootstrap-request-limit"
         );
-        let bytes = exchange::post_json(
+        self.post(secret, exchange::json_content(), bytes, claim)
+            .await
+    }
+
+    /// Stores one batch of package records. Every record is sent exactly as
+    /// frozen; the server checks each against its descriptor slot.
+    pub async fn put_batch(
+        &self,
+        secret: &Secret,
+        header: &staging::batch::Header,
+        records: &[&[u8]],
+    ) -> Result<Reply> {
+        let bytes = staging::batch::encode(header, records)?;
+        let content_type = exchange::HttpHeader {
+            name: "content-type".into(),
+            value: staging::batch::CONTENT_TYPE.into(),
+        };
+        self.post(secret, content_type, bytes, false).await
+    }
+
+    async fn post(
+        &self,
+        secret: &Secret,
+        content_type: exchange::HttpHeader,
+        bytes: Vec<u8>,
+        claim: bool,
+    ) -> Result<Reply> {
+        let bytes = exchange::post(
             &self.link,
             &self.endpoint,
             Some(secret),
+            content_type,
             bytes,
             RESPONSE_LIMIT,
         )
@@ -249,9 +273,9 @@ impl Client {
         self.resume_reporting(store, database, &|_, _| {}).await
     }
 
-    /// [`Self::resume`], reporting uploaded bytes of the package's exact
-    /// total after each stored chunk. Every attempt uploads from the first
-    /// chunk, so the count starts at zero each time.
+    /// [`Self::resume`], reporting bytes the server holds of the package's
+    /// exact total: first what it already held, then again after each
+    /// stored batch. Only slots the server reports missing are sent.
     pub async fn resume_reporting(
         &self,
         store: &ProtectedLocalKeyStore,
@@ -286,30 +310,19 @@ impl Client {
         let record = match status {
             Reply::Published(record) => record,
             Reply::Missing | Reply::Staging(_) => {
-                let package = store
+                let upload = store
                     .seed_upload(database, &intent, &mut proofs)
                     .await?
                     .ok_or_else(|| anyhow::anyhow!("error bootstrap-outcome-missing"))?;
                 let _timer = StageTimer::start("upload");
-                let components = components(&package);
-                let budget = staging::Budget {
-                    bytes: components
-                        .iter()
-                        .flat_map(|(_, chunks)| chunks)
-                        .map(|b| b.len() as u64)
-                        .sum(),
-                    chunks: components
-                        .iter()
-                        .map(|(_, chunks)| chunks.len() as u64)
-                        .sum(),
-                };
+                let budget = upload.budget();
                 let staging = match status {
                     Reply::Missing => {
                         self.exchange(
                             seed.genesis(),
                             seed.bearer(),
                             Operation::Declare {
-                                descriptor: package.descriptor.clone(),
+                                descriptor: upload.descriptor().to_vec(),
                                 budget,
                             },
                         )
@@ -334,42 +347,65 @@ impl Client {
                     }
                     _ => unreachable!(),
                 };
-                let Reply::Staging(staging) = staging else {
-                    anyhow::bail!("error bootstrap-response");
+                let header = |records| staging::batch::Header {
+                    vault: seed.genesis().context().vault_id,
+                    genesis: seed.genesis().commitment(),
+                    bootstrap: binding.bootstrap_id,
+                    commitment: binding.descriptor_commitment,
+                    records,
                 };
-                ensure!(
-                    staging.descriptor_commitment == binding.descriptor_commitment
-                        && staging.stream_id == binding.stream_id
-                        && staging.budget == budget,
-                    "error bootstrap-status-mismatch"
-                );
-                // Exact duplicate PUT is intentional: server status is not a
-                // reason to regenerate ciphertext or skip server-side checks.
-                let mut sent = 0;
-                uploaded(sent, budget.bytes);
-                for (component, chunks) in components {
-                    for (index, bytes) in chunks.into_iter().enumerate() {
-                        let length = bytes.len() as u64;
-                        let reply = self
-                            .exchange(
-                                seed.genesis(),
-                                seed.bearer(),
-                                Operation::Put {
-                                    bootstrap: binding.bootstrap_id,
-                                    commitment: binding.descriptor_commitment,
-                                    component,
-                                    index: index as u64,
-                                    bytes: bytes.to_vec(),
-                                },
-                            )
-                            .await?;
+                let mut staging = staging;
+                let mut reported = false;
+                // Catalog slices must verify before the server lists the
+                // records they describe, so the second round sends those.
+                for _ in 0..3 {
+                    let Reply::Staging(status) = staging else {
+                        anyhow::bail!("error bootstrap-response");
+                    };
+                    ensure!(
+                        status.descriptor_commitment == binding.descriptor_commitment
+                            && status.stream_id == binding.stream_id
+                            && status.budget == budget,
+                        "error bootstrap-status-mismatch"
+                    );
+                    let missing = missing_slots(upload.slots(), &status)?;
+                    let listed = status.components.len();
+                    let mut held = budget.bytes
+                        - missing.iter().map(|slot| slot.len).sum::<u64>()
+                        - unlisted_bytes(upload.slots(), &status);
+                    if !reported {
+                        tracing::debug!(held, total = budget.bytes, "server holds staged bytes");
+                        uploaded(held, budget.bytes);
+                        reported = true;
+                    }
+                    let mut sent = 0_u64;
+                    for batch in pack(&missing, |records| header(records)) {
+                        let records = upload.read(database, &batch).await?;
+                        let refs: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
+                        let reply = self.put_batch(seed.bearer(), &header(batch), &refs).await?;
                         ensure!(
                             matches!(reply, Reply::Stored),
                             "error bootstrap-upload-refused"
                         );
+                        let length: u64 = records.iter().map(|r| r.len() as u64).sum();
                         sent += length;
-                        uploaded(sent, budget.bytes);
+                        held += length;
+                        uploaded(held, budget.bytes);
                     }
+                    tracing::debug!(sent, "uploaded missing staged bytes");
+                    // Every component was listed, so every missing slot was sent.
+                    if listed == component_count(upload.slots()) {
+                        break;
+                    }
+                    staging = self
+                        .exchange(
+                            seed.genesis(),
+                            seed.bearer(),
+                            Operation::Status {
+                                bootstrap: binding.bootstrap_id,
+                            },
+                        )
+                        .await?;
                 }
                 match self
                     .exchange(
@@ -402,7 +438,94 @@ impl Client {
     }
 }
 
+/// Slots of `slots` the server lists as missing, in upload order.
+fn missing_slots(
+    slots: &[staging::batch::Slot],
+    status: &staging::StagingStatus,
+) -> Result<Vec<staging::batch::Slot>> {
+    let mut missing = Vec::new();
+    for listed in &status.components {
+        let expected = slots
+            .iter()
+            .filter(|slot| slot.component == listed.component)
+            .count();
+        ensure!(
+            listed.chunks.len() == expected,
+            "error bootstrap-status-mismatch"
+        );
+    }
+    for slot in slots {
+        let listed = status
+            .components
+            .iter()
+            .find(|listed| listed.component == slot.component);
+        if let Some(listed) = listed
+            && listed.chunks[slot.index as usize] == staging::Presence::Missing
+        {
+            missing.push(*slot);
+        }
+    }
+    Ok(missing)
+}
+
+/// Bytes of components the server does not list yet because their
+/// describing catalog has not verified.
+fn unlisted_bytes(slots: &[staging::batch::Slot], status: &staging::StagingStatus) -> u64 {
+    slots
+        .iter()
+        .filter(|slot| {
+            !status
+                .components
+                .iter()
+                .any(|listed| listed.component == slot.component)
+        })
+        .map(|slot| slot.len)
+        .sum()
+}
+
+fn component_count(slots: &[staging::batch::Slot]) -> usize {
+    let mut components: Vec<staging::Component> = Vec::new();
+    for slot in slots {
+        if !components.contains(&slot.component) {
+            components.push(slot.component);
+        }
+    }
+    components.len()
+}
+
+/// Splits `slots` into batches within every batch limit, keeping catalog
+/// slices apart from the records catalogs describe.
+fn pack(
+    slots: &[staging::batch::Slot],
+    header: impl Fn(Vec<staging::batch::Slot>) -> staging::batch::Header,
+) -> Vec<Vec<staging::batch::Slot>> {
+    let mut batches: Vec<Vec<staging::batch::Slot>> = Vec::new();
+    let mut current: Vec<staging::batch::Slot> = Vec::new();
+    let mut payload = 0_u64;
+    for slot in slots {
+        let fits = !current.is_empty()
+            && current.len() < staging::batch::MAX_RECORDS
+            && payload + slot.len <= staging::batch::MAX_PAYLOAD as u64
+            && current[0].component.is_catalog() == slot.component.is_catalog()
+            && staging::batch::header_len(&header(
+                current.iter().copied().chain([*slot]).collect(),
+            ))
+            .is_some();
+        if !fits && !current.is_empty() {
+            batches.push(std::mem::take(&mut current));
+            payload = 0;
+        }
+        current.push(*slot);
+        payload += slot.len;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
 /// A package's chunks by component, in upload order.
+#[cfg(any(test, feature = "test-support"))]
 pub fn components(
     package: &crate::sync::bootstrap_format::Package,
 ) -> Vec<(staging::Component, Vec<&[u8]>)> {

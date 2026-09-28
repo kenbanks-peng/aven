@@ -1379,7 +1379,13 @@ async fn resume_passes(
                 return counters::take().0;
             }
             let passes = counters::take().0;
-            let outcome = publish_empty_package(server, &seed, &upload, key.package_key()).await;
+            let outcome = publish_empty_package(
+                server,
+                &seed,
+                &upload.package(database).await.unwrap(),
+                key.package_key(),
+            )
+            .await;
             counters::take();
             let adopted = store
                 .adopt_seed_publication_with(database, &outcome, &mut proofs)
@@ -1475,7 +1481,13 @@ async fn each_resume_point_authenticates_the_frozen_package_at_most_once() {
         .await
         .unwrap()
         .unwrap();
-    publish_empty_package(&server, &seed, &upload, key.package_key()).await;
+    publish_empty_package(
+        &server,
+        &seed,
+        &upload.package(&database).await.unwrap(),
+        key.package_key(),
+    )
+    .await;
     drop(proofs);
     counters::take();
     assert_eq!(

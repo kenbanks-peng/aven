@@ -470,7 +470,7 @@ impl Database {
         seed: &SeedAuthority,
         key: &LocalSharedStatePackageKey,
         proofs: &mut ProofCache,
-    ) -> Result<Option<crate::sync::bootstrap_format::Package>> {
+    ) -> Result<Option<package::upload::FrozenUpload>> {
         let proof = match self.seed_publication_intent_bytes().await? {
             Some((_, state)) if state == "adopted" => None,
             // Failures surface only where the writer would have validated.
@@ -504,17 +504,14 @@ impl Database {
                 && proof.descriptor() == intent.data.descriptor,
             "error seed-package-mismatch"
         );
-        let package = package::load_package(&mut tx, &intent.data.candidate)
-            .await?
-            .context("error seed-package-missing")?;
         tx.commit().await?;
-        let upload = package.into_upload();
-        ensure!(
-            upload.descriptor == intent.data.descriptor
-                && upload.catalogs == proof.metadata().catalogs,
-            "error seed-package-mismatch"
-        );
-        Ok(Some(upload))
+        // Records stay in SQLite; each is verified against these catalogs as
+        // it is read for upload.
+        Ok(Some(package::upload::FrozenUpload::new(
+            intent.data.candidate.clone(),
+            proof.descriptor().to_vec(),
+            proof.metadata().catalogs.clone(),
+        )?))
     }
 
     pub async fn seed_source_pin(&self) -> Result<Option<Vec<u8>>> {

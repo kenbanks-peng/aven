@@ -957,6 +957,7 @@ async fn forging_relay(
 
     let path = request.uri().path().to_string();
     let authorization = request.headers().get(header::AUTHORIZATION).cloned();
+    let request_type = request.headers().get(header::CONTENT_TYPE).cloned();
     let bytes = axum::body::to_bytes(request.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -966,8 +967,10 @@ async fn forging_relay(
     let mut forwarded = relay
         .http
         .post(format!("{}{path}", relay.upstream))
-        .header(header::CONTENT_TYPE, "application/json")
         .body(bytes);
+    if let Some(request_type) = request_type {
+        forwarded = forwarded.header(header::CONTENT_TYPE, request_type);
+    }
     if let Some(authorization) = authorization {
         forwarded = forwarded.header(header::AUTHORIZATION, authorization);
     }

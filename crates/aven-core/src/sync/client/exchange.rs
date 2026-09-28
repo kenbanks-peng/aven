@@ -17,6 +17,15 @@ use anyhow::{Result, bail};
 
 /// Timeout for one request, from sending to the last response byte.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
+/// Slowest upload rate a request body is given time for, beyond
+/// [`REQUEST_TIMEOUT`].
+pub(crate) const MIN_UPLOAD_BYTES_PER_SECOND: u64 = 256 * 1024;
+
+/// [`REQUEST_TIMEOUT`] plus time to send `body_len` bytes at
+/// [`MIN_UPLOAD_BYTES_PER_SECOND`].
+pub(crate) fn request_timeout(body_len: usize) -> Duration {
+    REQUEST_TIMEOUT + Duration::from_millis(body_len as u64 * 1000 / MIN_UPLOAD_BYTES_PER_SECOND)
+}
 
 /// One HTTP header.
 #[derive(Clone, PartialEq, Eq)]
@@ -187,8 +196,8 @@ impl Link {
                 method: method.to_string(),
                 url: url.to_string(),
                 headers,
+                timeout: request_timeout(body.len()),
                 body,
-                timeout: REQUEST_TIMEOUT,
                 response_limit,
                 context: RequestContext { id },
             }));
@@ -359,7 +368,27 @@ pub(crate) async fn post_json(
     body: Vec<u8>,
     response_limit: usize,
 ) -> Result<Vec<u8>, Failure> {
-    let mut headers = vec![json_content()];
+    post(
+        link,
+        endpoint,
+        credential,
+        json_content(),
+        body,
+        response_limit,
+    )
+    .await
+}
+
+/// [`post_json`] with a body of any content type and a JSON reply.
+pub(crate) async fn post(
+    link: &Link,
+    endpoint: &url::Url,
+    credential: Option<&crate::sync::seed_claim::Secret>,
+    content_type: HttpHeader,
+    body: Vec<u8>,
+    response_limit: usize,
+) -> Result<Vec<u8>, Failure> {
+    let mut headers = vec![content_type];
     headers.extend(credential.map(bearer));
     let mut attempt = 0;
     loop {

@@ -38,6 +38,21 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn put_batch(
+        &self,
+        secret: &Secret,
+        header: &batch::Header,
+        records: &[&[u8]],
+    ) -> Result<Reply> {
+        self.driver
+            .run(|link| async move {
+                bootstrap::Client::new(&self.origin, link)?
+                    .put_batch(secret, header, records)
+                    .await
+            })
+            .await
+    }
+
     /// Initial setup claim or exact bearer-authorized claim resumption.
     pub async fn claim(
         &self,
