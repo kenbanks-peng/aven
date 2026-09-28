@@ -383,3 +383,85 @@ async fn history_validation_refuses_changed_capture_map() {
     .await;
     assert!(intent_error(&fixture).await.is_some());
 }
+
+async fn ranks(conn: &mut SqliteConnection) -> Vec<(String, Option<i64>)> {
+    sqlx::query_as("SELECT change_id, server_seq FROM changes ORDER BY change_id")
+        .fetch_all(conn)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn captured_history_adoption_assigns_prefix_ranks_only_to_captured_rows() {
+    let fixture = history_fixture().await;
+    add_task(&fixture.1, "after capture").await;
+    let mut conn = fixture.1.acquire_writer().await.unwrap();
+    let mut tx = db::begin_immediate(&mut conn).await.unwrap();
+    let before = ranks(&mut tx).await;
+    let expected: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT change_id, prefix_rank FROM local_shared_capture_changes ORDER BY change_id",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap();
+    // The fixture's accepted rows sit at 3, 6, 9 and must move to dense ranks
+    // that collide with their old values under the unique index.
+    assert!(before.iter().any(|(_, seq)| *seq == Some(3)));
+    adopt_captured_history(&mut tx, &fixture.5, expected.len() as u64)
+        .await
+        .unwrap();
+    let after = ranks(&mut tx).await;
+    let captured = expected
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    for ((id, old), (_, new)) in before.iter().zip(&after) {
+        match captured.get(id) {
+            Some(rank) => assert_eq!(*new, Some(*rank)),
+            None => assert_eq!(new, old),
+        }
+    }
+    let provenance: i64 = sqlx::query_scalar("SELECT count(*) FROM shared_history_provenance")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(provenance as usize, captured.len());
+}
+
+#[tokio::test]
+async fn captured_history_adoption_refuses_one_provenance_conflict_atomically() {
+    let fixture = history_fixture().await;
+    let mut conn = fixture.1.acquire_writer().await.unwrap();
+    sqlx::query("UPDATE shared_history_provenance SET source_server_seq = 998")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let before = ranks(&mut conn).await;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_changes")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    {
+        let mut tx = db::begin_immediate(&mut conn).await.unwrap();
+        let error = adopt_captured_history(&mut tx, &fixture.5, count as u64)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("seed-provenance-changed"));
+    }
+    assert_eq!(ranks(&mut conn).await, before);
+    let provenance: i64 = sqlx::query_scalar("SELECT count(*) FROM shared_history_provenance")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(provenance, 1);
+}
+
+#[tokio::test]
+async fn captured_history_adoption_refuses_prefix_count_mismatch() {
+    let fixture = history_fixture().await;
+    let mut conn = fixture.1.acquire_writer().await.unwrap();
+    let mut tx = db::begin_immediate(&mut conn).await.unwrap();
+    let error = adopt_captured_history(&mut tx, &fixture.5, 1)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("seed-prefix-count-mismatch"));
+}

@@ -381,6 +381,74 @@ async fn validate_history(
     Ok(digest.finalize().into())
 }
 
+/// Records captured provenance and moves captured rows to their prefix
+/// ranks. Rows outside the capture keep their state.
+async fn adopt_captured_history(
+    conn: &mut SqliteConnection,
+    candidate: &str,
+    prefix_count: u64,
+) -> Result<()> {
+    let captured: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM local_shared_capture_changes WHERE candidate_id = ?",
+    )
+    .bind(candidate)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(
+        u64::try_from(captured)? == prefix_count,
+        "error seed-prefix-count-mismatch"
+    );
+    let provenance_conflict: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM local_shared_capture_changes c
+             JOIN shared_history_provenance p USING (change_id)
+             WHERE c.candidate_id = ?
+               AND (c.source_server_seq IS NOT p.source_server_seq
+                    OR c.source_pending_rank IS NOT p.source_pending_rank)
+         )",
+    )
+    .bind(candidate)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(!provenance_conflict, "error seed-provenance-changed");
+    sqlx::query(
+        "INSERT OR IGNORE INTO shared_history_provenance(
+             change_id, source_server_seq, source_pending_rank
+         )
+         SELECT change_id, source_server_seq, source_pending_rank
+         FROM local_shared_capture_changes WHERE candidate_id = ?",
+    )
+    .bind(candidate)
+    .execute(&mut *conn)
+    .await?;
+    // The unique server_seq index requires clearing old ranks before
+    // assigning the new ones.
+    sqlx::query(
+        "UPDATE changes SET server_seq = NULL WHERE change_id IN
+         (SELECT change_id FROM local_shared_capture_changes WHERE candidate_id = ?)",
+    )
+    .bind(candidate)
+    .execute(&mut *conn)
+    .await?;
+    let ranked = sqlx::query(
+        "UPDATE changes SET server_seq = (
+             SELECT prefix_rank FROM local_shared_capture_changes c
+             WHERE c.candidate_id = ?1 AND c.change_id = changes.change_id
+         )
+         WHERE change_id IN
+         (SELECT change_id FROM local_shared_capture_changes WHERE candidate_id = ?1)",
+    )
+    .bind(candidate)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    ensure!(
+        i64::try_from(ranked)? == captured,
+        "error seed-history-coverage-changed"
+    );
+    Ok(())
+}
+
 impl Database {
     /// Loads exact upload bytes only for a sealed, protected publication intent.
     /// Adopted installations need only their retained intent and remote outcome.
@@ -748,30 +816,7 @@ impl Database {
             validated == package && same_capture(&validated_capture, &capture)?,
             "error seed-capture-changed"
         );
-        ensure!(
-            capture.capture.snapshot.tables.changes.len() as u64 == binding.prefix_count,
-            "error seed-prefix-count-mismatch"
-        );
-        for provenance in &capture.capture.snapshot.tables.shared_history_provenance {
-            let existing: Option<(Option<i64>, Option<i64>)> = sqlx::query_as("SELECT source_server_seq, source_pending_rank FROM shared_history_provenance WHERE change_id = ?").bind(&provenance.change_id).fetch_optional(&mut *tx).await?;
-            ensure!(
-                existing.is_none_or(
-                    |v| v == (provenance.source_server_seq, provenance.source_pending_rank)
-                ),
-                "error seed-provenance-changed"
-            );
-            sqlx::query("INSERT OR IGNORE INTO shared_history_provenance(change_id, source_server_seq, source_pending_rank) VALUES (?, ?, ?)").bind(&provenance.change_id).bind(provenance.source_server_seq).bind(provenance.source_pending_rank).execute(&mut *tx).await?;
-        }
-        sqlx::query("UPDATE changes SET server_seq = NULL WHERE change_id IN (SELECT change_id FROM local_shared_capture_changes WHERE candidate_id = ?)").bind(&intent.data.candidate).execute(&mut *tx).await?;
-        for row in &capture.capture.snapshot.tables.changes {
-            let count = sqlx::query("UPDATE changes SET server_seq = ? WHERE change_id = ?")
-                .bind(row.server_seq)
-                .bind(&row.change_id)
-                .execute(&mut *tx)
-                .await?
-                .rows_affected();
-            ensure!(count == 1, "error seed-history-coverage-changed");
-        }
+        adopt_captured_history(&mut tx, &intent.data.candidate, binding.prefix_count).await?;
         crate::epic_membership::recover(&mut tx, true).await?;
         let next = intent
             .data
