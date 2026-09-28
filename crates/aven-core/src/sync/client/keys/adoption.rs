@@ -27,6 +27,7 @@ impl ProtectedLocalKeyStore {
                 .context("missing source")?,
             &seed,
         )?;
+        let _timer = super::super::bootstrap::StageTimer::start("load_upload");
         let upload = database
             .seed_publication_upload(&source, &intent, &seed, package.package_key())
             .await?;
@@ -203,6 +204,7 @@ impl ProtectedLocalKeyStore {
             protected.is_none() || existing.is_some(),
             "error seed-intent-database-lost"
         );
+        let timer = super::super::bootstrap::StageTimer::start("prepare_intent");
         let intent = database
             .prepare_seed_publication_intent(&source, &seed, package.package_key())
             .await?;
@@ -222,6 +224,8 @@ impl ProtectedLocalKeyStore {
             &source,
             seed.genesis(),
         )?;
+        drop(timer);
+        let _timer = super::super::bootstrap::StageTimer::start("seal");
         if existing.is_none_or(|(_, state)| state != "adopted") {
             database
                 .seal_seed_publication_intent(&source, &reloaded)

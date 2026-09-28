@@ -250,19 +250,26 @@ pub async fn run_setup(
     invitation: &SetupInvitation,
     progress: &(dyn Fn(Progress) + Sync),
 ) -> Result<Outcome> {
+    let _total = bootstrap::StageTimer::start("setup_total");
     ensure_setup_available(database, host).await?;
     let blob_dir = host.blob_dir(database)?;
-    let store = key_store(host, database).await?;
+    let store = {
+        let _timer = bootstrap::StageTimer::start("key_store");
+        key_store(host, database).await?
+    };
     let _guard = coordination::acquire(database).await?;
     let bootstrap = bootstrap::Client::new(&invitation.server, link.clone())?;
     // A sealed publication intent means the claim and capture are complete.
     if database.seed_publication_intent_bytes().await?.is_none() {
         progress(Stage::PreparingData.into());
+        let timer = bootstrap::StageTimer::start("prepare_claim");
         let seed = store
             .prepare_seed_claim(database, invitation.setup_id)
             .await
             .map_err(explain_seed_claim_error)?;
         database.clear_local_seed_claim_refused().await?;
+        drop(timer);
+        let timer = bootstrap::StageTimer::start("claim");
         let setup = ClaimAuthentication::SetupSecret(&invitation.secret);
         let claim = match bootstrap.claim(seed.genesis(), setup).await {
             Ok(()) => Ok(()),
@@ -273,6 +280,7 @@ pub async fn run_setup(
                 bootstrap.claim(seed.genesis(), bearer).await
             }
         };
+        drop(timer);
         if let Err(error) = claim {
             // Refusals are unauthenticated and may hide a committed claim, so
             // the seed authority stays for an exact retry and nothing is fenced.
@@ -298,10 +306,17 @@ pub async fn run_setup(
                 "error sync-setup-outcome-unknown hint=\"the server claim couldn't be confirmed; resume continues the same setup\"",
             ));
         }
-        store.prepare_seed_source(database).await?;
-        database
-            .capture_local_shared_state_for_setup(&blob_dir)
-            .await?;
+        {
+            let _timer = bootstrap::StageTimer::start("prepare_source");
+            store.prepare_seed_source(database).await?;
+        }
+        {
+            let _timer = bootstrap::StageTimer::start("capture");
+            database
+                .capture_local_shared_state_for_setup(&blob_dir)
+                .await?;
+        }
+        let _timer = bootstrap::StageTimer::start("package");
         store
             .package_seed_capture(database, &blob_dir, invitation.setup_id)
             .await?;
@@ -321,9 +336,13 @@ pub async fn run_setup(
         .map_err(explain_fenced_setup_refusal)?;
     progress(Stage::FinishingSetup.into());
     // Binds this installation's enrollment identity to the server.
-    enrollment::Client::new(&invitation.server, link.clone())?
-        .refresh(&store, database)
-        .await?;
+    {
+        let _timer = bootstrap::StageTimer::start("enrollment");
+        enrollment::Client::new(&invitation.server, link.clone())?
+            .refresh(&store, database)
+            .await?;
+    }
+    let _timer = bootstrap::StageTimer::start("drain");
     let client = tail::Client::new(&invitation.server, link.clone())?;
     drain(&client, &store, database, host, &blob_dir, ROUND_LIMIT).await
 }

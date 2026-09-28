@@ -470,6 +470,8 @@ fn decrypt_metadata(
     key: &LocalSharedStatePackageKey,
 ) -> Result<(SharedStateCapture, Vec<domain::Mapping>)> {
     validate_metadata(metadata)?;
+    #[cfg(test)]
+    crate::sync::shared_state::counters::keyed_pass();
     let d = Descriptor::decode(metadata.descriptor)?;
     let state = decode_state_catalog(&metadata.catalogs[0])?;
     let state_key = crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 1)

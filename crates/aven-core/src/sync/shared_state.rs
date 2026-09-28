@@ -21,6 +21,34 @@ pub use package::{
 
 const LOCAL_CAPTURE_VERSION: i64 = 1;
 
+/// Per-thread work counters, so parallel tests observe only their own passes.
+#[cfg(test)]
+pub(crate) mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static KEYED_PASSES: Cell<u32> = const { Cell::new(0) };
+        static SNAPSHOT_PARSES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn keyed_pass() {
+        KEYED_PASSES.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn snapshot_parse() {
+        SNAPSHOT_PARSES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Returns and resets (keyed passes, snapshot parses).
+    #[allow(dead_code)]
+    pub(crate) fn take() -> (u32, u32) {
+        (
+            KEYED_PASSES.with(|c| c.replace(0)),
+            SNAPSHOT_PARSES.with(|c| c.replace(0)),
+        )
+    }
+}
+
 /// A consistent, installation-ready copy of shared domain state and retained history.
 ///
 /// This value has no serialized wire representation; the encrypted package
@@ -614,6 +642,8 @@ async fn load_persisted_local_capture(
     )
     .fetch_one(&mut *conn)
     .await?;
+    #[cfg(test)]
+    counters::snapshot_parse();
     let persisted: PersistedLocalCapture =
         serde_json::from_str(&snapshot_json).context("error local-shared-capture-malformed")?;
     ensure!(

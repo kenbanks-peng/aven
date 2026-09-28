@@ -20,6 +20,31 @@ use crate::sync::{
     seed_claim::{ClaimAuthentication, ClaimResult, Genesis, PublicationOutcome, Secret},
 };
 
+/// Logs one setup stage's duration at debug level when dropped.
+pub(crate) struct StageTimer {
+    stage: &'static str,
+    started: std::time::Instant,
+}
+
+impl StageTimer {
+    pub(crate) fn start(stage: &'static str) -> Self {
+        Self {
+            stage,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for StageTimer {
+    fn drop(&mut self) {
+        tracing::debug!(
+            stage = self.stage,
+            elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+            "setup stage finished"
+        );
+    }
+}
+
 pub const PATH: &str = "/e2ee/bootstrap/v1";
 pub const REQUEST_LIMIT: usize = base64_bytes::encoded_len(staging::MAX_REQUEST_BYTES) + 4096;
 pub const RESPONSE_LIMIT: usize = 1_048_576;
@@ -247,6 +272,7 @@ impl Client {
         let record = match status {
             Reply::Published(record) => record,
             Reply::Missing | Reply::Staging(_) => {
+                let _timer = StageTimer::start("upload");
                 let package =
                     package.ok_or_else(|| anyhow::anyhow!("error bootstrap-outcome-missing"))?;
                 let components = components(&package);
@@ -353,6 +379,7 @@ impl Client {
             outcome.publication() == &publication,
             "error bootstrap-outcome-mismatch"
         );
+        let _timer = StageTimer::start("adopt");
         store.adopt_seed_publication(database, &outcome).await
     }
 }
