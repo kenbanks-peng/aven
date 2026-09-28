@@ -289,6 +289,7 @@ h2 { font-size: 43px; font-weight: 500; line-height: 1.14; letter-spacing: -2px;
 
 .testimonial-grid { columns: 3; column-gap: 16px; }
 .testimonial { break-inside: avoid; margin: 0 0 16px; padding: 22px 22px 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.testimonial.featured { background: #1a1625; border-color: #3a2f52; }
 .testimonial blockquote { margin: 0; font-size: 16px; line-height: 1.6; text-indent: -.45em; }
 .testimonial figcaption { margin-top: 16px; font: 13px/1.5 var(--mono); color: var(--muted); }
 .testimonial figcaption a { color: var(--violet); }
