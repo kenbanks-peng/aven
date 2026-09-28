@@ -922,6 +922,7 @@ async fn built_package_check_requires_the_state_to_be_the_encoded_bytes() {
                 mappings,
                 stats: &stats,
             },
+            true,
         )
     };
     let expected = authenticate_capture(&package, &capture, &key, [0x64; 32]).unwrap();

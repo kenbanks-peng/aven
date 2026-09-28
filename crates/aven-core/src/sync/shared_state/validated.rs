@@ -1,20 +1,24 @@
 //! Reusable proof that the frozen package authenticates against the capture.
 //!
-//! One keyed pass establishes the proof. Writers never repeat it; they check
-//! that the stored bytes the proof was made from are still the stored bytes.
+//! One keyed pass establishes the descriptor/capture binding. Writers never
+//! repeat it; they check that the capture, mappings, and descriptor commitment
+//! still match. Each outgoing record is independently checked against the
+//! descriptor-bound catalogs. Adoption instead requires the authenticated
+//! publication outcome for that exact descriptor and consumes no ciphertext.
 //! A protected intent carries a [`FreezeBinding`] to the proof's inputs, so a
-//! later process rebuilds the proof from hashes of the stored bytes alone.
+//! later process rebuilds the proof from their hashes alone.
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Connection, SqliteConnection};
 
-use super::package::{self, EncryptedLocalSharedStatePackage, publication};
+use super::package::{self, LocalSharedStatePackageContext, publication};
 use super::{NeverDispatchedLocalSharedCapture, adoption, load_persisted_local_capture};
 use crate::db::Database;
 use crate::sync::LocalSharedStatePackageKey;
 
 /// Clear package metadata: descriptor and catalogs, in data, prefix, image order.
+#[derive(Clone)]
 pub(crate) struct PackageMetadata {
     pub(crate) descriptor: Vec<u8>,
     pub(crate) catalogs: [Vec<u8>; 3],
@@ -326,13 +330,13 @@ impl ValidatedSeed {
     pub(super) async fn from_pass(
         conn: &mut SqliteConnection,
         capture: NeverDispatchedLocalSharedCapture,
-        package: &EncryptedLocalSharedStatePackage,
+        descriptor: Vec<u8>,
+        catalogs: [Vec<u8>; 3],
         attachments: publication::AttachmentIndex,
     ) -> Result<Self> {
         let identity = FrozenIdentity::establish(conn, &capture).await?;
-        let upload = package.upload();
         ensure!(
-            identity.descriptor_commitment == crate::sync::codec::hash(&upload.descriptor),
+            identity.descriptor_commitment == crate::sync::codec::hash(&descriptor),
             "error seed-capture-changed"
         );
         let binding = FreezeRecord::read(conn, &identity.candidate)
@@ -341,8 +345,8 @@ impl ValidatedSeed {
         Ok(Self {
             capture,
             metadata: PackageMetadata {
-                descriptor: upload.descriptor.clone(),
-                catalogs: upload.catalogs.clone(),
+                descriptor,
+                catalogs,
             },
             identity,
             attachments,
@@ -350,38 +354,70 @@ impl ValidatedSeed {
         })
     }
 
-    /// Reads capture and package in one read transaction, then makes the one
-    /// keyed pass without holding any connection.
+    /// Authenticates one coherent capture/package snapshot without retaining
+    /// more than one image's ciphertext. The proof binds the authenticated
+    /// descriptor to the capture; current record bytes are checked separately
+    /// whenever they leave SQLite.
     pub(crate) async fn load(
         database: &Database,
         key: &LocalSharedStatePackageKey,
         membership: [u8; 32],
     ) -> Result<Self> {
+        Self::load_expected(database, key, membership, None, None).await
+    }
+
+    pub(super) async fn load_expected(
+        database: &Database,
+        key: &LocalSharedStatePackageKey,
+        membership: [u8; 32],
+        expected_capture: Option<NeverDispatchedLocalSharedCapture>,
+        expected_context: Option<LocalSharedStatePackageContext>,
+    ) -> Result<Self> {
         let mut conn = database.acquire_reader().await?;
         let mut tx = conn.begin().await?;
-        let capture = load_persisted_local_capture(&mut tx)
-            .await?
-            .context("error seed-capture-missing")?;
-        let package = package::load_package(&mut tx, capture.candidate_id())
-            .await?
-            .context("error seed-package-missing")?;
+        let capture = match expected_capture {
+            Some(capture) => {
+                let stored = load_persisted_local_capture(&mut tx)
+                    .await?
+                    .context("error seed-capture-missing")?;
+                ensure!(
+                    stored.candidate_id() == capture.candidate_id()
+                        && stored.stream_id() == capture.stream_id()
+                        && stored.snapshot_digest == capture.snapshot_digest,
+                    "error seed-capture-changed"
+                );
+                capture
+            }
+            None => load_persisted_local_capture(&mut tx)
+                .await?
+                .context("error seed-capture-missing")?,
+        };
+        let upload = package::upload::FrozenUpload::open(&mut tx, capture.candidate_id()).await?;
+        if let Some(context) = expected_context {
+            ensure!(
+                upload.context_and_membership()? == (context, membership),
+                "error encrypted-local-shared-package-context-mismatch"
+            );
+        }
+        let attachments = upload
+            .authenticate(&mut tx, &capture, key, membership)
+            .await
+            .context("error encrypted-local-shared-package-frozen-records-invalid")?;
         let identity = FrozenIdentity::establish(&mut tx, &capture).await?;
         let record = FreezeRecord::read(&mut tx, &identity.candidate).await?;
-        tx.commit().await?;
-        drop(conn);
-        let upload = package.into_upload();
         ensure!(
-            identity.descriptor_commitment == crate::sync::codec::hash(&upload.descriptor),
+            identity.descriptor_commitment == crate::sync::codec::hash(upload.descriptor()),
             "error seed-capture-changed"
         );
-        let attachments = publication::authenticate_capture(&upload, &capture, key, membership)?;
         let binding = record.binding(&identity, &attachments)?;
+        let metadata = PackageMetadata {
+            descriptor: upload.descriptor().to_vec(),
+            catalogs: upload.catalogs().clone(),
+        };
+        tx.commit().await?;
         Ok(Self {
             capture,
-            metadata: PackageMetadata {
-                descriptor: upload.descriptor,
-                catalogs: upload.catalogs,
-            },
+            metadata,
             identity,
             attachments,
             binding,
@@ -406,15 +442,10 @@ impl ValidatedSeed {
             .context("error seed-capture-missing")?;
         let identity = FrozenIdentity::establish(&mut tx, &capture).await?;
         let mappings = mapping_rows(&mut tx, &identity.candidate).await?;
-        let (descriptor, data, prefix, images): (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) =
-            sqlx::query_as(
-                "SELECT descriptor, data_catalog, prefix_catalog, image_catalog
-                 FROM local_shared_capture_publication WHERE candidate_id = ?",
-            )
-            .bind(&identity.candidate)
-            .fetch_optional(&mut *tx)
-            .await?
-            .context("error seed-package-missing")?;
+        let upload =
+            package::upload::FrozenUpload::load_metadata(&mut tx, &identity.candidate).await?;
+        let descriptor = upload.descriptor().to_vec();
+        let catalogs = upload.catalogs().clone();
         tx.commit().await?;
         drop(conn);
         ensure!(
@@ -423,7 +454,6 @@ impl ValidatedSeed {
                 && identity.descriptor_commitment == crate::sync::codec::hash(&descriptor),
             "error seed-capture-changed"
         );
-        let catalogs = [data, prefix, images];
         let attachments =
             publication::index_from_objects(&descriptor, &catalogs, &recorded_objects(&mappings)?)?;
         Ok(Self {

@@ -255,12 +255,48 @@ impl domain::Out for StateOut {
     }
 }
 
-/// Constructs tentative bytes only for the durable owner's first freeze.
-/// Failed preparation may be rebuilt; committed bytes must only be loaded.
-pub(super) fn build(
+/// One authenticated selected image without ownership of its ciphertext records.
+pub(super) struct ImageSummary {
+    pub(super) sha256: String,
+    pub(super) object_id: [u8; 32],
+    pub(super) artifact: Artifact,
+}
+
+impl ImageSummary {
+    pub(super) fn authenticated(
+        image: &crypto::EncryptedImage,
+        context: crypto::LocalSharedStatePackageContext,
+        stream: [u8; 32],
+        key: &LocalSharedStatePackageKey,
+    ) -> Result<Self> {
+        let image_key = crypto::derive_image_key(key, context, image.object_id)
+            .map_err(|_| Error::Authentication)?;
+        let reader = crypto::ArtifactReader::new(
+            &image.artifact,
+            context,
+            stream,
+            image.object_id,
+            1,
+            0,
+            &image_key,
+            size(IMAGE_LIMIT)?,
+        )
+        .map_err(|_| Error::Authentication)?;
+        valid(hex::encode(hash_plaintext(reader)?) == image.sha256)?;
+        Ok(Self {
+            sha256: image.sha256.clone(),
+            object_id: image.object_id,
+            artifact: Artifact::from_encrypted(&image.artifact)?,
+        })
+    }
+}
+
+/// Constructs tentative metadata only for the durable owner's first freeze.
+/// Image ciphertext has already been authenticated while each image was resident.
+pub(super) fn build_metadata(
     capture: &NeverDispatchedLocalSharedCapture,
     context: crypto::LocalSharedStatePackageContext,
-    images: Vec<crypto::EncryptedImage>,
+    images: &[ImageSummary],
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
 ) -> Result<(Package, AttachmentIndex)> {
@@ -308,7 +344,7 @@ pub(super) fn build(
                 } else {
                     2
                 },
-                artifact: Artifact::from_encrypted(&image.artifact)?,
+                artifact: image.artifact.clone(),
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -358,20 +394,12 @@ pub(super) fn build(
     )
     .map_err(|_| Error::Authentication)?;
     d.manifest = Artifact::from_encrypted(&manifest)?;
-    let mut image_records = images
-        .into_iter()
-        .map(|i| ImageRecords {
-            object_id: i.object_id,
-            records: i.artifact.into_records(),
-        })
-        .collect::<Vec<_>>();
-    image_records.sort_by_key(|i| i.object_id);
     let package = Package {
         descriptor: d.encode()?,
         catalogs,
         state: state.into_records(),
         manifest: manifest.into_records(),
-        images: image_records,
+        images: Vec::new(),
     };
     let index = check_capture(
         &package,
@@ -383,7 +411,37 @@ pub(super) fn build(
             mappings: &mappings,
             stats: &stats,
         },
+        false,
     )?;
+    Ok((package, index))
+}
+
+/// Full-package adapter used by codec and persistence tests.
+#[cfg(test)]
+pub(super) fn build(
+    capture: &NeverDispatchedLocalSharedCapture,
+    context: crypto::LocalSharedStatePackageContext,
+    images: Vec<crypto::EncryptedImage>,
+    key: &LocalSharedStatePackageKey,
+    membership_predecessor: [u8; 32],
+) -> Result<(Package, AttachmentIndex)> {
+    let stream =
+        crypto::decode_context_id(capture.stream_id(), "stream").map_err(|_| Error::Invalid)?;
+    let summaries = images
+        .iter()
+        .map(|image| ImageSummary::authenticated(image, context, stream, key))
+        .collect::<Result<Vec<_>>>()?;
+    let (mut package, _) =
+        build_metadata(capture, context, &summaries, key, membership_predecessor)?;
+    package.images = images
+        .into_iter()
+        .map(|image| ImageRecords {
+            object_id: image.object_id,
+            records: image.artifact.into_records(),
+        })
+        .collect();
+    package.images.sort_by_key(|image| image.object_id);
+    let index = authenticate_capture(&package, capture, key, membership_predecessor)?;
     Ok((package, index))
 }
 
@@ -409,9 +467,9 @@ pub fn authenticate(
 }
 
 pub(super) fn context_and_membership(
-    package: &Package,
+    descriptor: &[u8],
 ) -> Result<(crypto::LocalSharedStatePackageContext, [u8; 32])> {
-    let d = Descriptor::decode(&package.descriptor)?;
+    let d = Descriptor::decode(descriptor)?;
     Ok((d.context(), d.membership))
 }
 
@@ -629,6 +687,7 @@ pub(crate) fn authenticate_capture(
         key,
         membership_predecessor,
         StateCheck::Capture,
+        true,
     )
 }
 
@@ -778,16 +837,17 @@ fn check_capture(
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
     check: StateCheck<'_>,
+    authenticate_images: bool,
 ) -> Result<AttachmentIndex> {
     #[cfg(test)]
     crate::sync::shared_state::counters::keyed_pass();
-    let (_, d, images) = keyless(package)?;
+    let metadata = download::MetadataView::from(package);
+    let (d, images) = validate_metadata(&metadata)?;
     valid(
         d.membership == membership_predecessor
             && capture.stream_id() == hex::encode(d.stream)
             && capture.candidate_id() == hex::encode(d.bootstrap),
     )?;
-    let metadata = download::MetadataView::from(package);
     let state = decode_state_catalog(&metadata.catalogs[0])?;
     let state = state.encrypted(metadata.state);
     let tables = &capture.capture.snapshot.tables;
@@ -848,28 +908,84 @@ fn check_capture(
                 == Some(mapping.classification.as_str()),
         )?;
     }
-    for (object, records) in images.objects.iter().zip(&package.images) {
-        let mapping = mappings
-            .iter()
-            .find(|m| m.object == Some(object.id))
-            .ok_or(Error::Invalid)?;
-        let image_key = crypto::derive_image_key(key, d.context(), object.id)
-            .map_err(|_| Error::Authentication)?;
-        let artifact = object.artifact.encrypted(&records.records);
-        let reader = crypto::ArtifactReader::new(
-            &artifact,
-            d.context(),
-            d.stream,
-            object.id,
-            1,
-            0,
-            &image_key,
-            size(IMAGE_LIMIT)?,
-        )
-        .map_err(|_| Error::Authentication)?;
-        valid(hex::encode(hash_plaintext(reader)?) == mapping.sha256)?;
+    if authenticate_images {
+        valid(images.objects.len() == package.images.len())?;
+        for (object, records) in images.objects.iter().zip(&package.images) {
+            valid(object.id == records.object_id)?;
+            let mapping = mappings
+                .iter()
+                .find(|m| m.object == Some(object.id))
+                .ok_or(Error::Invalid)?;
+            authenticate_image(
+                d.context(),
+                d.stream,
+                object,
+                &mapping.sha256,
+                &records.records,
+                key,
+            )?;
+        }
     }
     index_from_mappings(&metadata, mappings).map_err(|_| Error::Invalid)
+}
+
+/// Authenticates metadata against the capture. Image records must be checked
+/// separately with [`authenticate_indexed_image`] in the same snapshot.
+pub(super) fn authenticate_metadata_capture(
+    package: &Package,
+    capture: &NeverDispatchedLocalSharedCapture,
+    key: &LocalSharedStatePackageKey,
+    membership_predecessor: [u8; 32],
+) -> Result<AttachmentIndex> {
+    check_capture(
+        package,
+        capture,
+        key,
+        membership_predecessor,
+        StateCheck::Capture,
+        false,
+    )
+}
+
+fn authenticate_image(
+    context: crypto::LocalSharedStatePackageContext,
+    stream: [u8; 32],
+    object: &Image,
+    sha256: &str,
+    records: &[Vec<u8>],
+    key: &LocalSharedStatePackageKey,
+) -> Result<()> {
+    let image_key =
+        crypto::derive_image_key(key, context, object.id).map_err(|_| Error::Authentication)?;
+    let artifact = object.artifact.encrypted(records);
+    let reader = crypto::ArtifactReader::new(
+        &artifact,
+        context,
+        stream,
+        object.id,
+        1,
+        0,
+        &image_key,
+        size(IMAGE_LIMIT)?,
+    )
+    .map_err(|_| Error::Authentication)?;
+    valid(hex::encode(hash_plaintext(reader)?) == sha256)
+}
+
+pub(super) fn authenticate_indexed_image(
+    index: &AttachmentIndex,
+    object_id: [u8; 32],
+    sha256: &str,
+    records: &[Vec<u8>],
+    key: &LocalSharedStatePackageKey,
+) -> Result<()> {
+    let (object, expected) = index
+        .objects
+        .iter()
+        .find(|(object, _)| object.id == object_id)
+        .ok_or(Error::Invalid)?;
+    valid(expected == sha256)?;
+    authenticate_image(index.context, index.stream, object, sha256, records, key)
 }
 
 /// The decoding validator [`authenticate_capture`] replaced, kept so tests can

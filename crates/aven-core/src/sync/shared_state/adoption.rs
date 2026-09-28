@@ -630,14 +630,16 @@ impl Database {
         let proof = proof.context("error seed-intent-changed")??;
         proof.identity().assert_matches(&mut tx).await?;
         intent.check_proof(proof)?;
+        let upload = package::upload::FrozenUpload::open(&mut tx, &intent.data.candidate).await?;
+        ensure!(
+            upload.descriptor() == proof.descriptor()
+                && upload.catalogs() == &proof.metadata().catalogs,
+            "error seed-package-mismatch"
+        );
         tx.commit().await?;
         // Records stay in SQLite; each is verified against these catalogs as
         // it is read for upload.
-        Ok(Some(package::upload::FrozenUpload::new(
-            intent.data.candidate.clone(),
-            proof.descriptor().to_vec(),
-            proof.metadata().catalogs.clone(),
-        )?))
+        Ok(Some(upload))
     }
 
     pub async fn seed_source_pin(&self) -> Result<Option<Vec<u8>>> {
@@ -895,6 +897,9 @@ impl Database {
             validate_history(&mut tx, &intent.data.candidate, source).await? == intent.data.history,
             "error seed-history-commitment-mismatch"
         );
+        // The authenticated outcome proves publication of the intent's exact
+        // descriptor. Adoption checks only its bound capture and history; local
+        // ciphertext records are not adoption inputs.
         let proof = validated.context("error seed-intent-changed")??;
         proof.identity().assert_matches(&mut tx).await?;
         intent.check_proof(proof)?;

@@ -83,15 +83,13 @@ impl ProtectedLocalKeyStore {
         capture: Option<NeverDispatchedLocalSharedCapture>,
     ) -> anyhow::Result<crate::sync::shared_state::validated::ValidatedSeed> {
         let seed = self.prepare_seed_claim(database, setup_id).await?;
-        Ok(self
-            .package_local_capture_validated(
-                database,
-                blob_dir,
-                seed.genesis().commitment(),
-                capture,
-            )
-            .await?
-            .1)
+        self.package_local_capture_validated(
+            database,
+            blob_dir,
+            seed.genesis().commitment(),
+            capture,
+        )
+        .await
     }
 
     /// Removes only the provisional seed authority for an exact, unfenced

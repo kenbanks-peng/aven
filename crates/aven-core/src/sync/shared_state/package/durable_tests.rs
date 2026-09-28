@@ -590,15 +590,16 @@ async fn packaging_the_captured_value_freezes_what_a_resume_accepts() {
     assert_eq!(format!("{captured:?}"), format!("{reloaded:?}"));
     drop(reloaded);
     let key = package_key();
-    let (frozen, _) = database
+    let frozen = database
         .package_and_validate(dir.path(), package_context(), &key, [7; 32], Some(captured))
         .await
         .unwrap();
-    let (resumed, _) = database
+    let resumed = database
         .package_and_validate(dir.path(), package_context(), &key, [7; 32], None)
         .await
         .unwrap();
-    assert_eq!(fingerprint(&frozen), fingerprint(&resumed));
+    assert_eq!(frozen.descriptor(), resumed.descriptor());
+    assert_eq!(frozen.binding(), resumed.binding());
 }
 
 #[tokio::test]

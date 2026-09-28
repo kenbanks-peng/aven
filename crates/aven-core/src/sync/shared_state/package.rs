@@ -1,3 +1,4 @@
+mod freeze;
 pub mod publication;
 pub mod upload;
 
@@ -110,12 +111,9 @@ impl EncryptedLocalSharedStatePackage {
         self.upload.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn upload(&self) -> &publication::Package {
         &self.upload
-    }
-
-    pub(crate) fn into_upload(self) -> publication::Package {
-        self.upload
     }
 
     pub fn candidate_id(&self) -> &str {
@@ -192,14 +190,30 @@ impl Database {
         key: &LocalSharedStatePackageKey,
         membership_predecessor: [u8; 32],
     ) -> Result<EncryptedLocalSharedStatePackage> {
-        Ok(self
+        let proof = self
             .package_and_validate(blob_dir, context, key, membership_predecessor, None)
-            .await?
-            .0)
+            .await
+            .map_err(|error| {
+                if error.to_string() == "error seed-freeze-unsupported" {
+                    anyhow::anyhow!(
+                        "error seed-freeze-unsupported hint=cancel-never-dispatched-capture-and-recapture"
+                    )
+                } else {
+                    error
+                }
+            })?;
+        let frozen = upload::FrozenUpload::new(
+            proof.identity().candidate().to_string(),
+            proof.descriptor().to_vec(),
+            proof.metadata().catalogs.clone(),
+        )?;
+        Ok(EncryptedLocalSharedStatePackage {
+            candidate_id: proof.identity().candidate().to_string(),
+            upload: frozen.package(self).await?,
+        })
     }
 
-    /// [`Self::package_local_shared_state_never_dispatched`], also returning
-    /// the proof made by its single keyed pass.
+    /// Freezes the package and returns the proof made by its single keyed pass.
     ///
     /// `capture`, when given, is the value capture returned and stands in for
     /// reading the stored snapshot again. It is bound to the stored document
@@ -211,122 +225,17 @@ impl Database {
         context: LocalSharedStatePackageContext,
         key: &LocalSharedStatePackageKey,
         membership_predecessor: [u8; 32],
-        mut capture: Option<NeverDispatchedLocalSharedCapture>,
-    ) -> Result<(EncryptedLocalSharedStatePackage, ValidatedSeed)> {
-        let (capture, selected) = loop {
-            let capture = match capture.take() {
-                Some(capture) => capture,
-                None => self
-                    .resume_local_shared_state_never_dispatched()
-                    .await?
-                    .context("error local-shared-capture-missing")?,
-            };
-            let candidate_id = capture.candidate_id().to_string();
-            let mut conn = self.acquire_writer().await?;
-            let mut tx = db::begin_immediate(&mut conn).await?;
-            super::adoption::ensure_no_intent(&mut tx).await?;
-            let selected_inventory: Vec<(String, String)> = sqlx::query_as(
-                "SELECT sha256, classification FROM local_shared_capture_images
-                 WHERE candidate_id = ? AND classification != 'unavailable'
-                 ORDER BY sha256",
-            )
-            .bind(&candidate_id)
-            .fetch_all(&mut *tx)
-            .await?;
-            if let Some(package) = load_package(&mut tx, &candidate_id).await? {
-                return self
-                    .validate_frozen(tx, package, capture, context, key, membership_predecessor)
-                    .await;
-            }
-            tx.commit().await?;
-            drop(conn);
-
-            let (selected, missing) = load_selected_image_plaintexts(
-                blob_dir,
-                &selected_inventory,
-                &capture.shared_state().snapshot,
-            )
-            .await?;
-            if missing.is_empty() {
-                break (capture, selected);
-            }
-            mark_capture_images_unavailable(self, &candidate_id, &missing).await?;
-        };
-        let candidate_id = capture.candidate_id().to_string();
-        let (package, attachments) =
-            encrypt_package(&capture, context, &selected, key, membership_predecessor)?;
-        drop(selected);
-
-        let mut conn = self.acquire_writer().await?;
-        let mut tx = db::begin_immediate(&mut conn).await?;
-        super::adoption::ensure_no_intent(&mut tx).await?;
-        let active: Option<String> = sqlx::query_scalar(
-            "SELECT candidate_id FROM local_shared_capture_journal WHERE singleton = 1",
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
-        ensure!(
-            active.as_ref() == Some(&candidate_id),
-            "error local-shared-capture-changed-during-packaging"
-        );
-        super::validate_persisted_local_capture(
-            &mut tx,
-            &candidate_id,
-            &capture.images,
-            &capture.capture.snapshot,
-        )
-        .await?;
-        if let Some(existing) = load_package(&mut tx, &candidate_id).await? {
-            return self
-                .validate_frozen(tx, existing, capture, context, key, membership_predecessor)
-                .await;
-        }
-        persist_package(&mut tx, &package, &capture, &attachments).await?;
-        ensure!(
-            stored_package_matches(&mut tx, &package).await?,
-            "error encrypted-local-shared-package-write-mismatch"
-        );
-        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments).await?;
-        tx.commit().await?;
-        Ok((package, proof))
-    }
-
-    /// Checks a frozen package against the caller's expected context and the
-    /// independent capture before it is returned. The identity is read under
-    /// `tx`; the keyed pass runs after it commits.
-    async fn validate_frozen(
-        &self,
-        mut tx: crate::db::WriterTransaction<'_>,
-        package: EncryptedLocalSharedStatePackage,
-        capture: NeverDispatchedLocalSharedCapture,
-        context: LocalSharedStatePackageContext,
-        key: &LocalSharedStatePackageKey,
-        membership_predecessor: [u8; 32],
-    ) -> Result<(EncryptedLocalSharedStatePackage, ValidatedSeed)> {
-        ensure!(
-            publication::context_and_membership(&package.upload)?
-                == (context, membership_predecessor),
-            "error encrypted-local-shared-package-context-mismatch"
-        );
-        let attachments = publication::authenticate_capture(
-            &package.upload,
-            &capture,
+        capture: Option<NeverDispatchedLocalSharedCapture>,
+    ) -> Result<ValidatedSeed> {
+        freeze::freeze_and_validate(
+            self,
+            blob_dir,
+            context,
             key,
             membership_predecessor,
-        )?;
-        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments)
-            .await
-            .map_err(|error| {
-                if error.to_string() == "error seed-freeze-unsupported" {
-                    anyhow::anyhow!(
-                        "error seed-freeze-unsupported hint=cancel-never-dispatched-capture-and-recapture"
-                    )
-                } else {
-                    error
-                }
-            })?;
-        tx.commit().await?;
-        Ok((package, proof))
+            capture,
+        )
+        .await
     }
 
     /// Authenticates, decrypts, validates, and atomically installs a package.
@@ -343,6 +252,7 @@ impl Database {
     }
 }
 
+#[cfg(test)]
 fn encrypt_package(
     capture: &NeverDispatchedLocalSharedCapture,
     context: LocalSharedStatePackageContext,
@@ -998,7 +908,7 @@ async fn mark_capture_images_unavailable(
     let mut tx = db::begin_immediate(&mut conn).await?;
     super::adoption::ensure_no_intent(&mut tx).await?;
     ensure!(
-        load_package(&mut tx, candidate_id).await?.is_none(),
+        !freeze::frozen_exists(&mut tx, candidate_id).await?,
         "error encrypted-local-shared-package-frozen"
     );
     let snapshot: Vec<u8> = sqlx::query_scalar(
@@ -1055,6 +965,7 @@ fn decode_context_id(value: &str, name: &str) -> Result<[u8; 32]> {
 
 /// Freezes `package`: its bytes, the object ID of each selected image, and
 /// the commitments to the capture it was built from, all under `conn`.
+#[cfg(test)]
 async fn persist_package(
     conn: &mut sqlx::SqliteConnection,
     package: &EncryptedLocalSharedStatePackage,
@@ -1117,11 +1028,13 @@ async fn persist_package(
 }
 
 /// Descriptor and the data, prefix and image catalogs.
+#[cfg(test)]
 type PublicationRow = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
 /// Whether the stored rows are exactly `package` under its freeze commitment,
 /// so [`load_package`] would return it. Records are read one at a time rather
 /// than as a second copy of the package.
+#[cfg(test)]
 async fn stored_package_matches(
     conn: &mut sqlx::SqliteConnection,
     package: &EncryptedLocalSharedStatePackage,
@@ -1192,6 +1105,7 @@ async fn stored_package_matches(
 
 /// Loads the frozen package and verifies every record against the committed
 /// descriptor and catalogs. Missing or corrupt bytes fail without replacement.
+#[cfg(test)]
 pub(super) async fn load_package(
     conn: &mut sqlx::SqliteConnection,
     candidate_id: &str,

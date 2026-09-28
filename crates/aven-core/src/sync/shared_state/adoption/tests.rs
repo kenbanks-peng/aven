@@ -730,6 +730,36 @@ async fn bound_intent_upload_refuses_a_tampered_record() {
 }
 
 #[tokio::test]
+async fn published_descriptor_adopts_without_reading_corrupt_local_ciphertext() {
+    let fixture = image_fixture().await;
+    let intent = bound_intent(&fixture).await;
+    let (_, database, source, seed, key, _) = &fixture;
+    database
+        .seal_seed_publication_intent(source, &intent)
+        .await
+        .unwrap();
+    let publication = intent.publication(seed.genesis()).unwrap();
+    let outcome = PublicationOutcome::from_response(
+        seed.genesis(),
+        intent.descriptor(),
+        publication.record(),
+    )
+    .unwrap();
+    sql(
+        database,
+        "UPDATE local_shared_capture_package_records SET record = zeroblob(length(record))
+         WHERE component = 'image'",
+    )
+    .await;
+    assert!(
+        database
+            .adopt_seed_publication(source, &intent, seed, key, &outcome, &mut trusting(&intent),)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn unsupported_receipt_version_fails_without_touching_frozen_bytes() {
     let fixture = image_fixture().await;
     let intent = bound_intent(&fixture).await;

@@ -301,7 +301,7 @@ pub async fn run_setup(
                 .capture_local_shared_state_for_setup(&blob_dir)
                 .await?;
             store
-                .package_seed_capture(database, &blob_dir, invitation.setup_id)
+                .package_seed_capture_validated(database, &blob_dir, invitation.setup_id, None)
                 .await?;
             return Err(error.context(
                 "error sync-setup-outcome-unknown hint=\"the server claim couldn't be confirmed; resume continues the same setup\"",
