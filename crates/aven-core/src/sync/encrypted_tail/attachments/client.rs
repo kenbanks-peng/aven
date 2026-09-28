@@ -625,7 +625,7 @@ impl Database {
         let mut conn = self.acquire_reader().await?;
         super::super::client::validate_binding_and_cursor(&mut conn, a).await?;
         let record: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
+            sqlx::query_scalar("SELECT record FROM local_e2ee_outbox ORDER BY position LIMIT 1")
                 .fetch_optional(&mut *conn)
                 .await?;
         record

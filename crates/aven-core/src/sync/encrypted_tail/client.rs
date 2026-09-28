@@ -242,6 +242,29 @@ async fn apply_new_remote_change(
     Ok(())
 }
 
+async fn accept_local_change(
+    conn: &mut SqliteConnection,
+    authority: &Authority,
+    accepted: &Accepted,
+    change: &ChangeWire,
+) -> Result<()> {
+    persistence::update_change_server_seq(
+        &mut *conn,
+        &change.change_id,
+        Some(accepted.mapping.sequence),
+    )
+    .await?;
+    persistence::reconcile_epic_change(&mut *conn, change).await?;
+    super::notes::reconcile(&mut *conn, authority.prefix, change).await?;
+    super::labels::reconcile(&mut *conn, authority.prefix, change).await?;
+    if let Some(workspace) = super::dependencies::affected_workspace(change)? {
+        super::dependencies::reconcile(&mut *conn, authority.prefix, workspace).await?;
+    }
+    super::attachments::client::accept(&mut *conn, accepted, change).await?;
+    record_acceptance_and_clear_outbox(&mut *conn, accepted).await?;
+    Ok(())
+}
+
 impl Database {
     /// Validates attachment coverage before a drain can push or apply records.
     /// Transaction-local checks continue to validate the active association.
@@ -294,7 +317,7 @@ impl Database {
         blob_dir: &std::path::Path,
     ) -> Result<Option<Push>> {
         Ok(self
-            .prepare_encrypted_push_inner(authority, blob_dir, None)
+            .prepare_encrypted_push_inner(authority, blob_dir, None, 1)
             .await?
             .0)
     }
@@ -307,7 +330,17 @@ impl Database {
         blob_dir: &std::path::Path,
         preflight_local_seq: Option<i64>,
     ) -> Result<(Option<Push>, Option<i64>)> {
-        self.prepare_encrypted_push_inner(authority, blob_dir, preflight_local_seq)
+        self.prepare_encrypted_push_inner(authority, blob_dir, preflight_local_seq, 1)
+            .await
+    }
+    pub async fn prepare_encrypted_batch_in_run(
+        &self,
+        authority: &Authority,
+        blob_dir: &std::path::Path,
+        preflight_local_seq: Option<i64>,
+        count: usize,
+    ) -> Result<(Option<Push>, Option<i64>)> {
+        self.prepare_encrypted_push_inner(authority, blob_dir, preflight_local_seq, count)
             .await
     }
     async fn prepare_encrypted_push_inner(
@@ -315,7 +348,9 @@ impl Database {
         authority: &Authority,
         blob_dir: &std::path::Path,
         preflight_local_seq: Option<i64>,
+        count: usize,
     ) -> Result<(Option<Push>, Option<i64>)> {
+        valid((1..=BATCH_COUNT).contains(&count))?;
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         validate_binding_and_cursor(&mut tx, authority).await?;
@@ -325,7 +360,7 @@ impl Database {
         }
         let frozen: Option<(String, i64, Vec<u8>, bool)> = sqlx::query_as(
             "SELECT association, sync_generation, record, blocked
-             FROM local_e2ee_outbox WHERE singleton = 1",
+             FROM local_e2ee_outbox ORDER BY position LIMIT 1",
         )
         .fetch_optional(&mut *tx)
         .await?;
@@ -397,7 +432,7 @@ impl Database {
         require_canonical_equality(&change, &codec::open(authority, &record)?)?;
         sqlx::query(
             "INSERT INTO local_e2ee_outbox(
-                 singleton, operation_id, association, sync_generation, record
+                 position, operation_id, association, sync_generation, record
              ) VALUES (1, ?, ?, ?, ?)",
         )
         .bind(&change.change_id)
@@ -406,7 +441,41 @@ impl Database {
         .bind(&record)
         .execute(&mut *tx)
         .await?;
+        let mut frozen_count = 1;
+        if upload.is_none() && count > 1 {
+            let ids: Vec<String> = sqlx::query_scalar(
+                "SELECT change_id FROM changes WHERE server_seq IS NULL AND change_id != ?
+                 ORDER BY local_seq, created_at, change_id LIMIT ?",
+            )
+            .bind(&change.change_id)
+            .bind((count - 1) as i64)
+            .fetch_all(&mut *tx)
+            .await?;
+            let mut bytes = record.len();
+            for (index, id) in ids.iter().enumerate() {
+                let next = load_change(&mut tx, id)
+                    .await?
+                    .context("error encrypted-tail-history-lost")?;
+                if next.op_type == "attachment_add" {
+                    break;
+                }
+                let projection = domain::validate(&next)?;
+                let next_record = codec::seal_projection(authority, &next, &projection)?;
+                if bytes + next_record.len() > BATCH_BYTES {
+                    break;
+                }
+                require_canonical_equality(&next, &codec::open(authority, &next_record)?)?;
+                bytes += next_record.len();
+                sqlx::query("INSERT INTO local_e2ee_outbox(position, operation_id, association, sync_generation, record) VALUES (?, ?, ?, ?, ?)")
+                    .bind((index + 2) as i64).bind(id).bind(&authority.association)
+                    .bind(authority.sync_generation).bind(next_record).execute(&mut *tx).await?;
+                frozen_count += 1;
+            }
+        }
         tx.commit().await?;
+        if frozen_count > 1 {
+            crate::sync::crash::Crash::Tail.at("batch-frozen");
+        }
         crate::sync::crash::Crash::Tail.at(if upload.is_some() {
             "image-frozen"
         } else {
@@ -422,53 +491,70 @@ impl Database {
         absence: &AbsentOperation,
         blob_dir: &std::path::Path,
     ) -> Result<bool> {
-        valid(absence.context == authority.context)?;
+        self.reconcile_encrypted_tail_absences(authority, std::slice::from_ref(absence), blob_dir)
+            .await
+    }
+    pub async fn reconcile_encrypted_tail_absences(
+        &self,
+        authority: &Authority,
+        absences: &[AbsentOperation],
+        blob_dir: &std::path::Path,
+    ) -> Result<bool> {
+        valid(absences.len() <= BATCH_COUNT)?;
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         validate_binding_and_cursor(&mut tx, authority).await?;
-        let (record, association, generation, observed, blocked): (Vec<u8>, String, i64, bool, bool) = sqlx::query_as("SELECT record,association,sync_generation,observed_sequence IS NOT NULL OR observed_commitment IS NOT NULL,blocked FROM local_e2ee_outbox WHERE singleton=1").fetch_one(&mut *tx).await?;
-        valid(
-            record == absence.record
-                && association == authority.association
-                && generation == authority.sync_generation
-                && !observed
-                && !blocked,
-        )?;
-        let change = codec::open(authority, &record)?;
-        let local = load_change(&mut tx, &change.change_id)
-            .await?
-            .context("error encrypted-tail-history-lost")?;
-        require_canonical_equality(&local, &change)?;
-        let accepted: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM local_e2ee_accepted WHERE operation_id=?)",
-        )
-        .bind(&change.change_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        valid(local.server_seq.is_none() && !accepted)?;
-        if authority.rotation_pending() {
-            tx.commit().await?;
-            return Ok(false);
-        }
-        if !authority.record_is_closed(&record)? {
-            tx.commit().await?;
-            return Ok(true);
-        }
-        let mut projection = codec::parse(&record)?.projection;
-        if change.op_type == "attachment_add" {
-            projection = super::attachments::client::supersede(
-                &mut tx, authority, &change, projection, blob_dir,
+        let mut changed = false;
+        for absence in absences {
+            valid(absence.context == authority.context)?;
+            let (record, association, generation, observed, blocked): (Vec<u8>, String, i64, bool, bool) = sqlx::query_as("SELECT record,association,sync_generation,observed_sequence IS NOT NULL OR observed_commitment IS NOT NULL,blocked FROM local_e2ee_outbox WHERE record=?").bind(&absence.record).fetch_one(&mut *tx).await?;
+            valid(
+                record == absence.record
+                    && association == authority.association
+                    && generation == authority.sync_generation
+                    && !observed
+                    && !blocked,
+            )?;
+            let change = codec::open(authority, &record)?;
+            let local = load_change(&mut tx, &change.change_id)
+                .await?
+                .context("error encrypted-tail-history-lost")?;
+            require_canonical_equality(&local, &change)?;
+            let accepted: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM local_e2ee_accepted WHERE operation_id=?)",
             )
+            .bind(&change.change_id)
+            .fetch_one(&mut *tx)
             .await?;
-        }
-        let replacement = codec::seal_projection(authority, &change, &projection)?;
-        require_canonical_equality(&change, &codec::open(authority, &replacement)?)?;
-        let n = sqlx::query("UPDATE local_e2ee_outbox SET record=? WHERE singleton=1 AND record=? AND observed_sequence IS NULL AND observed_commitment IS NULL AND blocked=0")
+            valid(local.server_seq.is_none() && !accepted)?;
+            if authority.rotation_pending() {
+                tx.commit().await?;
+                return Ok(false);
+            }
+            if !authority.record_is_closed(&record)? {
+                continue;
+            }
+            let mut projection = codec::parse(&record)?.projection;
+            if change.op_type == "attachment_add" {
+                projection = super::attachments::client::supersede(
+                    &mut tx, authority, &change, projection, blob_dir,
+                )
+                .await?;
+            }
+            let replacement = codec::seal_projection(authority, &change, &projection)?;
+            require_canonical_equality(&change, &codec::open(authority, &replacement)?)?;
+            let n = sqlx::query("UPDATE local_e2ee_outbox SET record=? WHERE record=? AND observed_sequence IS NULL AND observed_commitment IS NULL AND blocked=0")
             .bind(&replacement).bind(&record).execute(&mut *tx).await?.rows_affected();
-        valid(n == 1)?;
-        crate::sync::crash::Crash::Tail.at("before-supersede-commit");
+            valid(n == 1)?;
+            changed = true;
+        }
+        if changed {
+            crate::sync::crash::Crash::Tail.at("before-supersede-commit");
+        }
         tx.commit().await?;
-        crate::sync::crash::Crash::Tail.at("after-supersede-commit");
+        if changed {
+            crate::sync::crash::Crash::Tail.at("after-supersede-commit");
+        }
         Ok(true)
     }
     /// Retain an observed immutable outcome before fetching a different representation.
@@ -489,8 +575,9 @@ impl Database {
             Option<Vec<u8>>,
         ) = sqlx::query_as(
             "SELECT operation_id, record, observed_sequence, observed_commitment
-             FROM local_e2ee_outbox WHERE singleton = 1",
+             FROM local_e2ee_outbox WHERE operation_id = ?",
         )
+        .bind(&mapping.operation_id)
         .fetch_one(&mut *tx)
         .await?;
         valid(
@@ -510,10 +597,11 @@ impl Database {
         }
         sqlx::query(
             "UPDATE local_e2ee_outbox SET observed_sequence = ?, observed_commitment = ?
-             WHERE singleton = 1",
+             WHERE operation_id = ?",
         )
         .bind(mapping.sequence)
         .bind(mapping.commitment.as_slice())
+        .bind(&mapping.operation_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -559,23 +647,94 @@ impl Database {
             .await?
             .context("error encrypted-tail-local-missing")?;
         require_canonical_equality(&local, &change)?;
-        persistence::update_change_server_seq(
-            &mut tx,
-            &change.change_id,
-            Some(accepted.mapping.sequence),
-        )
-        .await?;
-        persistence::reconcile_epic_change(&mut tx, &change).await?;
-        super::notes::reconcile(&mut tx, authority.prefix, &change).await?;
-        super::labels::reconcile(&mut tx, authority.prefix, &change).await?;
-        if let Some(workspace) = super::dependencies::affected_workspace(&change)? {
-            super::dependencies::reconcile(&mut tx, authority.prefix, workspace).await?;
-        }
-        super::attachments::client::accept(&mut tx, accepted, &change).await?;
-        record_acceptance_and_clear_outbox(&mut tx, accepted).await?;
+        accept_local_change(&mut tx, authority, accepted, &change).await?;
         tx.commit().await?;
         Ok(())
     }
+    pub async fn encrypted_tail_has_batch_work(&self, authority: &Authority) -> Result<bool> {
+        let mut conn = self.acquire_reader().await?;
+        validate_binding_and_cursor(&mut conn, authority).await?;
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_e2ee_outbox")
+            .fetch_one(&mut *conn)
+            .await?;
+        if count > 1 {
+            return Ok(true);
+        }
+        if count == 1 {
+            return Ok(false);
+        }
+        let ops: Vec<String> = sqlx::query_scalar("SELECT op_type FROM changes WHERE server_seq IS NULL ORDER BY local_seq,created_at,change_id LIMIT 2").fetch_all(&mut *conn).await?;
+        Ok(ops.len() == 2 && ops.iter().all(|op| op != "attachment_add"))
+    }
+    /// Returns the immutable unresolved inventory in dispatch order.
+    pub async fn encrypted_tail_frozen_records(
+        &self,
+        authority: &Authority,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut conn = self.acquire_reader().await?;
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        validate_binding_and_cursor(&mut tx, authority).await?;
+        let rows: Vec<(String, Vec<u8>, String, i64, bool)> = sqlx::query_as(
+            "SELECT operation_id,record,association,sync_generation,blocked FROM local_e2ee_outbox ORDER BY position LIMIT 129"
+        ).fetch_all(&mut *tx).await?;
+        valid(rows.len() <= BATCH_COUNT)?;
+        let mut result = Vec::with_capacity(rows.len());
+        for (id, record, association, generation, blocked) in rows {
+            valid(association == authority.association && generation == authority.sync_generation)?;
+            ensure!(!blocked, "error encrypted-tail-integrity-blocked");
+            let change = codec::open(authority, &record)?;
+            valid(change.change_id == id)?;
+            result.push((id, record));
+        }
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// Accepts exact frozen ciphertext together with every local domain effect.
+    pub async fn accept_encrypted_tail_batch(
+        &self,
+        authority: &Authority,
+        mappings: &[Mapping],
+    ) -> Result<()> {
+        valid(!mappings.is_empty() && mappings.len() <= BATCH_COUNT)?;
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = begin_immediate(&mut conn).await?;
+        let cursor = validate_binding_and_cursor(&mut tx, authority).await?;
+        let mut accepted_records = Vec::new();
+        let mut ids = HashSet::new();
+        let mut sequences = HashSet::new();
+        for mapping in mappings {
+            valid(ids.insert(&mapping.operation_id) && sequences.insert(mapping.sequence))?;
+            validate_mapping(&mut tx, mapping, cursor).await?;
+            let (record, sequence, commitment): (Vec<u8>, Option<i64>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT record,observed_sequence,observed_commitment FROM local_e2ee_outbox WHERE operation_id=?"
+            ).bind(&mapping.operation_id).fetch_one(&mut *tx).await?;
+            valid(
+                sequence.is_none_or(|n| n == mapping.sequence)
+                    && commitment
+                        .as_deref()
+                        .is_none_or(|h| h == mapping.commitment),
+            )?;
+            let accepted = Accepted {
+                mapping: mapping.clone(),
+                record,
+            };
+            let change = open_accepted_change(authority, &accepted)?;
+            let local = load_change(&mut tx, &change.change_id)
+                .await?
+                .context("error encrypted-tail-local-missing")?;
+            require_canonical_equality(&local, &change)?;
+            accepted_records.push((accepted, change));
+        }
+        for (accepted, change) in &accepted_records {
+            accept_local_change(&mut tx, authority, accepted, change).await?;
+        }
+        crate::sync::crash::Crash::Tail.at("before-batch-commit");
+        tx.commit().await?;
+        crate::sync::crash::Crash::Tail.at("after-batch-commit");
+        Ok(())
+    }
+
     pub async fn apply_encrypted_tail_page(
         &self,
         authority: &Authority,

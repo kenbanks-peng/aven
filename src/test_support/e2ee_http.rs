@@ -32,7 +32,7 @@ pub(crate) fn soon() -> u64 {
 
 /// The encrypted outbox record frozen for retry.
 pub(crate) async fn frozen(db: &Database) -> Vec<u8> {
-    sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
+    sqlx::query_scalar("SELECT record FROM local_e2ee_outbox ORDER BY position LIMIT 1")
         .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
         .await
         .unwrap()

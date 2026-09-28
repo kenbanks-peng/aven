@@ -33,6 +33,10 @@ async fn serve_with(
 ) -> (String, tokio::task::JoinHandle<()>) {
     let tail = Router::new()
         .route(PATH, post(handle))
+        .route(
+            aven_core::sync::client::tail::BATCH_PATH,
+            post(super::batch::handle),
+        )
         .route(images::PATH, post(images::handle))
         .with_state(Arc::new(Server {
             db: server.clone(),
@@ -1701,8 +1705,11 @@ async fn client_retries_busy_but_not_dispatch_timeout() {
                 if state.fetch_add(1, Ordering::SeqCst) == 0 {
                     (
                         StatusCode::SERVICE_UNAVAILABLE,
-                        [(header::RETRY_AFTER, "0")],
-                        "",
+                        [
+                            (header::RETRY_AFTER, "0"),
+                            (header::CONTENT_TYPE, "application/json"),
+                        ],
+                        r#"{"error":"encrypted-tail-busy"}"#,
                     )
                         .into_response()
                 } else {
@@ -2960,3 +2967,5 @@ mod bench;
 mod faults;
 mod journey;
 mod membership;
+
+mod batch;

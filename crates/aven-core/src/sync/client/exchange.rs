@@ -421,7 +421,16 @@ pub(crate) async fn post(
             }
             return Ok(response.body);
         }
+        let expected_busy = match endpoint.path() {
+            "/e2ee/tail/v1" | "/e2ee/tail/batch/v1" => Some("encrypted-tail-busy"),
+            "/e2ee/images/v1" => Some("encrypted-image-busy"),
+            "/e2ee/enrollment/v1" => Some("enrollment-busy"),
+            "/e2ee/bootstrap/v1" => Some("bootstrap-busy"),
+            _ => None,
+        };
         if response.status == 503
+            && expected_busy.is_some()
+            && refusal_code(&response).as_deref() == expected_busy
             && attempt < BUSY_RETRIES
             && let Some(retry_after) = response.retry_after()
         {

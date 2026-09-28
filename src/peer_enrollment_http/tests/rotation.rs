@@ -187,7 +187,7 @@ async fn three_installations_offline_two_rotations_and_fresh_historical_bootstra
     assert_keys(&m, &third_keys, &keys);
     assert_eq!(third.db.meta("sync_cursor").await.unwrap(), cursor);
     let retained: Vec<u8> =
-        sqlx::query_scalar("SELECT record FROM local_e2ee_outbox WHERE singleton=1")
+        sqlx::query_scalar("SELECT record FROM local_e2ee_outbox ORDER BY position LIMIT 1")
             .fetch_one(&mut *aven_core::test_support::acquire(&third.db).await.unwrap())
             .await
             .unwrap();

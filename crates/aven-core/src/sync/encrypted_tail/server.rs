@@ -25,6 +25,23 @@ async fn found(conn: &mut SqliteConnection, id: &str) -> Result<Option<Accepted>
     })
     .transpose()
 }
+async fn mapping(conn: &mut SqliteConnection, id: &str) -> Result<Option<Mapping>> {
+    let row: Option<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT sequence,commitment FROM server_e2ee_tail WHERE operation_id=?")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?;
+    row.map(|(sequence, commitment)| {
+        Ok(Mapping {
+            operation_id: id.into(),
+            sequence,
+            commitment: commitment
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("error encrypted-tail-storage"))?,
+        })
+    })
+    .transpose()
+}
 fn serialized_len(value: &impl Serialize) -> Result<usize> {
     struct Count(usize);
     impl std::io::Write for Count {
@@ -76,6 +93,10 @@ impl Database {
             .await?,
         )?;
         let reply = match op {
+            Operation::Features => Reply::Features(BatchFeatures {
+                count: BATCH_COUNT,
+                bytes: BATCH_BYTES,
+            }),
             Operation::Append { record, ticket } => {
                 let e = codec::parse(&record)?;
                 valid(e.vault == context.vault && e.stream == context.stream)?;
@@ -183,6 +204,133 @@ impl Database {
                     has_more,
                     records,
                 })
+            }
+        };
+        tx.commit().await?;
+        Ok(reply)
+    }
+
+    pub async fn encrypted_tail_batch_exchange(
+        &self,
+        context: &Context,
+        bearer: &super::super::seed_claim::Secret,
+        op: BatchOperation,
+    ) -> Result<BatchReply> {
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = begin_immediate(&mut conn).await?;
+        let current =
+            crate::sync::seed_claim::membership::persistence::current(self, &mut tx).await?;
+        current
+            .membership
+            .authenticate(&context.authentication(bearer), false)?;
+        let binding = current.membership.publication().binding();
+        valid(
+            context.stream == binding.stream_id
+                && context.descriptor == binding.descriptor_commitment,
+        )?;
+        let reply = match op {
+            BatchOperation::Append { records } => {
+                valid((1..=BATCH_COUNT).contains(&records.len()))?;
+                valid(
+                    records
+                        .iter()
+                        .try_fold(0usize, |total, record| total.checked_add(record.0.len()))
+                        .is_some_and(|total| total <= BATCH_BYTES),
+                )?;
+                let mut ids = std::collections::HashSet::new();
+                let mut parsed = Vec::with_capacity(records.len());
+                for record in &records {
+                    let envelope = codec::parse(&record.0)?;
+                    valid(
+                        envelope.vault == context.vault
+                            && envelope.stream == context.stream
+                            && !matches!(envelope.projection, domain::Projection::Ref { .. })
+                            && ids.insert(envelope.id.clone()),
+                    )?;
+                    ensure!(
+                        !prefix(&mut tx, &envelope.id).await?,
+                        super::PrefixIdentityCollision
+                    );
+                    ensure!(
+                        mapping(&mut tx, &envelope.id).await?.is_none(),
+                        "error encrypted-tail-batch-known"
+                    );
+                    parsed.push(envelope);
+                }
+                ensure!(
+                    !current.membership.rotation_pending(),
+                    "error membership-rotation-pending"
+                );
+                let generation = current.membership.current_generation().id;
+                valid(
+                    parsed
+                        .iter()
+                        .all(|envelope| envelope.generation == generation),
+                )?;
+                let high = i64::try_from(
+                    crate::sync::seed_claim::membership::persistence::allocator(
+                        &mut tx,
+                        &current.membership,
+                    )
+                    .await?,
+                )?;
+                let end = high
+                    .checked_add(i64::try_from(records.len())?)
+                    .context("error encrypted-tail-sequence-exhausted")?;
+                let mut mappings = Vec::with_capacity(records.len());
+                for (offset, (record, envelope)) in records.iter().zip(&parsed).enumerate() {
+                    let sequence = high
+                        .checked_add(i64::try_from(offset)? + 1)
+                        .context("error encrypted-tail-sequence-exhausted")?;
+                    let mapping = Mapping {
+                        operation_id: envelope.id.clone(),
+                        sequence,
+                        commitment: hash(&record.0),
+                    };
+                    sqlx::query("INSERT INTO server_e2ee_tail(operation_id,sequence,commitment,record) VALUES(?,?,?,?)")
+                        .bind(&envelope.id)
+                        .bind(sequence)
+                        .bind(mapping.commitment.as_slice())
+                        .bind(&record.0)
+                        .execute(&mut *tx)
+                        .await?;
+                    super::attachments::server::admit(
+                        &mut tx,
+                        context,
+                        &current.membership,
+                        &envelope.id,
+                        &envelope.projection,
+                        None,
+                    )
+                    .await?;
+                    apply_parent(&mut tx, &envelope.id, &envelope.projection).await?;
+                    mappings.push(mapping.into());
+                }
+                sqlx::query("UPDATE server_e2ee_allocator SET high_water=? WHERE singleton=1")
+                    .bind(end)
+                    .execute(&mut *tx)
+                    .await?;
+                BatchReply::Appended(mappings)
+            }
+            BatchOperation::Resolve { operation_ids } => {
+                valid((1..=BATCH_COUNT).contains(&operation_ids.len()))?;
+                let mut ids = std::collections::HashSet::new();
+                let mut resolutions = Vec::with_capacity(operation_ids.len());
+                for operation_id in operation_ids {
+                    valid(
+                        !operation_id.is_empty()
+                            && operation_id.len() <= 256
+                            && ids.insert(operation_id.clone()),
+                    )?;
+                    resolutions.push(if prefix(&mut tx, &operation_id).await? {
+                        Resolution::Bootstrap { operation_id }
+                    } else if let Some(mapping) = mapping(&mut tx, &operation_id).await? {
+                        Resolution::Found(mapping.into())
+                    } else {
+                        Resolution::Absent { operation_id }
+                    });
+                }
+                BatchReply::Resolved(resolutions)
             }
         };
         tx.commit().await?;

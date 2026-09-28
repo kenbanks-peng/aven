@@ -66,6 +66,7 @@ pub struct Round {
 pub struct DrainSnapshot {
     tail: TailSnapshot,
     pull: PullFreshness,
+    batch_count: usize,
     /// Why this drain's withdrawal rotation failed, if it did.
     withdrawal: Option<anyhow::Error>,
 }
@@ -98,6 +99,7 @@ async fn validated_tail_inputs(
 
 struct RoundProgress {
     pushes: usize,
+    batch_collisions: usize,
     preflight_local_seq: Option<i64>,
     push_complete: bool,
     publishing_blocked: bool,
@@ -114,6 +116,7 @@ impl Default for RoundProgress {
     fn default() -> Self {
         Self {
             pushes: 0,
+            batch_collisions: 0,
             preflight_local_seq: None,
             push_complete: false,
             publishing_blocked: false,
@@ -181,9 +184,10 @@ impl Client {
             tail: validated_tail_inputs(store, db, &self.locator).await?,
             pull: PullFreshness::default(),
             withdrawal,
+            batch_count: 0,
         })
     }
-    /// Resolves ordered local heads, applies at most one metadata page and
+    /// Pushes a bounded ordered prefix, applies at most one metadata page and
     /// transfers a bounded number of images serially. The caller owns the local
     /// blob root; committed metadata is independent of image transfer success.
     #[cfg(any(test, feature = "test-support"))]
@@ -208,8 +212,15 @@ impl Client {
         }
         let mut progress = RoundProgress::default();
         retry_stale!(
-            self.round_once(&drain.tail, &mut drain.pull, db, blob_dir, &mut progress)
-                .await,
+            self.round_once(
+                &drain.tail,
+                &mut drain.pull,
+                db,
+                blob_dir,
+                &mut progress,
+                &mut drain.batch_count
+            )
+            .await,
             async {
                 self.enrollment()?
                     .refresh_and_finish_pending_removal(store, db)
@@ -231,13 +242,28 @@ impl Client {
         db: &Database,
         blob_dir: &Path,
         progress: &mut RoundProgress,
+        batch_count: &mut usize,
     ) -> Result<Round> {
         let a = &inputs.authority;
         while !progress.push_complete && progress.pushes < PUSH_LIMIT {
             let (step, preflight_local_seq) = match self
-                .push_in_run(inputs, db, blob_dir, progress.preflight_local_seq)
+                .push_in_run(
+                    inputs,
+                    db,
+                    blob_dir,
+                    progress.preflight_local_seq,
+                    batch_count,
+                    PUSH_LIMIT - progress.pushes,
+                )
                 .await
             {
+                Err(error)
+                    if super::super::errors::has_code(&error, "encrypted-tail-batch-known")
+                        && progress.batch_collisions < 3 =>
+                {
+                    progress.batch_collisions += 1;
+                    continue;
+                }
                 Err(error) if error.is::<PublishingBlocked>() => {
                     progress.publishing_blocked = true;
                     break;
@@ -247,6 +273,7 @@ impl Client {
             progress.preflight_local_seq = preflight_local_seq;
             match step {
                 PushStep::Appended => progress.pushes += 1,
+                PushStep::BatchAppended(count) => progress.pushes += count,
                 PushStep::Image(Some(state)) => {
                     progress.image_state = Some(state);
                     progress.push_complete = true;
@@ -261,7 +288,7 @@ impl Client {
             }
         }
         // Reaching the cap completes only this round's push phase. The next
-        // bounded round resumes from the next ordered singleton head.
+        // bounded round resumes from the next ordered frozen group.
         progress.push_complete = true;
         let state_before_pull = db.encrypted_round_state(a).await?;
         let cursor_before_pull = state_before_pull.cursor;

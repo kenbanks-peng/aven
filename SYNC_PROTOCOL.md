@@ -11,9 +11,41 @@ validates retained and new operations against replica protocol 18 through the
 operation contracts and persisted replica behavior below, so those sections
 govern every shared operation change. Merge tests sync replicas in process
 through the encrypted tail with `aven-core`'s `test-support` feature. Sync has
-no discovery handshake, server-side protocol admission, or release protocol
-markers. Changing an encrypted operation contract also requires an encrypted
+no shared-data protocol discovery handshake, server-side protocol admission, or
+release protocol markers. Tail transport capabilities are negotiated separately
+as described below. Changing an encrypted operation contract also requires an encrypted
 tail codec change and its own security review.
+
+## Encrypted tail transport capabilities
+
+Transport batching does not change replicated operation meanings or protocol 18.
+Clients lazily send authenticated `Features` to `/e2ee/tail/v1` before preparing
+multi-record pushes. A successful reply advertises the batch record and decoded
+byte ceilings. A legacy server's `encrypted-tail-malformed` refusal to this
+specific probe selects singleton appends; other errors do not authorize fallback.
+Old `Append`, `Lookup`, and `Pull` messages retain their encodings and semantics.
+
+`/e2ee/tail/batch/v1` accepts `Append` and mapping-only `Resolve`. Its envelope
+uses canonical padded base64 for fixed identifiers and commitments. Appends are
+bounded by 128 records, 1 MiB of decoded records, and 1,414,488 serialized request
+bytes. Resolve requests and batch replies are limited to 256 KiB. Image references
+with upload tickets remain singleton appends. The endpoints share admission
+limits; the batch body ceiling is below the image endpoint's existing ceiling.
+
+A batch inserts all records and side effects in one server transaction. Duplicate
+IDs within a request, prefix collisions, invalid records, or any already-accepted
+ID refuse the entire batch without writes. The latter returns
+`encrypted-tail-batch-known` and requires reconciliation; singleton append remains
+idempotent and returns an existing mapping for an accepted ID.
+
+The local outbox durably freezes an ordered group before dispatch. New pending
+work never joins a surviving group. Acceptance and removal of an outbox row
+commit together. After interruption or an uncertain outcome, every remaining ID
+must be resolved before any resend or generation replacement. Found mappings
+must pass the existing canonical same-ID comparison, including fetching alternate
+ciphertext when needed. Absence is not persisted as permission to resend after a
+restart. Only an authored pre-dispatch admission-busy refusal can be retried
+without this reconciliation barrier.
 
 ## What a protocol version means
 

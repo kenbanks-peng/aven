@@ -60,8 +60,11 @@ async fn client_retries_retryable_busy_response() {
                 if state.fetch_add(1, Ordering::SeqCst) == 0 {
                     (
                         StatusCode::SERVICE_UNAVAILABLE,
-                        [(header::RETRY_AFTER, "0")],
-                        "{\"error\":\"bootstrap-refused\"}",
+                        [
+                            (header::RETRY_AFTER, "0"),
+                            (header::CONTENT_TYPE, "application/json"),
+                        ],
+                        "{\"error\":\"bootstrap-busy\"}",
                     )
                         .into_response()
                 } else {

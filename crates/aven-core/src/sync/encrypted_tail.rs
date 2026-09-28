@@ -1,5 +1,6 @@
 //! Internal ordinary encrypted task stream. Membership remains chain-owned.
 pub mod attachments;
+pub mod batch;
 mod client;
 mod codec;
 pub(crate) mod dependencies;
@@ -23,6 +24,10 @@ pub const APPEND_LIMIT: usize = super::base64_bytes::encoded_len(RECORD_LIMIT) +
 pub const PAGE_BYTES: usize = 2 * 1048576;
 pub const PAGE_COUNT: usize = 256;
 pub const RESPONSE_LIMIT: usize = PAGE_BYTES + CONTROL_LIMIT;
+pub const BATCH_COUNT: usize = 128;
+pub const BATCH_BYTES: usize = 1048576;
+pub const BATCH_APPEND_LIMIT: usize = super::base64_bytes::encoded_len(BATCH_BYTES) + CONTROL_LIMIT;
+pub const BATCH_CONTROL_LIMIT: usize = 256 * 1024;
 
 /// An appended record's identity collides with a published prefix record.
 #[derive(Debug)]
@@ -150,7 +155,15 @@ pub struct Accepted {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BatchFeatures {
+    pub count: usize,
+    pub bytes: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Operation {
+    Features,
     Append {
         ticket: Option<attachments::Ticket>,
         #[serde(with = "crate::sync::base64_bytes")]
@@ -176,8 +189,47 @@ pub struct Page {
     pub records: Vec<Accepted>,
 }
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BatchRecord(
+    #[serde(
+        serialize_with = "crate::sync::base64_bytes::serialize",
+        deserialize_with = "crate::sync::base64_bytes::bounded::<_, RECORD_LIMIT>"
+    )]
+    pub Vec<u8>,
+);
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum BatchOperation {
+    Append {
+        #[serde(deserialize_with = "batch::bounded_items")]
+        records: Vec<BatchRecord>,
+    },
+    Resolve {
+        #[serde(deserialize_with = "batch::bounded_items")]
+        operation_ids: Vec<String>,
+    },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum Resolution {
+    Found(batch::CompactMapping),
+    Absent { operation_id: String },
+    Bootstrap { operation_id: String },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum BatchReply {
+    Appended(#[serde(deserialize_with = "batch::bounded_items")] Vec<batch::CompactMapping>),
+    Resolved(#[serde(deserialize_with = "batch::bounded_items")] Vec<Resolution>),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Reply {
+    Features(BatchFeatures),
     Appended(Mapping),
     Found(Accepted),
     Absent,

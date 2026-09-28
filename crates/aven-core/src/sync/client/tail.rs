@@ -14,6 +14,7 @@ use crate::sync::{
 mod images;
 pub use images::{DrainSnapshot, IMAGES_PATH, ImageTransfer, Round};
 pub const PATH: &str = "/e2ee/tail/v1";
+pub const BATCH_PATH: &str = "/e2ee/tail/batch/v1";
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope<T> {
@@ -29,6 +30,7 @@ pub struct Client {
 
 pub enum PushStep {
     Appended,
+    BatchAppended(usize),
     Image(Option<ImageTransfer>),
     Empty,
 }
@@ -51,7 +53,7 @@ impl Client {
         operation: Operation,
     ) -> Result<Reply> {
         let response_limit = match &operation {
-            Operation::Append { .. } => tail::CONTROL_LIMIT,
+            Operation::Append { .. } | Operation::Features => tail::CONTROL_LIMIT,
             Operation::Lookup { .. } => tail::APPEND_LIMIT,
             Operation::Pull { .. } => tail::RESPONSE_LIMIT,
         };
@@ -84,11 +86,20 @@ impl Client {
         let mut correlation = [0; 32];
         getrandom::fill(&mut correlation)
             .map_err(|_| anyhow::anyhow!("error encrypted-tail-entropy"))?;
-        let bytes = serde_json::to_vec(&Envelope {
-            context: context.clone(),
-            correlation,
-            operation,
-        })?;
+        let compact = path == BATCH_PATH;
+        let bytes = if compact {
+            serde_json::to_vec(&tail::batch::Envelope {
+                context: context.clone(),
+                correlation,
+                operation,
+            })?
+        } else {
+            serde_json::to_vec(&Envelope {
+                context: context.clone(),
+                correlation,
+                operation,
+            })?
+        };
         ensure!(bytes.len() <= request_limit, "error encrypted-tail-limit");
         let bytes = exchange::post_json(&self.link, &endpoint, Some(bearer), bytes, response_limit)
             .await
@@ -105,6 +116,12 @@ impl Client {
                     anyhow::anyhow!("error sync-request-body-limit")
                 }
                 exchange::Failure::Refused { code, .. } => match code.as_deref() {
+                    Some("encrypted-tail-malformed") => {
+                        anyhow::anyhow!("error encrypted-tail-malformed")
+                    }
+                    Some("encrypted-tail-batch-known") => {
+                        anyhow::anyhow!("error encrypted-tail-batch-known")
+                    }
                     Some("membership-stale") => {
                         crate::sync::seed_claim::membership::StaleContext.into()
                     }
@@ -122,46 +139,151 @@ impl Client {
                     _ => anyhow::anyhow!("error encrypted-tail-refused outcome-unknown"),
                 },
             })?;
-        let response: Envelope<R> = serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("error encrypted-tail-http"))?;
+        let response: Envelope<R> = if compact {
+            let reply: tail::batch::Envelope<R> = serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("error encrypted-tail-http"))?;
+            Envelope {
+                context: reply.context,
+                correlation: reply.correlation,
+                operation: reply.operation,
+            }
+        } else {
+            serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("error encrypted-tail-http"))?
+        };
         ensure!(
             response.context == *context && response.correlation == correlation,
             "error encrypted-tail-context"
         );
         Ok(response.operation)
     }
-    /// Every frozen record is resolved by Lookup before any upload or resend.
+    pub async fn batch_exchange(
+        &self,
+        context: &Context,
+        bearer: &Secret,
+        operation: tail::BatchOperation,
+    ) -> Result<tail::BatchReply> {
+        let limit = if matches!(operation, tail::BatchOperation::Append { .. }) {
+            tail::BATCH_APPEND_LIMIT
+        } else {
+            tail::BATCH_CONTROL_LIMIT
+        };
+        self.exchange_to(
+            BATCH_PATH,
+            context,
+            bearer,
+            operation,
+            limit,
+            tail::BATCH_CONTROL_LIMIT,
+        )
+        .await
+    }
+
+    /// Every unresolved operation is looked up before any upload or resend.
     async fn reconcile_frozen(
         &self,
         a: &tail::Authority,
         bearer: &Secret,
         db: &Database,
         blob_dir: &std::path::Path,
+        batch_count: usize,
     ) -> Result<bool> {
-        if let Some((id, record)) = db.encrypted_tail_frozen_record(a).await? {
-            let response = self
-                .exchange(
+        let frozen = db.encrypted_tail_frozen_records(a).await?;
+        let mut responses = Vec::with_capacity(frozen.len());
+        if frozen.len() > 1 && batch_count > 1 {
+            let tail::BatchReply::Resolved(resolutions) = self
+                .batch_exchange(
                     &a.context,
                     bearer,
-                    Operation::Lookup {
-                        operation_id: id,
-                        expected: None,
+                    tail::BatchOperation::Resolve {
+                        operation_ids: frozen.iter().map(|(id, _)| id.clone()).collect(),
                     },
                 )
-                .await?;
-            match &response {
-                Reply::Found(accepted) => {
+                .await?
+            else {
+                anyhow::bail!("error encrypted-tail-reply")
+            };
+            ensure!(
+                resolutions.len() == frozen.len(),
+                "error encrypted-tail-mapping"
+            );
+            for ((id, record), resolution) in frozen.iter().zip(resolutions) {
+                responses.push(match resolution {
+                    tail::Resolution::Found(mapping) => {
+                        ensure!(mapping.operation_id == *id, "error encrypted-tail-mapping");
+                        Reply::Found(Accepted {
+                            mapping: mapping.into(),
+                            record: record.clone(),
+                        })
+                    }
+                    tail::Resolution::Absent { operation_id } => {
+                        ensure!(operation_id == *id, "error encrypted-tail-mapping");
+                        Reply::Absent
+                    }
+                    tail::Resolution::Bootstrap { .. } => {
+                        anyhow::bail!("error encrypted-tail-accepted-identity")
+                    }
+                });
+            }
+        } else {
+            for (id, _) in &frozen {
+                responses.push(
+                    self.exchange(
+                        &a.context,
+                        bearer,
+                        Operation::Lookup {
+                            operation_id: id.clone(),
+                            expected: None,
+                        },
+                    )
+                    .await?,
+                );
+            }
+        }
+        crate::sync::crash::Crash::Tail.at("after-resolve");
+        let mut absences = Vec::new();
+        for ((id, record), response) in frozen.iter().zip(responses) {
+            match response {
+                Reply::Found(mut accepted) => {
+                    ensure!(
+                        accepted.mapping.operation_id == *id,
+                        "error encrypted-tail-accepted-identity"
+                    );
                     db.observe_encrypted_tail(a, &accepted.mapping).await?;
-                    db.verify_encrypted_tail_outcome(a, accepted).await?;
+                    crate::sync::crash::Crash::Tail.at("batch-observed");
+                    use sha2::{Digest, Sha256};
+                    if Sha256::digest(&accepted.record).as_slice() != accepted.mapping.commitment {
+                        let Reply::Found(found) = self
+                            .exchange(
+                                &a.context,
+                                bearer,
+                                Operation::Lookup {
+                                    operation_id: id.clone(),
+                                    expected: Some(accepted.mapping.clone()),
+                                },
+                            )
+                            .await?
+                        else {
+                            anyhow::bail!("error encrypted-tail-accepted-unavailable")
+                        };
+                        ensure!(
+                            found.mapping == accepted.mapping,
+                            "error encrypted-tail-mapping"
+                        );
+                        accepted = found;
+                    }
+                    db.verify_encrypted_tail_outcome(a, &accepted).await?;
                 }
-                Reply::Absent => {
-                    let absence = a.confirm_absent(&record, &response)?;
-                    return db
-                        .reconcile_encrypted_tail_absence(a, &absence, blob_dir)
-                        .await;
-                }
+                Reply::Absent => absences.push(a.confirm_absent(record, &Reply::Absent)?),
                 _ => anyhow::bail!("error encrypted-tail-accepted-identity"),
             }
+        }
+        if !absences.is_empty()
+            && !db
+                .reconcile_encrypted_tail_absences(a, &absences, blob_dir)
+                .await?
+        {
+            return Ok(false);
         }
         Ok(!a.rotation_pending())
     }
@@ -172,7 +294,10 @@ impl Client {
         db: &Database,
         blob_dir: &std::path::Path,
     ) -> Result<PushStep> {
-        Ok(self.push_in_run(inputs, db, blob_dir, None).await?.0)
+        Ok(self
+            .push_in_run(inputs, db, blob_dir, None, &mut 1, 1)
+            .await?
+            .0)
     }
     /// Dispatches the next ordered head. An unavailable local image source or
     /// failed image transfer leaves that head pending and stops this round's push
@@ -184,15 +309,39 @@ impl Client {
         db: &Database,
         blob_dir: &std::path::Path,
         preflight_local_seq: Option<i64>,
+        batch_count: &mut usize,
+        remaining: usize,
     ) -> Result<(PushStep, Option<i64>)> {
         inputs.require_publishing_ready()?;
         let (a, bearer) = (&inputs.authority, &inputs.bearer);
-        if !self.reconcile_frozen(a, bearer, db, blob_dir).await? {
+        if *batch_count == 0 && db.encrypted_tail_has_batch_work(a).await? {
+            *batch_count = match self.exchange(&a.context, bearer, Operation::Features).await {
+                Ok(Reply::Features(features))
+                    if features.count >= tail::BATCH_COUNT
+                        && features.bytes >= tail::BATCH_BYTES =>
+                {
+                    tail::BATCH_COUNT
+                }
+                Ok(Reply::Features(_)) => 1,
+                Err(error) if super::errors::has_code(&error, "encrypted-tail-malformed") => 1,
+                Err(error) => return Err(error),
+                _ => anyhow::bail!("error encrypted-tail-reply"),
+            };
+        }
+        if !self
+            .reconcile_frozen(a, bearer, db, blob_dir, *batch_count)
+            .await?
+        {
             return Ok((PushStep::Empty, preflight_local_seq));
         }
         // A missing local source leaves its head pending without blocking pulls.
         let (prepared, preflight_local_seq) = match db
-            .prepare_encrypted_push_in_run(a, blob_dir, preflight_local_seq)
+            .prepare_encrypted_batch_in_run(
+                a,
+                blob_dir,
+                preflight_local_seq,
+                (*batch_count).max(1).min(remaining),
+            )
             .await
         {
             Err(error) if error.is::<tail::attachments::ImageSourceUnavailable>() => {
@@ -206,6 +355,48 @@ impl Client {
         let Some(tail::Push { record, upload }) = prepared else {
             return Ok((PushStep::Empty, preflight_local_seq));
         };
+        let frozen = db.encrypted_tail_frozen_records(a).await?;
+        if frozen.len() > 1 && *batch_count > 1 {
+            inputs.require_publishing_ready()?;
+            let tail::BatchReply::Appended(mappings) = self
+                .batch_exchange(
+                    &a.context,
+                    bearer,
+                    tail::BatchOperation::Append {
+                        records: frozen
+                            .iter()
+                            .map(|(_, r)| tail::BatchRecord(r.clone()))
+                            .collect(),
+                    },
+                )
+                .await?
+            else {
+                anyhow::bail!("error encrypted-tail-reply")
+            };
+            crate::sync::crash::Crash::Tail.at("after-append");
+            crate::sync::crash::Crash::Tail.at("after-batch-append");
+            ensure!(
+                mappings.len() == frozen.len(),
+                "error encrypted-tail-mapping"
+            );
+            use sha2::{Digest, Sha256};
+            for ((id, record), mapping) in frozen.iter().zip(&mappings) {
+                ensure!(
+                    mapping.operation_id == *id
+                        && Sha256::digest(record).as_slice() == mapping.commitment,
+                    "error encrypted-tail-mapping"
+                );
+            }
+            ensure!(
+                mappings
+                    .windows(2)
+                    .all(|pair| pair[0].sequence.checked_add(1) == Some(pair[1].sequence)),
+                "error encrypted-tail-mapping"
+            );
+            let mappings: Vec<tail::Mapping> = mappings.into_iter().map(Into::into).collect();
+            db.accept_encrypted_tail_batch(a, &mappings).await?;
+            return Ok((PushStep::BatchAppended(mappings.len()), preflight_local_seq));
+        }
         let is_image = upload.is_some();
         let ticket = match upload {
             Some(upload) => match self.upload_prepared_image(inputs, upload).await {

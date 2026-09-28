@@ -26,6 +26,7 @@ use axum::{
     routing::post,
 };
 use std::sync::Arc;
+mod batch;
 mod images;
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 struct Server {
@@ -36,6 +37,10 @@ struct Server {
 pub fn router(db: Database, image_policy: aven_core::attachments::LifecyclePolicy) -> Router {
     Router::new()
         .route(PATH, post(handle))
+        .route(
+            aven_core::sync::client::tail::BATCH_PATH,
+            post(batch::handle),
+        )
         .route(images::PATH, post(images::handle))
         .with_state(Arc::new(Server {
             db,

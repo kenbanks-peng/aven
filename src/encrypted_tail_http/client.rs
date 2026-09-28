@@ -64,7 +64,7 @@ impl Client {
     ) -> Result<bool> {
         run!(self, |client| client.pull_only_round(store, db))
     }
-    /// Resolves at most one ordered local head, applies one metadata page and
+    /// Pushes a bounded ordered prefix, applies one metadata page and
     /// downloads at most one image.
     pub async fn round(
         &self,
