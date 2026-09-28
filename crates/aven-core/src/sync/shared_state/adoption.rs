@@ -369,6 +369,7 @@ async fn validate_history(
     // rows joined to them must meet every source row once, in the same order.
     let mut pending = expected.iter();
     let mut after = String::new();
+    let mut accepted = 0_i64;
     loop {
         // One JSON array per page: decoding thousands of rows one by one
         // through the driver costs several times the query itself.
@@ -400,6 +401,7 @@ async fn validate_history(
                 source_row.matches(row, true)?,
                 "error seed-captured-history-changed"
             );
+            accepted += i64::from(row.server_seq.is_some());
         }
     }
     ensure!(
@@ -446,18 +448,17 @@ async fn validate_history(
         });
     ensure!(!provenance_changed, "error seed-source-provenance-changed");
 
-    let uncaptured: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-             SELECT 1 FROM changes ch
-             WHERE ch.server_seq IS NOT NULL
-               AND NOT EXISTS(SELECT 1 FROM local_shared_capture_changes c
-                              WHERE c.candidate_id = ? AND c.change_id = ch.change_id)
-         )",
-    )
-    .bind(candidate)
-    .fetch_one(&mut *conn)
-    .await?;
-    ensure!(!uncaptured, "error seed-uncaptured-accepted-history");
+    // The walk met every captured row once, so any other accepted row is
+    // uncaptured. Counting uses the server_seq index instead of scanning
+    // every change with its payload.
+    let all_accepted: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM changes WHERE server_seq IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    ensure!(
+        all_accepted == accepted,
+        "error seed-uncaptured-accepted-history"
+    );
 
     Ok(history_digest(&stored_history, &stored_provenance))
 }
