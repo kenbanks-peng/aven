@@ -785,8 +785,16 @@ impl App {
                 skipped = true;
                 continue;
             };
-            self.store.view_state = target.view_state.clone();
-            let selected = self.store.refresh(Some(&target.task_id)).await?;
+            let selected = self
+                .store
+                .restore_view_state(
+                    target.view_state.clone(),
+                    Some(&crate::tui::store::MainRowSelection::Task(
+                        target.task_id.clone(),
+                    )),
+                )
+                .await?
+                .selected;
             let index = if let Some(index) = selected.filter(|&index| {
                 self.store
                     .tasks
@@ -874,7 +882,7 @@ impl App {
                 self.detail = crate::tui::detail_session::DetailSession::open(anchor.scroll);
                 self.overlay = None;
             } else {
-                self.store.recurrence_detail = None;
+                self.store.clear_recurrence_detail();
                 self.detail.close();
                 self.overlay = None;
                 self.set_warning("recurring series is hidden by the restored filters");
@@ -971,7 +979,7 @@ impl App {
 
     pub(super) fn set_mutation_success(&mut self, message: impl Into<String>) {
         let mut message = message.into();
-        if let Some(entry_id) = self.store.new_undo_entry_id.take()
+        if let Some(entry_id) = self.store.take_new_undo_entry_id()
             && self
                 .store
                 .available_undo()

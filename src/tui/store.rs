@@ -1,5 +1,4 @@
 use crate::config::AppConfig;
-use crate::ids::WorkspaceId;
 mod attachments;
 mod config;
 mod conflicts;
@@ -23,7 +22,9 @@ mod workspaces;
 mod tests;
 
 use std::cell::OnceCell;
-use std::ops::{Deref, DerefMut};
+use std::ops::Deref;
+#[cfg(test)]
+use std::ops::DerefMut;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -138,18 +139,6 @@ impl TaskDetailHydration {
     }
 }
 
-struct RefreshRetainedState {
-    database: Database,
-    app_config: AppConfig,
-    task_columns: Vec<crate::config::TaskColumnConfig>,
-    columns_preview_visible: bool,
-    db_stats: TuiDatabaseStats,
-    sync_busy: bool,
-    refresh_health: RefreshHealth,
-    #[cfg(test)]
-    test_database_dir: Option<std::sync::Arc<tempfile::TempDir>>,
-}
-
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct TuiProjection {
     pub(crate) tasks: TaskProjection,
@@ -206,6 +195,9 @@ impl Deref for TuiStore {
     }
 }
 
+// Test fixtures seed projection fields directly. Production code mutates the
+// projection through named transitions that state their index invalidation.
+#[cfg(test)]
 impl DerefMut for TuiStore {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.derived = DerivedTaskProjections::default();
@@ -230,42 +222,6 @@ pub(crate) enum RefreshFailureStage {
 pub(crate) struct ScopeRefreshResult {
     pub(crate) selected: Option<usize>,
     pub(crate) fallback_scope: Option<String>,
-}
-
-impl From<&TuiStore> for RefreshRetainedState {
-    fn from(store: &TuiStore) -> Self {
-        Self {
-            database: store.database.clone(),
-            app_config: store.app_config.clone(),
-            task_columns: store.task_columns.clone(),
-            columns_preview_visible: store.columns_preview_visible,
-            db_stats: store.db_stats.clone(),
-            sync_busy: store.sync_busy,
-            refresh_health: store.refresh_health,
-            #[cfg(test)]
-            test_database_dir: store._test_database_dir.clone(),
-        }
-    }
-}
-
-impl RefreshRetainedState {
-    fn with_projection(self, projection: TuiProjection) -> TuiStore {
-        TuiStore {
-            database: self.database,
-            app_config: self.app_config,
-            projection,
-            task_columns: self.task_columns,
-            derived: DerivedTaskProjections::default(),
-            columns_preview_visible: self.columns_preview_visible,
-            db_stats: self.db_stats,
-            sync_busy: self.sync_busy,
-            refresh_health: self.refresh_health,
-            #[cfg(test)]
-            fail_next_refresh: None,
-            #[cfg(test)]
-            _test_database_dir: self.test_database_dir,
-        }
-    }
 }
 
 impl TuiStore {
@@ -294,25 +250,7 @@ impl TuiStore {
         let mut store = Self {
             database,
             app_config,
-            projection: TuiProjection {
-                tasks: TaskProjection::default(),
-                recurrence_series: Vec::new(),
-                recurrence_detail: None,
-                recent_actions: Vec::new(),
-                projects: Vec::new(),
-                labels: Vec::new(),
-                workspaces: Vec::new(),
-                active_workspace: workspace,
-                counts: SidebarCounts::default(),
-                sidebar_entries: Vec::new(),
-                view_state,
-                sync_status: TuiSyncStatus::default(),
-                latest_undo: None,
-                new_undo_entry_id: None,
-                last_refresh: Instant::now(),
-                #[cfg(test)]
-                clone_sentinel: ProjectionCloneSentinel::default(),
-            },
+            projection: TuiProjection::new(workspace, view_state),
             task_columns,
             derived: DerivedTaskProjections::default(),
             columns_preview_visible: true,
@@ -337,7 +275,7 @@ impl TuiStore {
         let task_columns = config.tui.columns.clone();
         self.app_config = config;
         self.set_task_columns(task_columns);
-        self.rebuild_sidebar();
+        self.projection.rebuild_sidebar(&self.app_config);
     }
 
     pub(crate) fn task_columns(&self) -> &[crate::config::TaskColumnConfig] {
@@ -346,7 +284,7 @@ impl TuiStore {
 
     pub(crate) fn set_task_columns(&mut self, columns: Vec<crate::config::TaskColumnConfig>) {
         self.task_columns = columns;
-        self.derived = DerivedTaskProjections::default();
+        self.derived.columns = OnceCell::new();
     }
 
     pub(crate) fn task_list_view(&self) -> TaskListViewRef<'_> {
@@ -494,8 +432,8 @@ impl TuiStore {
     }
 
     pub(crate) fn show_exact_task(&mut self, item: TaskListItem) {
-        self.view_state = TaskViewState::for_exact_task(item.task.id.clone());
-        self.tasks = vec![item].into();
+        self.projection.view_state = TaskViewState::for_exact_task(item.task.id.clone());
+        *self.tasks_mut() = vec![item].into();
     }
 
     pub(crate) fn selected_task(&self, selected: Option<usize>) -> Option<&TaskListItem> {
@@ -564,8 +502,7 @@ impl TuiStore {
                 .iter()
                 .all(|candidate| candidate.task.id != item.task.id)
             {
-                let insertion_index = index.min(self.tasks.len());
-                self.tasks.insert(insertion_index, item);
+                self.insert_task(index.min(self.tasks.len()), item);
             }
         }
         if let Some(MainRowSelection::Task(task_id)) = selected {
@@ -617,45 +554,95 @@ impl TuiStore {
             .as_ref()
             .map(|detail| detail.series.id.clone());
         #[cfg(test)]
-        let fail_next_refresh = self.fail_next_refresh.take();
-        let previous_undo_entry_id = self.latest_undo.as_ref().map(|undo| undo.entry_id.clone());
-        let retained = RefreshRetainedState::from(&*self);
-        let mut projection = Self::fresh_projection(active_workspace, view_state);
+        let fail_at = self.fail_next_refresh.take();
+        #[cfg(not(test))]
+        let fail_at = None;
+        let mut candidate = TuiProjection::new(active_workspace, view_state);
         // Parts of the sync status may be unreadable mid-operation; the refresh
         // keeps these last-known values until they can be read again.
-        projection.sync_status = self.sync_status.clone();
-        let mut replacement = retained.with_projection(projection);
-        #[cfg(test)]
-        {
-            replacement.fail_next_refresh = fail_next_refresh;
-        }
-        let mut result = match replacement
-            .refresh_in_place(restore, recurrence_detail_id.as_ref())
+        candidate.sync_status = self.sync_status.clone();
+        let fallback_scope = match candidate
+            .load(
+                &self.database,
+                &self.app_config,
+                restore,
+                recurrence_detail_id.as_ref(),
+                fail_at,
+            )
             .await
         {
-            Ok(result) => result,
+            Ok(fallback_scope) => fallback_scope,
             Err(error) => {
                 self.refresh_health = RefreshHealth::Failed;
                 return Err(error);
             }
         };
-        replacement.new_undo_entry_id = replacement
+        let previous_undo_entry_id = self.latest_undo.as_ref().map(|undo| undo.entry_id.clone());
+        candidate.new_undo_entry_id = candidate
             .latest_undo
             .as_ref()
             .map(|undo| undo.entry_id.clone())
             .filter(|id| Some(id) != previous_undo_entry_id.as_ref());
-        replacement.refresh_health = RefreshHealth::Healthy;
-        result.selected = replacement.restored_main_selection(restore);
-        #[cfg(test)]
-        {
-            replacement.fail_next_refresh = None;
-        }
-        *self = replacement;
-        Ok(result)
+        self.projection = candidate;
+        self.derived = DerivedTaskProjections::default();
+        self.refresh_health = RefreshHealth::Healthy;
+        Ok(ScopeRefreshResult {
+            selected: self.restored_main_selection(restore),
+            fallback_scope,
+        })
     }
 
-    fn fresh_projection(active_workspace: Workspace, view_state: TaskViewState) -> TuiProjection {
-        TuiProjection {
+    pub(crate) async fn ensure_task_details(
+        &mut self,
+        task_ids: &[crate::ids::TaskId],
+    ) -> Result<TaskDetailHydration> {
+        // Detail hydration fills only fields that the derived row and lane indexes do not read.
+        self.projection
+            .ensure_task_details(&self.database, task_ids)
+            .await
+    }
+
+    pub(crate) fn refresh_health(&self) -> RefreshHealth {
+        self.refresh_health
+    }
+
+    pub(crate) fn available_undo(&self) -> Option<&UndoPresentation> {
+        (self.refresh_health == RefreshHealth::Healthy)
+            .then_some(self.latest_undo.as_ref())
+            .flatten()
+    }
+
+    pub(crate) fn take_new_undo_entry_id(&mut self) -> Option<String> {
+        self.projection.new_undo_entry_id.take()
+    }
+
+    pub(crate) fn clear_recurrence_detail(&mut self) {
+        self.projection.recurrence_detail = None;
+    }
+
+    pub(crate) fn set_layout(&mut self, layout: TaskLayout) -> Result<(), &'static str> {
+        // Layout selects which derived index is consumed; neither index depends on it.
+        self.projection.view_state.set_layout(layout)
+    }
+
+    pub(crate) fn insert_task(&mut self, index: usize, item: TaskListItem) {
+        self.tasks_mut().insert(index, item);
+    }
+
+    pub(crate) fn remove_tasks(&mut self, task_ids: &[crate::ids::TaskId]) {
+        self.tasks_mut()
+            .retain(|item| !task_ids.contains(&item.task.id));
+    }
+
+    fn tasks_mut(&mut self) -> &mut TaskProjection {
+        self.derived = DerivedTaskProjections::default();
+        &mut self.projection.tasks
+    }
+}
+
+impl TuiProjection {
+    fn new(active_workspace: Workspace, view_state: TaskViewState) -> Self {
+        Self {
             tasks: TaskProjection::default(),
             recurrence_series: Vec::new(),
             recurrence_detail: None,
@@ -676,71 +663,62 @@ impl TuiStore {
         }
     }
 
-    async fn refresh_in_place(
+    /// Loads a complete projection for this candidate's workspace and view state.
+    /// Returns the project scope that was replaced by workspace scope, if any.
+    async fn load(
         &mut self,
+        database: &Database,
+        app_config: &AppConfig,
         restore: &SelectionRestore,
         recurrence_detail_id: Option<&aven_core::recurrence::RecurrenceSeriesId>,
-    ) -> Result<ScopeRefreshResult> {
+        fail_at: Option<RefreshFailureStage>,
+    ) -> Result<Option<String>> {
         let workspace_id = self.active_workspace.id.clone();
-        self.workspaces = self.database.list_workspaces().await?;
-        let reconciliation = self
-            .database
-            .reconcile_recurrence_reports(&workspace_id)
-            .await?;
+        self.workspaces = database.list_workspaces().await?;
+        let reconciliation = database.reconcile_recurrence_reports(&workspace_id).await?;
         if reconciliation.changed > 0 {
-            self.wake_after_mutation();
+            crate::daemon::wake_if_enabled(app_config);
         }
-        self.inject_refresh_failure(RefreshFailureStage::Projects)?;
-        self.projects = self
-            .database
+        inject_refresh_failure(fail_at, RefreshFailureStage::Projects)?;
+        self.projects = database
             .list_project_items_from_current_projection(&workspace_id)
             .await?;
-        self.labels = self.database.list_labels(&workspace_id, None).await?;
+        self.labels = database.list_labels(&workspace_id, None).await?;
         let fallback_scope = self.ensure_valid_scope();
         let project_scope = self.scope_project().map(str::to_string);
-        self.counts = self
-            .database
+        self.counts = database
             .sidebar_counts_for_scope_from_current_projection(
                 &workspace_id,
                 project_scope.as_deref(),
             )
             .await?;
-        self.recent_actions = self
-            .database
+        self.recent_actions = database
             .list_recent_actions_from_current_projection(&workspace_id, project_scope.as_deref())
             .await?;
-        self.inject_refresh_failure(RefreshFailureStage::Tasks)?;
-        if self.view_state.query == TaskQuery::RecentActions {
-            self.tasks.clear();
-            self.recurrence_series.clear();
-            self.recurrence_detail = None;
-        } else if self.view_state.query == TaskQuery::Recurring {
-            self.tasks.clear();
-            self.recurrence_series = self
-                .database
+        inject_refresh_failure(fail_at, RefreshFailureStage::Tasks)?;
+        if self.view_state.query == TaskQuery::Recurring {
+            self.recurrence_series = database
                 .list_recurrence_series_view_from_current_projection(
                     &workspace_id,
                     self.view_state.recurrence_query(),
                 )
                 .await?;
-            self.recurrence_detail = None;
             if let Some(series_id) = recurrence_detail_id
                 && self
                     .recurrence_series
                     .iter()
                     .any(|item| &item.series.id == series_id)
             {
-                self.load_recurrence_series_detail(series_id).await?;
+                let detail = database
+                    .recurrence_series_detail_from_current_projection(&workspace_id, series_id)
+                    .await?;
+                self.set_recurrence_detail(series_id, detail)?;
             }
-        } else {
-            self.recurrence_series.clear();
-            self.recurrence_detail = None;
-            let filters = self.view_state.filters();
-            self.tasks = self
-                .database
+        } else if self.view_state.query != TaskQuery::RecentActions {
+            self.tasks = database
                 .list_task_summary_items_from_current_projection(
                     &workspace_id,
-                    filters,
+                    self.view_state.filters(),
                     self.view_state.query_mode(),
                     self.view_state.sort(),
                     self.view_state.sort_direction(),
@@ -749,23 +727,25 @@ impl TuiStore {
                 .await?
                 .into();
             if self.view_state.query == TaskQuery::Conflicts {
-                self.append_recurrence_conflict_tasks().await?;
+                self.append_recurrence_conflict_tasks(database).await?;
             }
         }
-        self.load_epic_child_tasks(&workspace_id).await?;
+        self.load_epic_child_tasks(database).await?;
         self.prune_expanded_epic_ids();
-        self.ensure_restored_task_detail(restore).await?;
-        self.sync_status = self.load_sync_status().await?;
-        self.latest_undo = self.load_latest_undo_presentation().await?;
-        self.rebuild_sidebar();
+        self.ensure_restored_task_detail(database, restore).await?;
+        self.sync_status =
+            config::load_sync_status(database, app_config, &self.sync_status).await?;
+        self.latest_undo = undo::latest_undo_presentation(database, &workspace_id).await?;
+        self.rebuild_sidebar(app_config);
         self.last_refresh = Instant::now();
-        Ok(ScopeRefreshResult {
-            selected: None,
-            fallback_scope,
-        })
+        Ok(fallback_scope)
     }
 
-    async fn ensure_restored_task_detail(&mut self, restore: &SelectionRestore) -> Result<()> {
+    async fn ensure_restored_task_detail(
+        &mut self,
+        database: &Database,
+        restore: &SelectionRestore,
+    ) -> Result<()> {
         let task_id = match restore {
             SelectionRestore::Identity(MainRowIdentity::Task(task_id))
             | SelectionRestore::Anchor(MainRowAnchor {
@@ -779,7 +759,7 @@ impl TuiStore {
         };
         if let Some(task_id) = task_id {
             let hydration = self
-                .ensure_task_details(std::slice::from_ref(task_id))
+                .ensure_task_details(database, std::slice::from_ref(task_id))
                 .await?;
             let stale = hydration.stale_ids().cloned().collect::<Vec<_>>();
             self.tasks.retain(|item| !stale.contains(&item.task.id));
@@ -787,8 +767,9 @@ impl TuiStore {
         Ok(())
     }
 
-    pub(crate) async fn ensure_task_details(
+    async fn ensure_task_details(
         &mut self,
+        database: &Database,
         task_ids: &[crate::ids::TaskId],
     ) -> Result<TaskDetailHydration> {
         let requested = task_ids
@@ -816,7 +797,7 @@ impl TuiStore {
         let hydrated = if summaries.is_empty() {
             Vec::new()
         } else {
-            self.database
+            database
                 .list_task_items_from_current_projection(
                     &self.active_workspace.id,
                     crate::query::TaskFilters {
@@ -862,30 +843,6 @@ impl TuiStore {
         })
     }
 
-    #[cfg(test)]
-    fn inject_refresh_failure(&mut self, stage: RefreshFailureStage) -> Result<()> {
-        if self.fail_next_refresh == Some(stage) {
-            self.fail_next_refresh = None;
-            anyhow::bail!("injected refresh failure at {stage:?}");
-        }
-        Ok(())
-    }
-
-    #[cfg(not(test))]
-    fn inject_refresh_failure(&mut self, _stage: RefreshFailureStage) -> Result<()> {
-        Ok(())
-    }
-
-    pub(crate) fn refresh_health(&self) -> RefreshHealth {
-        self.refresh_health
-    }
-
-    pub(crate) fn available_undo(&self) -> Option<&UndoPresentation> {
-        (self.refresh_health == RefreshHealth::Healthy)
-            .then_some(self.latest_undo.as_ref())
-            .flatten()
-    }
-
     pub(crate) fn scope_project(&self) -> Option<&str> {
         match &self.view_state.scope {
             TaskScope::Workspace => None,
@@ -905,7 +862,7 @@ impl TuiStore {
         Some(project)
     }
 
-    async fn load_epic_child_tasks(&mut self, workspace_id: &WorkspaceId) -> Result<()> {
+    async fn load_epic_child_tasks(&mut self, database: &Database) -> Result<()> {
         if self.view_state.render_mode() != TaskListRenderMode::Epics {
             return Ok(());
         }
@@ -930,10 +887,9 @@ impl TuiStore {
         if child_ids.is_empty() {
             return Ok(());
         }
-        let children = self
-            .database
+        let children = database
             .list_task_summary_items_from_current_projection(
-                workspace_id,
+                &self.active_workspace.id,
                 crate::query::TaskFilters {
                     task_ids: crate::query::TaskIdFilter::Only(child_ids),
                     ..crate::query::TaskFilters::default()
@@ -965,4 +921,14 @@ impl TuiStore {
             .map(|item| item.task.id.clone())
             .collect()
     }
+}
+
+fn inject_refresh_failure(
+    fail_at: Option<RefreshFailureStage>,
+    stage: RefreshFailureStage,
+) -> Result<()> {
+    if fail_at == Some(stage) {
+        anyhow::bail!("injected refresh failure at {stage:?}");
+    }
+    Ok(())
 }

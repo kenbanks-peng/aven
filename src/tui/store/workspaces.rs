@@ -12,8 +12,9 @@ impl TuiStore {
         } else {
             format!("{name} ({key})")
         };
-        self.workspaces.push(workspace);
-        self.workspaces
+        self.projection.workspaces.push(workspace);
+        self.projection
+            .workspaces
             .sort_by(|left, right| left.key.cmp(&right.key));
         Ok(format!("created workspace {display}"))
     }
@@ -29,18 +30,20 @@ impl TuiStore {
             .await?;
         let renames_active = workspace.id == self.active_workspace.id;
         if renames_active {
-            self.active_workspace = workspace.clone();
+            self.projection.active_workspace = workspace.clone();
         }
         if let Some(existing) = self
+            .projection
             .workspaces
             .iter_mut()
             .find(|existing| existing.id == workspace.id)
         {
             *existing = workspace.clone();
         } else {
-            self.workspaces.push(workspace.clone());
+            self.projection.workspaces.push(workspace.clone());
         }
-        self.workspaces
+        self.projection
+            .workspaces
             .sort_by(|left, right| left.key.cmp(&right.key));
 
         if renames_active {

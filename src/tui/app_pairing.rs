@@ -173,10 +173,11 @@ impl App {
                 ) {
                     Ok(presentation) => {
                         let presentation = Arc::new(presentation);
-                        self.store.sync_status.invitation = Some(encrypted::InvitationStatus {
-                            expires_at: invitation.expires_at(),
-                            keys_may_have_been_sent: false,
-                        });
+                        self.store
+                            .set_sync_invitation(Some(encrypted::InvitationStatus {
+                                expires_at: invitation.expires_at(),
+                                keys_may_have_been_sent: false,
+                            }));
                         self.invite.presentation = Some(presentation.clone());
                         self.invite.text = Some(Zeroizing::new(invitation.text().to_string()));
                         // A closed page stays closed; the header shows the
@@ -256,8 +257,9 @@ impl App {
                 }
             }
         }
-        self.store.sync_status.invitation =
+        let invitation =
             encrypted::invitation_status(&self.store.database(), self.intake.config()).await?;
+        self.store.set_sync_invitation(invitation);
         Ok(true)
     }
 
@@ -271,7 +273,7 @@ impl App {
                 }
                 self.invite.presentation = None;
                 self.invite.text = None;
-                self.store.sync_status.invitation = None;
+                self.store.set_sync_invitation(None);
                 self.set_success("invitation cancelled");
             }
             encrypted::Cancellation::KeysMayHaveBeenSent { expires_at } => {
@@ -281,7 +283,7 @@ impl App {
                 ));
             }
             encrypted::Cancellation::None => {
-                self.store.sync_status.invitation = None;
+                self.store.set_sync_invitation(None);
                 self.set_info("no invitation is open");
             }
         }

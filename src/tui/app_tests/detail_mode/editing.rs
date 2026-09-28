@@ -921,6 +921,23 @@ async fn queue_status_change_preserves_viewport_row_and_recalls_changed_task() {
 }
 
 #[tokio::test]
+async fn failed_last_change_recall_keeps_published_view() {
+    let mut app = test_app().await;
+    for title in ["First", "Changed"] {
+        create_and_select_task(&mut app, test_task_draft(title)).await;
+    }
+    app.show_view(TaskQuery::Queue).await.unwrap();
+    app.list.select_task(Some(1));
+    app.update_status(TaskStatus::Done).await.unwrap();
+    let view_state = app.store.view_state.clone();
+    app.store.fail_next_refresh();
+
+    assert!(app.execute(Action::ReturnToLastChange).await.is_err());
+
+    assert_eq!(app.store.view_state, view_state);
+}
+
+#[tokio::test]
 async fn recalling_filtered_status_change_returns_from_detail_to_queue_anchor() {
     let mut app = test_app().await;
     for title in ["First", "Changed", "Third"] {
