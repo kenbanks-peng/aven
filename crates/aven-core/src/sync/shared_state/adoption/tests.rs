@@ -1,6 +1,16 @@
 use super::*;
 use crate::sync::{LocalSharedStatePackageContext, LocalSharedStatePackageKey};
 
+/// Appends an empty zstd skippable frame to the stored snapshot: the decoded
+/// JSON is unchanged but the stored bytes are not.
+const INERT_SNAPSHOT_REWRITE: &str =
+    "UPDATE local_shared_capture_documents SET snapshot = snapshot || x'502a4d1800000000'";
+/// The same inert rewrite of the stored source history and provenance.
+const INERT_HISTORY_REWRITE: &str = "UPDATE local_shared_capture_documents
+     SET source_history = source_history || x'502a4d1800000000'";
+const INERT_PROVENANCE_REWRITE: &str = "UPDATE local_shared_capture_documents
+     SET source_provenance = source_provenance || x'502a4d1800000000'";
+
 type Fixture = (
     tempfile::TempDir,
     Database,
@@ -492,14 +502,20 @@ async fn proof_detects_snapshot_rewrite_before_writer_use() {
     let fixture = history_fixture().await;
     let mut proofs = fixture_proof(&fixture).await;
     // Semantically inert for the package, but not the bytes that were proved.
-    sql(
-        &fixture.1,
-        "UPDATE local_shared_capture_journal
-         SET snapshot_json = replace(snapshot_json, '\"exported_at\":\"', '\"exported_at\":\"0')",
-    )
-    .await;
+    sql(&fixture.1, INERT_SNAPSHOT_REWRITE).await;
     let error = intent_error_with(&fixture, &mut proofs).await;
     assert!(error.contains("seed-capture-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn proof_detects_history_rewrite_before_writer_use() {
+    for rewrite in [INERT_HISTORY_REWRITE, INERT_PROVENANCE_REWRITE] {
+        let fixture = history_fixture().await;
+        let mut proofs = fixture_proof(&fixture).await;
+        sql(&fixture.1, rewrite).await;
+        let error = intent_error_with(&fixture, &mut proofs).await;
+        assert!(error.contains("seed-capture-changed"), "{rewrite}: {error}");
+    }
 }
 
 #[tokio::test]
@@ -634,11 +650,10 @@ async fn bound_intent_resumes_with_hash_checks_only() {
 
 #[tokio::test]
 async fn bound_intent_refuses_each_tampered_input() {
-    let tampers: [&[&'static str]; 5] = [
-        &[
-            "UPDATE local_shared_capture_journal
-           SET snapshot_json = replace(snapshot_json, '\"exported_at\":\"', '\"exported_at\":\"0')",
-        ],
+    let tampers: [&[&'static str]; 7] = [
+        &[INERT_SNAPSHOT_REWRITE],
+        &[INERT_HISTORY_REWRITE],
+        &[INERT_PROVENANCE_REWRITE],
         &[
             "UPDATE local_shared_capture_images SET classification = 'extra_selected'
            WHERE classification = 'current_selected'",
@@ -670,12 +685,14 @@ async fn bound_intent_refuses_each_tampered_input() {
         }
         crate::sync::shared_state::counters::take();
         let error = intent_error_with(&fixture, &mut trusting(&intent)).await;
-        // Capture loading refuses some tampering before the binding is checked.
+        // Capture loading and the source history check refuse some tampering
+        // before the binding is checked.
         assert!(
             [
                 "seed-capture-changed",
                 "local-shared-capture-image-set-mismatch",
                 "local-shared-capture-history-mismatch",
+                "seed-intent-source-changed",
             ]
             .iter()
             .any(|code| error.contains(code)),
@@ -736,8 +753,9 @@ async fn unsupported_receipt_version_fails_without_touching_frozen_bytes() {
         async move {
             let mut conn = database.acquire_reader().await.unwrap();
             let rows: Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
-                "SELECT snapshot_json, frozen_descriptor_commitment, frozen_capture_commitment
-                 FROM local_shared_capture_journal",
+                "SELECT d.snapshot, j.frozen_descriptor_commitment, j.frozen_capture_commitment
+                 FROM local_shared_capture_journal j
+                 JOIN local_shared_capture_documents d USING (candidate_id)",
             )
             .fetch_all(&mut *conn)
             .await
@@ -837,4 +855,35 @@ async fn history_validation_stays_linear_in_provenance() {
         .unwrap();
     let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
     assert!(steps < 8000 * 200, "{steps} VM steps for 8000 changes");
+}
+
+#[tokio::test]
+async fn history_stored_as_legacy_value_text_still_validates() {
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(&root.path().join("seed.sqlite"))
+        .await
+        .unwrap();
+    add_task(&database, "legacy").await;
+    let (_root, database, source, _, _, candidate) = freeze(root, database).await;
+    let mut conn = database.acquire_writer().await.unwrap();
+    let stored: Vec<u8> =
+        sqlx::query_scalar("SELECT source_history FROM local_shared_capture_documents")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    // Older captures stored sorted-key JSON values with parsed payloads.
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&crate::sync::shared_state::unpack_document(&stored).unwrap())
+            .unwrap();
+    assert!(!rows.is_empty());
+    let legacy = serde_json::to_string(&rows).unwrap();
+    assert!(legacy.starts_with(r#"[{"base_version""#), "{legacy}");
+    sqlx::query("UPDATE local_shared_capture_documents SET source_history = ?")
+        .bind(legacy.as_bytes())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    validate_history(&mut conn, &candidate, &source)
+        .await
+        .unwrap();
 }

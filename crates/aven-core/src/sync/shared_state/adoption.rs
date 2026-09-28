@@ -176,38 +176,72 @@ async fn generation(conn: &mut SqliteConnection) -> Result<i64> {
         .context("error seed-generation-invalid")
 }
 
-// Typed values serialize with sorted object keys; payloads are parsed before
-// comparison so historical meaning does not depend on JSON whitespace.
-pub(super) fn history_bytes(
+/// Packs the source history map: changes sorted by ID, each payload embedded
+/// as its JSON text. Readers compare payloads semantically, so historical
+/// meaning does not depend on JSON whitespace.
+pub(super) fn pack_history(
     rows: &[crate::data_safety::export_types::ChangeRow],
-) -> Result<String> {
-    let mut values = rows
+) -> Result<Vec<u8>> {
+    /// A source history row as stored, embedding its payload JSON verbatim.
+    #[derive(Serialize)]
+    struct Stored<'a> {
+        change_id: &'a str,
+        client_id: &'a str,
+        local_seq: i64,
+        entity_type: &'a str,
+        entity_id: &'a str,
+        field: Option<&'a str>,
+        op_type: &'a str,
+        payload: &'a serde_json::value::RawValue,
+        base_version: Option<&'a str>,
+        created_at: &'a str,
+        server_seq: Option<i64>,
+    }
+    let mut stored = rows
         .iter()
         .map(|row| {
-            let mut value = serde_json::to_value(row)?;
-            value["payload"] = serde_json::from_str(&row.payload)?;
-            Ok(value)
+            Ok(Stored {
+                change_id: &row.change_id,
+                client_id: &row.client_id,
+                local_seq: row.local_seq,
+                entity_type: &row.entity_type,
+                entity_id: &row.entity_id,
+                field: row.field.as_deref(),
+                op_type: &row.op_type,
+                payload: serde_json::from_str(&row.payload)?,
+                base_version: row.base_version.as_deref(),
+                created_at: &row.created_at,
+                server_seq: row.server_seq,
+            })
         })
-        .collect::<Result<Vec<serde_json::Value>>>()?;
-    values.sort_by(|a, b| a["change_id"].as_str().cmp(&b["change_id"].as_str()));
-    Ok(serde_json::to_string(&values)?)
+        .collect::<Result<Vec<_>>>()?;
+    stored.sort_by(|a, b| a.change_id.cmp(b.change_id));
+    super::pack_document(&stored)
 }
 
-/// One row of the stored source history map, borrowing its payload text.
+/// One row of the stored source history map, borrowing its text.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceChange<'a> {
-    change_id: String,
-    client_id: String,
+    #[serde(borrow)]
+    change_id: Cow<'a, str>,
+    #[serde(borrow)]
+    client_id: Cow<'a, str>,
     local_seq: i64,
-    entity_type: String,
-    entity_id: String,
-    field: Option<String>,
-    op_type: String,
+    #[serde(borrow)]
+    entity_type: Cow<'a, str>,
+    #[serde(borrow)]
+    entity_id: Cow<'a, str>,
+    #[serde(borrow)]
+    field: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    op_type: Cow<'a, str>,
     #[serde(borrow)]
     payload: &'a serde_json::value::RawValue,
-    base_version: Option<String>,
-    created_at: String,
+    #[serde(borrow)]
+    base_version: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    created_at: Cow<'a, str>,
     server_seq: Option<i64>,
 }
 
@@ -289,12 +323,14 @@ async fn validate_history(
 ) -> Result<[u8; 32]> {
     let (capture_source, history, stored_provenance, captured_generation): (
         Option<Vec<u8>>,
-        Option<String>,
-        Option<String>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
         i64,
     ) = sqlx::query_as(
-        "SELECT source_authority, source_history, source_provenance, sync_generation
-         FROM local_shared_capture_journal WHERE candidate_id = ?",
+        "SELECT j.source_authority, d.source_history, d.source_provenance, j.sync_generation
+         FROM local_shared_capture_journal j
+         JOIN local_shared_capture_documents d USING (candidate_id)
+         WHERE j.candidate_id = ?",
     )
     .bind(candidate)
     .fetch_optional(&mut *conn)
@@ -305,9 +341,11 @@ async fn validate_history(
             && captured_generation == generation(conn).await?,
         "error seed-capture-source-changed"
     );
-    let history = history.context("error seed-capture-incompatible recapture-never-dispatched")?;
-    let stored_provenance =
-        stored_provenance.context("error seed-capture-incompatible recapture-never-dispatched")?;
+    let (Some(stored_history), Some(stored_provenance)) = (history, stored_provenance) else {
+        anyhow::bail!("error seed-capture-incompatible recapture-never-dispatched");
+    };
+    let history = super::unpack_document(&stored_history)?;
+    let provenance = super::unpack_document(&stored_provenance)?;
     let expected: Vec<SourceChange<'_>> =
         serde_json::from_str(&history).context("error seed-history-invalid")?;
     ensure!(
@@ -378,7 +416,7 @@ async fn validate_history(
         source_pending_rank: Option<i64>,
     }
     let source: Vec<Provenance> =
-        serde_json::from_str(&stored_provenance).context("error seed-history-invalid")?;
+        serde_json::from_str(&provenance).context("error seed-history-invalid")?;
     let current: String = sqlx::query_scalar(
         "SELECT json_group_array(json_array(
                     p.change_id, p.source_server_seq, p.source_pending_rank))
@@ -421,15 +459,17 @@ async fn validate_history(
     .await?;
     ensure!(!uncaptured, "error seed-uncaptured-accepted-history");
 
-    Ok(history_digest(&history, &stored_provenance))
+    Ok(history_digest(&stored_history, &stored_provenance))
 }
 
-pub(super) fn history_digest(history: &str, provenance: &str) -> [u8; 32] {
+/// Commits to the stored history and provenance documents as bytes, so any
+/// rewrite of them changes it, even one that decodes to the same text.
+pub(super) fn history_digest(history: &[u8], provenance: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"aven-local-source-history-v1");
     digest.update((history.len() as u64).to_be_bytes());
-    digest.update(history.as_bytes());
-    digest.update(provenance.as_bytes());
+    digest.update(history);
+    digest.update(provenance);
     digest.finalize().into()
 }
 
@@ -439,9 +479,9 @@ pub(super) async fn check_frozen_history(
     conn: &mut SqliteConnection,
     capture: &NeverDispatchedLocalSharedCapture,
 ) -> Result<[u8; 32]> {
-    let (history, provenance): (Option<String>, Option<String>) = sqlx::query_as(
+    let (history, provenance): (Option<Vec<u8>>, Option<Vec<u8>>) = sqlx::query_as(
         "SELECT source_history, source_provenance
-         FROM local_shared_capture_journal WHERE candidate_id = ?",
+         FROM local_shared_capture_documents WHERE candidate_id = ?",
     )
     .bind(capture.candidate_id())
     .fetch_optional(&mut *conn)
@@ -450,8 +490,9 @@ pub(super) async fn check_frozen_history(
     let (Some(history), Some(provenance)) = (history, provenance) else {
         anyhow::bail!("error seed-capture-incompatible recapture-never-dispatched");
     };
+    let text = super::unpack_document(&history)?;
     let expected: Vec<SourceChange<'_>> =
-        serde_json::from_str(&history).context("error seed-history-invalid")?;
+        serde_json::from_str(&text).context("error seed-history-invalid")?;
     let mut frozen = capture
         .capture
         .snapshot

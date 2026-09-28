@@ -802,14 +802,14 @@ async fn mark_capture_images_unavailable(
         load_package(&mut tx, candidate_id).await?.is_none(),
         "error encrypted-local-shared-package-frozen"
     );
-    let snapshot_json: String = sqlx::query_scalar(
-        "SELECT snapshot_json FROM local_shared_capture_journal
-         WHERE singleton = 1 AND candidate_id = ?",
+    let snapshot: Vec<u8> = sqlx::query_scalar(
+        "SELECT snapshot FROM local_shared_capture_documents WHERE candidate_id = ?",
     )
     .bind(candidate_id)
     .fetch_one(&mut *tx)
     .await?;
-    let mut persisted: super::PersistedLocalCapture = serde_json::from_str(&snapshot_json)?;
+    let mut persisted: super::PersistedLocalCapture =
+        serde_json::from_str(&super::unpack_document(&snapshot)?)?;
     for hash in hashes {
         let image = persisted
             .images
@@ -831,14 +831,11 @@ async fn mark_capture_images_unavailable(
             .execute(&mut *tx)
             .await?;
     }
-    sqlx::query(
-        "UPDATE local_shared_capture_journal SET snapshot_json = ?
-         WHERE singleton = 1 AND candidate_id = ?",
-    )
-    .bind(serde_json::to_string(&persisted)?)
-    .bind(candidate_id)
-    .execute(&mut *tx)
-    .await?;
+    sqlx::query("UPDATE local_shared_capture_documents SET snapshot = ? WHERE candidate_id = ?")
+        .bind(super::pack_document(&persisted)?)
+        .bind(candidate_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(())
 }

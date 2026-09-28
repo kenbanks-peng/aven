@@ -1219,7 +1219,7 @@ async fn malformed_persisted_capture_fails_closed() {
         .unwrap();
     {
         let mut conn = database.acquire_writer().await.unwrap();
-        sqlx::query("UPDATE local_shared_capture_journal SET snapshot_json = '{\"version\":999}'")
+        sqlx::query("UPDATE local_shared_capture_documents SET snapshot = '{\"version\":999}'")
             .execute(&mut *conn)
             .await
             .unwrap();
@@ -1372,4 +1372,57 @@ async fn assert_recurrence_replicas_equal(a: &Database, b: &Database) {
         normalized_shared(a.capture_shared_state().await.unwrap()),
         normalized_shared(b.capture_shared_state().await.unwrap())
     );
+}
+
+#[test]
+fn capture_documents_read_back_compressed_or_as_legacy_text() {
+    let value = vec![serde_json::json!({"snapshot": "x"}); 1000];
+    let text = serde_json::to_string(&value).unwrap();
+    let packed = pack_document(&value).unwrap();
+    assert!(packed.len() < text.len());
+    assert_eq!(
+        zstd::zstd_safe::get_frame_content_size(&packed).unwrap(),
+        Some(text.len() as u64)
+    );
+    assert_eq!(unpack_document(&packed).unwrap(), text);
+    // Frames that don't declare their size still decode.
+    let undeclared = zstd::stream::encode_all(text.as_bytes(), 1).unwrap();
+    assert_eq!(
+        zstd::zstd_safe::get_frame_content_size(&undeclared).unwrap(),
+        None
+    );
+    assert_eq!(unpack_document(&undeclared).unwrap(), text);
+    assert_eq!(unpack_document(text.as_bytes()).unwrap(), text);
+    assert!(unpack_document(&packed[..packed.len() - 1]).is_err());
+    assert!(unpack_document(&[0xff]).is_err());
+}
+
+#[tokio::test]
+async fn capture_resumes_from_documents_moved_as_plain_text() {
+    let (_temp, database, workspace) = fresh().await;
+    task(&database, &workspace, "moved").await;
+    let capture = database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    {
+        let mut conn = database.acquire_writer().await.unwrap();
+        let stored: Vec<u8> =
+            sqlx::query_scalar("SELECT snapshot FROM local_shared_capture_documents")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE local_shared_capture_documents SET snapshot = ?")
+            .bind(unpack_document(&stored).unwrap())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let resumed = database
+        .resume_local_shared_state_never_dispatched()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.candidate_id(), capture.candidate_id());
+    assert_ne!(resumed.snapshot_digest, capture.snapshot_digest);
 }

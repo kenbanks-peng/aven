@@ -28,12 +28,12 @@ async fn encrypted_package_round_trips_and_retries_exact_bytes() {
     .fetch_all(&mut *conn)
     .await
     .unwrap();
-    let snapshot_json: String = sqlx::query_scalar(
-        "SELECT snapshot_json FROM local_shared_capture_journal WHERE singleton = 1",
-    )
-    .fetch_one(&mut *conn)
-    .await
-    .unwrap();
+    let snapshot: Vec<u8> =
+        sqlx::query_scalar("SELECT snapshot FROM local_shared_capture_documents")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    let snapshot_json = crate::sync::shared_state::unpack_document(&snapshot).unwrap();
     drop(conn);
     assert!(
         records

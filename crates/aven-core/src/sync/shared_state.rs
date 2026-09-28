@@ -68,7 +68,7 @@ pub struct NeverDispatchedLocalSharedCapture {
     stream_id: String,
     capture: SharedStateCapture,
     images: Vec<PersistedCaptureImage>,
-    /// SHA-256 of the exact stored `snapshot_json` this value was decoded from.
+    /// SHA-256 of the exact stored snapshot document this value was decoded from.
     snapshot_digest: [u8; 32],
 }
 
@@ -161,10 +161,10 @@ impl Database {
 
         let schema_version = db::current_schema_version(&mut tx).await?;
         let tables = data_safety::scan_export_tables(&mut tx).await?;
-        let source_history = adoption::history_bytes(&tables.changes)?;
-        let mut source_provenance = tables.shared_history_provenance.clone();
+        let source_history = adoption::pack_history(&tables.changes)?;
+        let mut source_provenance = tables.shared_history_provenance.iter().collect::<Vec<_>>();
         source_provenance.sort_by(|a, b| a.change_id.cmp(&b.change_id));
-        let source_provenance = serde_json::to_string(&source_provenance)?;
+        let source_provenance = pack_document(&source_provenance)?;
         let image_classes = classify_images(&tables, blob_dir)?;
         let capture = SharedStateCapture::from_tables(schema_version, tables)?;
         let candidate_id = random_cryptographic_id()?;
@@ -208,24 +208,34 @@ impl Database {
                 .collect(),
             snapshot: capture.snapshot,
         };
-        let snapshot_json = serde_json::to_string(&persisted)?;
+        let snapshot = pack_document(&persisted)?;
+        let snapshot_digest = crate::sync::codec::hash(&snapshot);
         sqlx::query(
             "INSERT INTO local_shared_capture_journal(
                  singleton, candidate_id, stream_id, internal_version,
-                 snapshot_json, local_seq_floor, sync_generation, created_at
-             ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+                 local_seq_floor, sync_generation, created_at, source_authority
+             ) VALUES (1, ?, ?, ?, ?, ?, ?,
+                       (SELECT authority FROM local_seed_source WHERE singleton = 1))",
         )
         .bind(&candidate_id)
         .bind(&stream_id)
         .bind(LOCAL_CAPTURE_VERSION)
-        .bind(&snapshot_json)
         .bind(local_seq_floor)
         .bind(sync_generation)
         .bind(&created_at)
         .execute(&mut *tx)
         .await?;
-        sqlx::query("UPDATE local_shared_capture_journal SET source_authority = (SELECT authority FROM local_seed_source WHERE singleton = 1), source_history = ?, source_provenance = ? WHERE singleton = 1")
-            .bind(source_history).bind(source_provenance).execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO local_shared_capture_documents(
+                 candidate_id, snapshot, source_history, source_provenance
+             ) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&candidate_id)
+        .bind(snapshot)
+        .bind(source_history)
+        .bind(source_provenance)
+        .execute(&mut *tx)
+        .await?;
         let provenance_by_id = persisted
             .snapshot
             .tables
@@ -297,7 +307,7 @@ impl Database {
                 snapshot: persisted.snapshot,
             },
             images: persisted.images,
-            snapshot_digest: crate::sync::codec::hash(snapshot_json.as_bytes()),
+            snapshot_digest,
         })
     }
 
@@ -631,6 +641,67 @@ pub(crate) async fn ensure_changes_not_local_capture_protected(
     Ok(())
 }
 
+/// Frame magic of the zstd documents a capture stores. Plain JSON text, which
+/// older captures stored, never starts with it.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Upper bound on one decompressed capture document.
+const DOCUMENT_LIMIT: u64 = 1 << 30;
+
+/// Serializes a capture document straight into a zstd frame, without
+/// materializing its text. A counting pass first gives the frame its declared
+/// size, which lets readers allocate the text once.
+pub(super) fn pack_document<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1)?;
+    encoder.set_pledged_src_size(Some(count.0))?;
+    encoder.include_contentsize(true)?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 16, encoder);
+    serde_json::to_writer(&mut writer, value)?;
+    let encoder = writer.into_inner().map_err(|error| error.into_error())?;
+    Ok(encoder.finish()?)
+}
+
+/// The JSON text of a stored capture document, compressed or not.
+pub(super) fn unpack_document(stored: &[u8]) -> Result<String> {
+    if !stored.starts_with(&ZSTD_MAGIC) {
+        return Ok(std::str::from_utf8(stored)?.to_owned());
+    }
+    // Frames written by `pack_document` declare their size, so the text is
+    // allocated once. A larger actual size fails rather than growing.
+    if let Ok(Some(size)) = zstd::zstd_safe::get_frame_content_size(stored) {
+        ensure!(
+            size <= DOCUMENT_LIMIT,
+            "error local-shared-capture-document-too-large"
+        );
+        let text = zstd::bulk::decompress(stored, usize::try_from(size)?)?;
+        return Ok(String::from_utf8(text)?);
+    }
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(
+            zstd::stream::read::Decoder::new(stored)?,
+            DOCUMENT_LIMIT + 1,
+        ),
+        &mut text,
+    )?;
+    ensure!(
+        text.len() as u64 <= DOCUMENT_LIMIT,
+        "error local-shared-capture-document-too-large"
+    );
+    Ok(String::from_utf8(text)?)
+}
+
 async fn load_persisted_local_capture(
     conn: &mut sqlx::SqliteConnection,
 ) -> Result<Option<NeverDispatchedLocalSharedCapture>> {
@@ -647,15 +718,18 @@ async fn load_persisted_local_capture(
         internal_version == LOCAL_CAPTURE_VERSION,
         "error local-shared-capture-unsupported"
     );
-    let snapshot_json: String = sqlx::query_scalar(
-        "SELECT snapshot_json FROM local_shared_capture_journal WHERE singleton = 1",
+    let snapshot: Vec<u8> = sqlx::query_scalar(
+        "SELECT snapshot FROM local_shared_capture_documents WHERE candidate_id = ?",
     )
+    .bind(&candidate_id)
     .fetch_one(&mut *conn)
     .await?;
     #[cfg(test)]
     counters::snapshot_parse();
-    let persisted: PersistedLocalCapture =
-        serde_json::from_str(&snapshot_json).context("error local-shared-capture-malformed")?;
+    let persisted: PersistedLocalCapture = serde_json::from_str(
+        &unpack_document(&snapshot).context("error local-shared-capture-malformed")?,
+    )
+    .context("error local-shared-capture-malformed")?;
     ensure!(
         persisted.candidate_id == candidate_id && persisted.stream_id == stream_id,
         "error local-shared-capture-encoding-mismatch"
@@ -671,7 +745,7 @@ async fn load_persisted_local_capture(
         stream_id,
         capture,
         images: persisted.images,
-        snapshot_digest: crate::sync::codec::hash(snapshot_json.as_bytes()),
+        snapshot_digest: crate::sync::codec::hash(&snapshot),
     }))
 }
 

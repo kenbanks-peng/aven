@@ -379,3 +379,77 @@ async fn membership_sequence_schema_bounds_match_protocol_limits() {
         );
     }
 }
+
+#[tokio::test]
+async fn capture_documents_migration_moves_documents_out_of_the_journal() {
+    use sqlx::Connection;
+    const DOCUMENTS: i64 = 20260928083339;
+    let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let run = async |conn: &mut sqlx::SqliteConnection, migration: &sqlx::migrate::Migration| {
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    };
+    for migration in MIGRATOR.iter().filter(|m| m.version < DOCUMENTS) {
+        run(&mut conn, migration).await;
+    }
+    sqlx::query(
+        "INSERT INTO local_shared_capture_journal(
+             singleton, candidate_id, stream_id, internal_version, snapshot_json,
+             local_seq_floor, sync_generation, created_at, source_history, source_provenance
+         ) VALUES (1, 'c', 's', 1, '{\"snapshot\":1}', 0, 1, 't', '[\"h\"]', '[\"p\"]')",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    run(
+        &mut conn,
+        MIGRATOR.iter().find(|m| m.version == DOCUMENTS).unwrap(),
+    )
+    .await;
+
+    let moved: (String, String, String, String) = sqlx::query_as(
+        "SELECT candidate_id, snapshot, source_history, source_provenance
+         FROM local_shared_capture_documents",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        moved,
+        (
+            "c".into(),
+            "{\"snapshot\":1}".into(),
+            "[\"h\"]".into(),
+            "[\"p\"]".into()
+        )
+    );
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('local_shared_capture_journal')")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    assert!(
+        !columns
+            .iter()
+            .any(|c| ["snapshot_json", "source_history", "source_provenance"].contains(&c.as_str())),
+        "{columns:?}"
+    );
+
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM local_shared_capture_journal")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_documents")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}

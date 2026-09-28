@@ -212,16 +212,19 @@ impl FrozenIdentity {
             String,
             String,
             Option<Vec<u8>>,
-            String,
+            Vec<u8>,
             i64,
-            Option<String>,
-            Option<String>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
         );
         let (candidate, stream, commitment, snapshot, generation, history, provenance): Row =
             sqlx::query_as(
-                "SELECT candidate_id, stream_id, frozen_descriptor_commitment, snapshot_json,
-                        sync_generation, source_history, source_provenance
-                 FROM local_shared_capture_journal WHERE singleton = 1",
+                "SELECT j.candidate_id, j.stream_id, j.frozen_descriptor_commitment,
+                        d.snapshot, j.sync_generation, d.source_history,
+                        d.source_provenance
+                 FROM local_shared_capture_journal j
+                 JOIN local_shared_capture_documents d USING (candidate_id)
+                 WHERE j.singleton = 1",
             )
             .fetch_optional(&mut *conn)
             .await?
@@ -234,7 +237,7 @@ impl FrozenIdentity {
         };
         let tables = tables_digest(conn, &candidate).await?;
         Ok(Self {
-            snapshot: crate::sync::codec::hash(snapshot.as_bytes()),
+            snapshot: crate::sync::codec::hash(&snapshot),
             history: adoption::history_digest(&history, &provenance),
             candidate,
             stream,
