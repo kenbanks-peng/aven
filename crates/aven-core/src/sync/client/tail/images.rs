@@ -2,12 +2,30 @@ use super::*;
 use crate::sync::encrypted_tail::attachments::{
     self as images, Operation as ImageOperation, Reply as ImageReply, Ticket,
 };
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 pub const IMAGES_PATH: &str = "/e2ee/images/v1";
 
 /// Bounds serial append work in one round while allowing a large offline backlog
 /// to clear well within the drain's round budget.
 const PUSH_LIMIT: usize = 2048;
+
+struct ImageRoundLimits {
+    objects: usize,
+    elapsed: Duration,
+    metadata_pull_skips: usize,
+}
+
+/// A round transfers one image at a time until either bound is reached. A
+/// complete metadata observation may be reused only for this many intervening
+/// image-only rounds before another pull is required.
+const IMAGE_ROUND_LIMITS: ImageRoundLimits = ImageRoundLimits {
+    objects: 16,
+    elapsed: Duration::from_secs(2),
+    metadata_pull_skips: 3,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -45,8 +63,15 @@ pub struct Round {
 
 pub struct DrainSnapshot {
     tail: TailSnapshot,
+    pull: PullFreshness,
     /// Why this drain's withdrawal rotation failed, if it did.
     withdrawal: Option<anyhow::Error>,
+}
+
+#[derive(Default)]
+struct PullFreshness {
+    complete: bool,
+    skipped_rounds: usize,
 }
 impl DrainSnapshot {
     /// The error reported for a drain that ended with publishing blocked.
@@ -69,16 +94,47 @@ async fn validated_tail_inputs(
     Ok(inputs)
 }
 
-#[derive(Default)]
 struct RoundProgress {
     pushes: usize,
     preflight_local_seq: Option<i64>,
     push_complete: bool,
     publishing_blocked: bool,
     page_complete: Option<bool>,
+    pulled: bool,
     image_state: Option<ImageTransfer>,
     selected: bool,
     download: Option<images::Download>,
+    image_started: Instant,
+    image_transfers: usize,
+}
+
+impl Default for RoundProgress {
+    fn default() -> Self {
+        Self {
+            pushes: 0,
+            preflight_local_seq: None,
+            push_complete: false,
+            publishing_blocked: false,
+            page_complete: None,
+            pulled: false,
+            image_state: None,
+            selected: false,
+            download: None,
+            image_started: Instant::now(),
+            image_transfers: 0,
+        }
+    }
+}
+
+impl RoundProgress {
+    fn image_budget_available(&self) -> bool {
+        self.image_transfers < IMAGE_ROUND_LIMITS.objects
+            && self.image_started.elapsed() < IMAGE_ROUND_LIMITS.elapsed
+    }
+
+    fn transferred_image(&mut self) {
+        self.image_transfers += 1;
+    }
 }
 impl Client {
     pub async fn image_exchange(
@@ -120,12 +176,13 @@ impl Client {
             .err();
         Ok(DrainSnapshot {
             tail: validated_tail_inputs(store, db, &self.locator).await?,
+            pull: PullFreshness::default(),
             withdrawal,
         })
     }
-    /// Resolves at most one ordered local head, applies one metadata page and
-    /// downloads at most one image. The caller owns the local blob root;
-    /// committed metadata is independent of image transfer success.
+    /// Resolves ordered local heads, applies at most one metadata page and
+    /// transfers a bounded number of images serially. The caller owns the local
+    /// blob root; committed metadata is independent of image transfer success.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn round(
         &self,
@@ -148,14 +205,17 @@ impl Client {
         }
         let mut progress = RoundProgress::default();
         retry_stale!(
-            self.round_once(&drain.tail, db, blob_dir, &mut progress)
+            self.round_once(&drain.tail, &mut drain.pull, db, blob_dir, &mut progress)
                 .await,
             async {
                 self.enrollment()?
                     .refresh_and_finish_pending_removal(store, db)
                     .await?;
                 drain.tail = validated_tail_inputs(store, db, &self.locator).await?;
+                drain.pull = PullFreshness::default();
                 progress.preflight_local_seq = None;
+                progress.page_complete = None;
+                progress.pulled = false;
                 anyhow::Ok(())
             }
             .await,
@@ -164,6 +224,7 @@ impl Client {
     async fn round_once(
         &self,
         inputs: &TailSnapshot,
+        pull: &mut PullFreshness,
         db: &Database,
         blob_dir: &Path,
         progress: &mut RoundProgress,
@@ -183,9 +244,15 @@ impl Client {
             progress.preflight_local_seq = preflight_local_seq;
             match step {
                 PushStep::Appended => progress.pushes += 1,
-                PushStep::Image(state) => {
-                    progress.image_state = state;
+                PushStep::Image(Some(state)) => {
+                    progress.image_state = Some(state);
                     progress.push_complete = true;
+                }
+                PushStep::Image(None) => {
+                    progress.transferred_image();
+                    if !progress.image_budget_available() {
+                        progress.push_complete = true;
+                    }
                 }
                 PushStep::Empty => progress.push_complete = true,
             }
@@ -193,38 +260,68 @@ impl Client {
         // Reaching the cap completes only this round's push phase. The next
         // bounded round resumes from the next ordered singleton head.
         progress.push_complete = true;
-        let cursor_before_pull = db.encrypted_round_state(a).await?.cursor;
-        if progress.page_complete.is_none() {
+        let state_before_pull = db.encrypted_round_state(a).await?;
+        let cursor_before_pull = state_before_pull.cursor;
+        let image_work_waiting = state_before_pull.upload_pending
+            || state_before_pull
+                .downloads
+                .is_some_and(|downloads| downloads.pending);
+        let may_skip_pull = pull.complete
+            && progress.pushes == 0
+            && image_work_waiting
+            && pull.skipped_rounds < IMAGE_ROUND_LIMITS.metadata_pull_skips;
+        if progress.page_complete.is_none() && !may_skip_pull {
             progress.page_complete = Some(self.pull(a, &inputs.bearer, db).await?);
+            progress.pulled = true;
+            pull.complete = progress.page_complete == Some(true);
+            pull.skipped_rounds = 0;
+        } else if progress.page_complete.is_none() {
+            progress.page_complete = Some(true);
+            pull.skipped_rounds += 1;
         }
         let state = db.encrypted_round_state(a).await?;
-        let images = if state.downloads.is_some() {
-            if !progress.selected {
-                progress.download = db.prepare_encrypted_image_download(a).await?;
-                progress.selected = true;
+        let mut downloaded = None;
+        if progress.image_state.is_none() && state.downloads.is_some() {
+            while progress.image_budget_available() {
+                if !progress.selected {
+                    progress.download = db.prepare_encrypted_image_download(a).await?;
+                    progress.selected = true;
+                }
+                if progress.download.is_none() {
+                    break;
+                }
+                match self
+                    .download_image(a, &inputs.bearer, db, blob_dir, progress.download.as_ref())
+                    .await
+                {
+                    Ok(true) => {
+                        progress.transferred_image();
+                        progress.selected = false;
+                        progress.download = None;
+                    }
+                    Ok(false) => {
+                        downloaded = Some(ImageTransfer::Unavailable);
+                        break;
+                    }
+                    Err(error) if is_stale(&error) => return Err(error),
+                    Err(_) => {
+                        downloaded = Some(ImageTransfer::Failed);
+                        break;
+                    }
+                }
             }
-            match self
-                .download_image(a, &inputs.bearer, db, blob_dir, progress.download.as_ref())
-                .await
-            {
-                Ok(true) => settled(
-                    &db.encrypted_round_state(a).await?,
-                    progress.publishing_blocked,
-                ),
-                Ok(false) => ImageTransfer::Unavailable,
-                Err(error) if is_stale(&error) => return Err(error),
-                Err(_) => ImageTransfer::Failed,
-            }
-        } else {
-            ImageTransfer::Pending
-        };
+        }
+        let final_state = db.encrypted_round_state(a).await?;
+        let images =
+            downloaded.unwrap_or_else(|| settled(&final_state, progress.publishing_blocked));
         Ok(Round {
-            metadata_caught_up: progress.page_complete == Some(true)
-                && (state.idle || progress.publishing_blocked),
+            metadata_caught_up: progress.pulled
+                && progress.page_complete == Some(true)
+                && (final_state.idle || progress.publishing_blocked),
             // A failed push outranks later download outcomes in this round.
             images: progress.image_state.unwrap_or(images),
             sent_changes: progress.pushes,
-            received_changes: state.cursor.saturating_sub(cursor_before_pull) as usize,
+            received_changes: final_state.cursor.saturating_sub(cursor_before_pull) as usize,
             publishing_blocked: progress.publishing_blocked,
         })
     }

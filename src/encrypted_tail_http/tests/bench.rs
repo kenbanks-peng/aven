@@ -4,8 +4,9 @@
 //!
 //! cargo test --lib encrypted_tail_http::tests::bench -- --ignored --nocapture
 //! Throughput sizes: AVEN_BENCH_TASKS (default 2000), AVEN_BENCH_IMAGES
-//! (default 500). Integrity-scan sizes: AVEN_BENCH_EDITS (default 2000),
-//! AVEN_BENCH_ATTACHMENTS (default 500).
+//! (default 500), AVEN_BENCH_IMAGE_BYTES (default tiny fixture), and
+//! AVEN_BENCH_LATENCY_MS (default 0 per request). Integrity-scan sizes:
+//! AVEN_BENCH_EDITS (default 2000), AVEN_BENCH_ATTACHMENTS (default 500).
 use super::*;
 use crate::protected_local_keys::tests::BACKEND_LOADS;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -23,6 +24,10 @@ pub(super) async fn count_http(
     use axum::body::HttpBody;
     HTTP_REQUESTS.fetch_add(1, Relaxed);
     HTTP_REQUEST_BYTES.fetch_add(request.body().size_hint().lower(), Relaxed);
+    let latency_ms = size("AVEN_BENCH_LATENCY_MS", 0);
+    if latency_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(latency_ms as u64)).await;
+    }
     let response = next.run(request).await;
     HTTP_RESPONSE_BYTES.fetch_add(response.body().size_hint().lower(), Relaxed);
     response
@@ -35,10 +40,24 @@ fn size(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn distinct_png(index: usize) -> Vec<u8> {
-    let mut image = ::image::RgbaImage::new(11, 7);
-    for (offset, byte) in image.as_mut().iter_mut().enumerate() {
-        *byte = (offset as u8).wrapping_mul(31);
+fn distinct_png(index: usize, approximate_bytes: usize) -> Vec<u8> {
+    let (width, height) = if approximate_bytes == 0 {
+        (11, 7)
+    } else {
+        let width = 512;
+        let pixels = approximate_bytes.div_ceil(4);
+        (
+            width,
+            u32::try_from(pixels.div_ceil(width as usize)).unwrap(),
+        )
+    };
+    let mut image = ::image::RgbaImage::new(width, height);
+    let mut random = (index as u64).wrapping_add(1);
+    for byte in image.as_mut() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        *byte = random as u8;
     }
     image.as_mut()[..8].copy_from_slice(&(index as u64).to_be_bytes());
     let mut bytes = std::io::Cursor::new(Vec::new());
@@ -195,9 +214,10 @@ async fn idle_drain_makes_only_the_tail_request() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "benchmark"]
 async fn bench_push_and_pull_many_changes_and_images() {
-    let (tasks, images) = (
+    let (tasks, images, image_bytes) = (
         size("AVEN_BENCH_TASKS", 2000),
         size("AVEN_BENCH_IMAGES", 500),
+        size("AVEN_BENCH_IMAGE_BYTES", 0),
     );
     let f = fixture_with(FixtureOptions {
         count_http: true,
@@ -228,7 +248,7 @@ async fn bench_push_and_pull_many_changes_and_images() {
                     filename: Some(format!("bench-{index}.png")),
                     alt_text: None,
                     declared_media_type: None,
-                    bytes: distinct_png(index),
+                    bytes: distinct_png(index, image_bytes),
                     optimization_policy: aven_core::attachments::ImageOptimizationPolicy::Preserve,
                     dedupe_existing: false,
                 },
@@ -237,7 +257,10 @@ async fn bench_push_and_pull_many_changes_and_images() {
             .unwrap();
     }
     let changes = scalar(&f.seed, "SELECT count(*) FROM changes").await - before;
-    println!("workload: tasks={tasks} images={images} changes={changes}");
+    println!(
+        "workload: tasks={tasks} images={images} image_bytes={image_bytes} changes={changes} latency_ms={}",
+        size("AVEN_BENCH_LATENCY_MS", 0)
+    );
     let client = Client::new(&f.origin).unwrap();
     measure_drain(&client, &f.seed_store, &f.seed)
         .await
@@ -290,7 +313,7 @@ async fn bench_attachment_integrity_scan() {
                 filename: Some("attachment-scan.png".into()),
                 alt_text: None,
                 declared_media_type: None,
-                bytes: distinct_png(0),
+                bytes: distinct_png(0, 0),
                 optimization_policy: aven_core::attachments::ImageOptimizationPolicy::Preserve,
                 dedupe_existing: false,
             },

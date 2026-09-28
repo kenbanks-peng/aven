@@ -16,16 +16,25 @@ async fn add_image_with_width(f: &Fixture, width: u32) -> String {
         .unwrap()
         .task;
     drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
+    add_image_to_task(f, &w, &task.id, width).await
+}
+
+async fn add_image_to_task(
+    f: &Fixture,
+    workspace: &aven_core::workspaces::Workspace,
+    task: &aven_core::ids::TaskId,
+    width: u32,
+) -> String {
     let mut bytes = std::io::Cursor::new(Vec::new());
     ::image::DynamicImage::new_rgb8(width, 3)
         .write_to(&mut bytes, ::image::ImageFormat::Png)
         .unwrap();
     f.peer
         .add_task_attachment(
-            &w,
+            workspace,
             &f.root.path().join("peer-blobs"),
             Default::default(),
-            &task.id,
+            task,
             aven_core::operations::AttachmentAddInput {
                 filename: None,
                 alt_text: None,
@@ -41,6 +50,20 @@ async fn add_image_with_width(f: &Fixture, width: u32) -> String {
         .attachment
         .attachment_id
 }
+
+async fn add_image_batch(f: &Fixture, count: usize) {
+    let workspace = f.peer.list_workspaces().await.unwrap().remove(0);
+    let task = f
+        .peer
+        .create_task(&workspace, draft("attachment batch parent"))
+        .await
+        .unwrap()
+        .task;
+    drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
+    for index in 0..count {
+        add_image_to_task(f, &workspace, &task.id, 20 + index as u32).await;
+    }
+}
 fn policy() -> aven_core::attachments::LifecyclePolicy {
     crate::config::AttachmentLifecycleConfig::default().server_policy()
 }
@@ -49,6 +72,14 @@ async fn exec(db: &Database, sql: &str) {
         .execute(&mut *aven_core::test_support::acquire(db).await.unwrap())
         .await
         .unwrap();
+}
+
+async fn task_exists(db: &Database, id: &str) -> bool {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)")
+        .bind(id)
+        .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
+        .await
+        .unwrap()
 }
 async fn declare(
     f: &Fixture,
@@ -460,6 +491,170 @@ async fn pruning_retains_mapping_and_exact_targeted_repair() {
         .await,
         1
     );
+}
+
+#[tokio::test]
+async fn upload_batch_stops_at_first_failure() {
+    let f = fixture().await;
+    converge(&f).await;
+    add_image_batch(&f, 20).await;
+    let before = scalar(
+        &f.server,
+        "SELECT count(*) FROM server_e2ee_image_references WHERE deleted=0",
+    )
+    .await;
+    exec(
+        &f.server,
+        "CREATE TABLE image_puts_before_failure(remaining INTEGER NOT NULL)",
+    )
+    .await;
+    exec(&f.server, "INSERT INTO image_puts_before_failure VALUES(5)").await;
+    exec(
+        &f.server,
+        "CREATE TRIGGER fail_image_put_in_batch BEFORE INSERT ON server_e2ee_image_chunks
+         BEGIN
+           UPDATE image_puts_before_failure SET remaining=remaining-1;
+           SELECT CASE WHEN (SELECT remaining FROM image_puts_before_failure) < 0
+                       THEN RAISE(FAIL,'fault') END;
+         END",
+    )
+    .await;
+
+    let result = Client::new(&f.origin)
+        .unwrap()
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap();
+
+    assert_eq!(result.images, ImageTransfer::Failed);
+    assert_eq!(
+        scalar(
+            &f.server,
+            "SELECT count(*) FROM server_e2ee_image_references WHERE deleted=0"
+        )
+        .await,
+        before + 5
+    );
+    assert_eq!(
+        scalar(
+            &f.peer,
+            "SELECT count(*) FROM changes
+             WHERE op_type='attachment_add' AND server_seq IS NULL"
+        )
+        .await,
+        15
+    );
+}
+
+#[tokio::test]
+async fn download_batch_stops_at_first_failure() {
+    let f = fixture().await;
+    converge(&f).await;
+    add_image_batch(&f, 20).await;
+    let client = Client::new(&f.origin).unwrap();
+    drain(&client, &f.peer_store, &f.peer).await;
+    let failed: Vec<u8> = sqlx::query_scalar(
+        "SELECT object FROM server_e2ee_images
+         WHERE bootstrap IS NULL ORDER BY object LIMIT 1 OFFSET 5",
+    )
+    .fetch_one(&mut *aven_core::test_support::acquire(&f.server).await.unwrap())
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM server_e2ee_image_chunks WHERE object=?")
+        .bind(failed)
+        .execute(&mut *aven_core::test_support::acquire(&f.server).await.unwrap())
+        .await
+        .unwrap();
+
+    let result = client
+        .round(&f.seed_store, &f.seed, f.root.path())
+        .await
+        .unwrap();
+
+    assert_eq!(result.images, ImageTransfer::Unavailable);
+    assert_eq!(
+        f.seed.encrypted_image_downloads_remaining().await.unwrap(),
+        15
+    );
+}
+
+#[tokio::test]
+async fn image_only_round_finishes_with_a_fresh_pull() {
+    let f = fixture().await;
+    converge(&f).await;
+    add_image_batch(&f, 20).await;
+    let client = Client::new(&f.origin).unwrap();
+    drain(&client, &f.peer_store, &f.peer).await;
+    let mut peer_drain = client.start_drain(&f.seed_store, &f.seed).await.unwrap();
+    let first = client
+        .round_in_drain(&f.seed_store, &f.seed, f.root.path(), &mut peer_drain)
+        .await
+        .unwrap();
+    assert_eq!(first.images, ImageTransfer::Pending);
+
+    let workspace = f.peer.list_workspaces().await.unwrap().remove(0);
+    let remote = f
+        .peer
+        .create_task(&workspace, draft("arrived during image-only work"))
+        .await
+        .unwrap()
+        .task;
+    client
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap();
+
+    let image_only = client
+        .round_in_drain(&f.seed_store, &f.seed, f.root.path(), &mut peer_drain)
+        .await
+        .unwrap();
+    assert_eq!(image_only.images, ImageTransfer::Complete);
+    assert!(!image_only.metadata_caught_up);
+    assert!(!task_exists(&f.seed, remote.id.as_str()).await);
+
+    let final_pull = client
+        .round_in_drain(&f.seed_store, &f.seed, f.root.path(), &mut peer_drain)
+        .await
+        .unwrap();
+    assert_eq!(final_pull.images, ImageTransfer::Complete);
+    assert!(final_pull.metadata_caught_up);
+    assert_eq!(title(&f.seed, remote.id.as_str()).await, remote.title);
+}
+
+#[tokio::test]
+async fn metadata_arriving_during_image_only_work_is_pulled_within_the_bound() {
+    let f = fixture().await;
+    converge(&f).await;
+    add_image_batch(&f, 80).await;
+    let client = Client::new(&f.origin).unwrap();
+    drain(&client, &f.peer_store, &f.peer).await;
+    let mut peer_drain = client.start_drain(&f.seed_store, &f.seed).await.unwrap();
+    client
+        .round_in_drain(&f.seed_store, &f.seed, f.root.path(), &mut peer_drain)
+        .await
+        .unwrap();
+
+    let workspace = f.peer.list_workspaces().await.unwrap().remove(0);
+    let remote = f
+        .peer
+        .create_task(&workspace, draft("bounded metadata refresh"))
+        .await
+        .unwrap()
+        .task;
+    client
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap();
+
+    let mut rounds = 0;
+    while !task_exists(&f.seed, remote.id.as_str()).await {
+        client
+            .round_in_drain(&f.seed_store, &f.seed, f.root.path(), &mut peer_drain)
+            .await
+            .unwrap();
+        rounds += 1;
+        assert!(rounds <= 4, "metadata pull bound");
+    }
 }
 
 #[tokio::test]
