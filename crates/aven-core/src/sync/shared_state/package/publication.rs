@@ -755,6 +755,45 @@ pub(crate) fn attachment_index(
     index_from_mappings(&download::MetadataView::from(package), &mappings)
 }
 
+/// Rebuilds the index of an authenticated freeze from its public catalogs and
+/// its recorded `(object ID, sha256)` pairs, without decrypting. Every catalog
+/// object must be recorded exactly once, and nothing else.
+pub(crate) fn index_from_objects(
+    descriptor: &[u8],
+    catalogs: &[Vec<u8>; 3],
+    recorded: &[([u8; 32], String)],
+) -> anyhow::Result<AttachmentIndex> {
+    use anyhow::Context as _;
+    let declaration = staging::DeclarationView::decode(descriptor)?;
+    for (class, bytes) in catalogs.iter().enumerate() {
+        declaration.catalog(class, bytes)?;
+    }
+    let descriptor = Descriptor::decode(descriptor)?;
+    let images = Images::decode(&catalogs[2])?;
+    anyhow::ensure!(
+        recorded.len() == images.objects.len(),
+        "error seed-capture-changed"
+    );
+    let objects = images
+        .objects
+        .into_iter()
+        .map(|image| {
+            let sha256 = recorded
+                .iter()
+                .find(|(id, _)| *id == image.id)
+                .map(|(_, sha256)| sha256.clone())
+                .context("error seed-capture-changed")?;
+            Ok((image, sha256))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(AttachmentIndex {
+        context: descriptor.context(),
+        stream: descriptor.stream,
+        objects,
+        references: images.references,
+    })
+}
+
 fn index_from_mappings(
     metadata: &download::MetadataView<'_>,
     mappings: &[domain::Mapping],

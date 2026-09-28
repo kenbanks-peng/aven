@@ -271,7 +271,7 @@ impl Database {
                 .validate_frozen(tx, existing, capture, context, key, membership_predecessor)
                 .await;
         }
-        persist_package(&mut tx, &package).await?;
+        persist_package(&mut tx, &package, &capture, &attachments).await?;
         let stored = load_package(&mut tx, &candidate_id)
             .await?
             .context("error encrypted-local-shared-package-write-incomplete")?;
@@ -308,7 +308,17 @@ impl Database {
             key,
             membership_predecessor,
         )?;
-        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments).await?;
+        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments)
+            .await
+            .map_err(|error| {
+                if error.to_string() == "error seed-freeze-unsupported" {
+                    anyhow::anyhow!(
+                        "error seed-freeze-unsupported hint=cancel-never-dispatched-capture-and-recapture"
+                    )
+                } else {
+                    error
+                }
+            })?;
         tx.commit().await?;
         Ok((package, proof))
     }
@@ -847,9 +857,13 @@ fn decode_context_id(value: &str, name: &str) -> Result<[u8; 32]> {
         .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-{name}-id-invalid"))
 }
 
+/// Freezes `package`: its bytes, the object ID of each selected image, and
+/// the commitments to the capture it was built from, all under `conn`.
 async fn persist_package(
     conn: &mut sqlx::SqliteConnection,
     package: &EncryptedLocalSharedStatePackage,
+    capture: &NeverDispatchedLocalSharedCapture,
+    attachments: &publication::AttachmentIndex,
 ) -> Result<()> {
     let upload = &package.upload;
     sqlx::query(
@@ -903,7 +917,7 @@ async fn persist_package(
         updated.rows_affected() == 1,
         "error encrypted-local-shared-package-already-frozen"
     );
-    Ok(())
+    super::validated::record_freeze(conn, capture, attachments).await
 }
 
 /// Loads the frozen package and verifies every record against the committed
@@ -999,7 +1013,7 @@ pub(super) async fn load_package(
 mod tests;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod durable_tests;

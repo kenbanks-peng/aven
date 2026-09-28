@@ -60,6 +60,14 @@ impl ProtectedLocalKeyStore {
                 .context("missing source")?,
             &seed,
         )?;
+        let protected = self
+            .load_adoption_record("intent", 65536, true)?
+            .context("missing intent")?;
+        anyhow::ensure!(
+            protected == intent.protected_storage_bytes(),
+            "error seed-protected-intent-mismatch"
+        );
+        proofs.trust_protected(intent);
         let _timer = super::super::bootstrap::StageTimer::start("load_upload");
         database
             .seed_publication_upload(&source, intent, &seed, package.package_key(), proofs)
@@ -245,6 +253,15 @@ impl ProtectedLocalKeyStore {
             protected.is_none() || existing.is_some(),
             "error seed-intent-database-lost"
         );
+        // Only the protected copy may vouch for a freeze; a `preparing`
+        // intent in SQLite alone is authenticated again before promotion.
+        if let Some(bytes) = &protected {
+            proofs.trust_protected(&SeedPublicationIntent::from_protected_storage(
+                bytes,
+                &source,
+                seed.genesis(),
+            )?);
+        }
         let timer = super::super::bootstrap::StageTimer::start("prepare_intent");
         let intent = database
             .prepare_seed_publication_intent_with(&source, &seed, package.package_key(), proofs)
@@ -310,6 +327,7 @@ impl ProtectedLocalKeyStore {
             &source,
             seed.genesis(),
         )?;
+        proofs.trust_protected(&intent);
         let adopted = database
             .adopt_seed_publication(
                 &source,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
-use super::validated::ProofCache;
+use super::validated::{FreezeBinding, ProofCache, VALIDATION_VERSION, ValidatedSeed};
 use super::{NeverDispatchedLocalSharedCapture, package};
 use crate::db::{self, Database};
 use crate::sync::LocalSharedStatePackageKey;
@@ -55,6 +55,10 @@ struct IntentData {
     descriptor: Vec<u8>,
     publication: Vec<u8>,
     history: [u8; 32],
+    /// Absent only in intents written before freezes were bound; those fail
+    /// closed rather than being trusted or re-signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    freeze: Option<FreezeBinding>,
 }
 
 /// Exact local intent, not permission to dispatch or evidence of server acceptance.
@@ -93,6 +97,27 @@ impl SeedPublicationIntent {
     pub fn protected_storage_bytes(&self) -> &[u8] {
         &self.bytes
     }
+    pub(crate) fn freeze_binding(&self) -> Option<FreezeBinding> {
+        self.data.freeze
+    }
+
+    /// Fails unless `proof` is the proof this intent's binding records.
+    fn check_proof(&self, proof: &ValidatedSeed) -> Result<()> {
+        let binding = self.data.freeze.context("error seed-freeze-unsupported")?;
+        ensure!(
+            binding.validation_version == VALIDATION_VERSION,
+            "error seed-intent-receipt-unsupported"
+        );
+        ensure!(
+            proof.identity().candidate() == self.data.candidate
+                && proof.identity().history() == self.data.history
+                && proof.descriptor() == self.data.descriptor
+                && *proof.binding() == binding,
+            "error seed-package-mismatch"
+        );
+        Ok(())
+    }
+
     pub fn descriptor(&self) -> &[u8] {
         &self.data.descriptor
     }
@@ -499,11 +524,7 @@ impl Database {
         );
         let proof = proof.context("error seed-intent-changed")??;
         proof.identity().assert_matches(&mut tx).await?;
-        ensure!(
-            proof.identity().history() == intent.data.history
-                && proof.descriptor() == intent.data.descriptor,
-            "error seed-package-mismatch"
-        );
+        intent.check_proof(proof)?;
         tx.commit().await?;
         // Records stay in SQLite; each is verified against these catalogs as
         // it is read for upload.
@@ -620,12 +641,7 @@ impl Database {
                 );
                 let proof = proof.context("error seed-intent-changed")??;
                 proof.identity().assert_matches(&mut tx).await?;
-                ensure!(
-                    proof.identity().candidate() == intent.data.candidate
-                        && proof.identity().history() == intent.data.history
-                        && proof.descriptor() == intent.data.descriptor,
-                    "error seed-package-mismatch"
-                );
+                intent.check_proof(proof)?;
                 tx.commit().await?;
             }
             return Ok(intent);
@@ -649,6 +665,7 @@ impl Database {
             descriptor: proof.descriptor().to_vec(),
             publication: publication.record().to_vec(),
             history,
+            freeze: Some(*proof.binding()),
         };
         let bytes = serde_json::to_vec(&data)?;
         sqlx::query("INSERT INTO local_seed_publication_intent(singleton, candidate_id, intent, state) VALUES (1, ?, ?, 'preparing')").bind(&data.candidate).bind(&bytes).execute(&mut *tx).await?;
@@ -775,12 +792,7 @@ impl Database {
         );
         let proof = validated.context("error seed-intent-changed")??;
         proof.identity().assert_matches(&mut tx).await?;
-        ensure!(
-            proof.identity().candidate() == intent.data.candidate
-                && proof.identity().history() == intent.data.history
-                && proof.descriptor() == intent.data.descriptor,
-            "error seed-package-mismatch"
-        );
+        intent.check_proof(proof)?;
         adopt_captured_history(&mut tx, &intent.data.candidate, binding.prefix_count).await?;
         crate::epic_membership::recover(&mut tx, true).await?;
         let next = intent

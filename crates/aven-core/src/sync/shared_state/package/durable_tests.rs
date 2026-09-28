@@ -446,19 +446,20 @@ async fn process_freeze_worker() {
             .await
             .unwrap();
     assert!(missing.is_empty());
-    let package = encrypt_package(
+    let (package, attachments) = encrypt_package(
         &capture,
         package_context(),
         &selected,
         &package_key(),
         [7; 32],
     )
-    .unwrap()
-    .0;
+    .unwrap();
     std::fs::write(root.join("fingerprint"), fingerprint(&package)).unwrap();
     let mut conn = database.acquire_writer().await.unwrap();
     let mut tx = db::begin_immediate(&mut conn).await.unwrap();
-    persist_package(&mut tx, &package).await.unwrap();
+    persist_package(&mut tx, &package, &capture, &attachments)
+        .await
+        .unwrap();
     if committed {
         tx.commit().await.unwrap();
     }

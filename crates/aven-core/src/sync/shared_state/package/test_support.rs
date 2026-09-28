@@ -27,7 +27,7 @@ pub(super) fn png_bytes(width: u32, height: u32) -> Vec<u8> {
     bytes.into_inner()
 }
 
-pub(super) async fn source_with_history() -> (tempfile::TempDir, Database, String) {
+pub(crate) async fn source_with_history() -> (tempfile::TempDir, Database, String) {
     let dir = tempfile::tempdir().unwrap();
     let database = Database::open(&dir.path().join("source.sqlite"))
         .await
@@ -71,7 +71,7 @@ pub(super) async fn source_with_history() -> (tempfile::TempDir, Database, Strin
     (dir, database, task.id.to_string())
 }
 
-pub(super) async fn add_selected_images(
+pub(crate) async fn add_selected_images(
     dir: &Path,
     database: &Database,
     task_id: &str,

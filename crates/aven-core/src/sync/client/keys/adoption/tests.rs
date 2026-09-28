@@ -725,6 +725,51 @@ async fn preparing_intent_resumes_exact_bytes_and_missing_sealed_authority_fails
 }
 
 #[tokio::test]
+async fn sqlite_only_preparing_intent_is_authenticated_before_promotion() {
+    use crate::sync::shared_state::counters;
+    for tampered in [false, true] {
+        let (_root, database, store) = local_intent_fixture().await;
+        let package = store.load_required().unwrap();
+        let seed = store.required_seed(&package).unwrap();
+        let source = store
+            .decode_source(
+                &store
+                    .load_adoption_record("source", 104, true)
+                    .unwrap()
+                    .unwrap(),
+                &seed,
+            )
+            .unwrap();
+        database
+            .prepare_seed_publication_intent(&source, &seed, package.package_key())
+            .await
+            .unwrap();
+        assert!(!protected_path(&store, "intent").exists());
+        if tampered {
+            let mut conn = database.acquire_writer().await.unwrap();
+            sqlx::query(
+                "UPDATE local_shared_capture_package_records
+                 SET record = zeroblob(length(record)) WHERE component = 'state'",
+            )
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        }
+        counters::take();
+        let promoted = store.prepare_seed_adoption_intent(&database).await;
+        if tampered {
+            let error = format!("{:#}", promoted.unwrap_err());
+            assert!(error.contains("frozen-records-invalid"), "{error}");
+            assert!(!protected_path(&store, "intent").exists());
+        } else {
+            promoted.unwrap();
+            assert_eq!(counters::take().0, 1);
+            assert!(protected_path(&store, "intent").exists());
+        }
+    }
+}
+
+#[tokio::test]
 async fn cancel_first_cannot_create_protected_intent_and_source_loss_never_regenerates() {
     let (_root, database, store) = local_intent_fixture().await;
     let capture = database
@@ -1432,7 +1477,7 @@ async fn fresh_setup_authenticates_the_frozen_package_once() {
 }
 
 #[tokio::test]
-async fn each_resume_point_authenticates_the_frozen_package_at_most_once() {
+async fn resuming_after_sealing_authenticates_nothing_again() {
     use crate::sync::shared_state::{counters, validated::ProofCache};
     let root = tempfile::tempdir().unwrap();
     let database = Database::open(&root.path().join("client.sqlite"))
@@ -1464,10 +1509,11 @@ async fn each_resume_point_authenticates_the_frozen_package_at_most_once() {
         .await
         .unwrap();
     assert_eq!(counters::take().0, 1);
-    // Interrupted after sealing, then again after uploading.
+    // Interrupted after sealing, then again after uploading: the protected
+    // intent binds the proof, so only hashes are checked.
     assert_eq!(
         resume_passes(&database, &store, &server, None, true).await,
-        1
+        0
     );
     // Interrupted after publication, before adoption.
     let key = store.load_required().unwrap();
@@ -1492,7 +1538,7 @@ async fn each_resume_point_authenticates_the_frozen_package_at_most_once() {
     counters::take();
     assert_eq!(
         resume_passes(&database, &store, &server, None, false).await,
-        1
+        0
     );
     // Already adopted.
     assert_eq!(

@@ -570,3 +570,220 @@ async fn in_process_proof_prepares_intent_without_another_keyed_pass() {
         .unwrap();
     assert_eq!(crate::sync::shared_state::counters::take().0, 0);
 }
+
+/// A frozen capture with history and two selected images.
+async fn image_fixture() -> Fixture {
+    let (root, database, task) = super::super::package::test_support::source_with_history().await;
+    super::super::package::test_support::add_selected_images(root.path(), &database, &task).await;
+    freeze(root, database).await
+}
+
+/// Prepares the intent with one keyed pass and returns it.
+async fn bound_intent(fixture: &Fixture) -> SeedPublicationIntent {
+    let (_, database, source, seed, key, _) = fixture;
+    database
+        .prepare_seed_publication_intent(source, seed, key)
+        .await
+        .unwrap()
+}
+
+/// A cache that trusts `intent` as if read back from protected storage.
+fn trusting(intent: &SeedPublicationIntent) -> ProofCache {
+    let mut proofs = ProofCache::default();
+    proofs.trust_protected(intent);
+    proofs
+}
+
+#[tokio::test]
+async fn bound_intent_resumes_with_hash_checks_only() {
+    let fixture = image_fixture().await;
+    let intent = bound_intent(&fixture).await;
+    let binding = intent.freeze_binding().unwrap();
+    assert_eq!(binding.validation_version, VALIDATION_VERSION);
+    let (_, database, source, seed, key, _) = &fixture;
+    crate::sync::shared_state::counters::take();
+    let resumed = database
+        .prepare_seed_publication_intent_with(source, seed, key, &mut trusting(&intent))
+        .await
+        .unwrap();
+    assert_eq!(
+        resumed.protected_storage_bytes(),
+        intent.protected_storage_bytes()
+    );
+    assert_eq!(crate::sync::shared_state::counters::take().0, 0);
+    // The rebuilt proof carries the same attachment mappings as a keyed pass.
+    let keyed =
+        super::super::validated::ValidatedSeed::load(database, key, seed.genesis().commitment())
+            .await
+            .unwrap();
+    let hashed = super::super::validated::ValidatedSeed::load_from_intent(database, binding)
+        .await
+        .unwrap();
+    let pairs = |proof: &super::super::validated::ValidatedSeed| {
+        proof
+            .attachments()
+            .objects
+            .iter()
+            .map(|(image, sha256)| (image.id, sha256.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pairs(&keyed).len(), 2);
+    assert_eq!(pairs(&keyed), pairs(&hashed));
+    assert_eq!(keyed.binding(), hashed.binding());
+}
+
+#[tokio::test]
+async fn bound_intent_refuses_each_tampered_input() {
+    let tampers: [&[&'static str]; 5] = [
+        &[
+            "UPDATE local_shared_capture_journal
+           SET snapshot_json = replace(snapshot_json, '\"exported_at\":\"', '\"exported_at\":\"0')",
+        ],
+        &[
+            "UPDATE local_shared_capture_images SET classification = 'extra_selected'
+           WHERE classification = 'current_selected'",
+        ],
+        &["UPDATE local_shared_capture_changes SET prefix_rank = prefix_rank + 100000"],
+        &[
+            "UPDATE local_shared_capture_images SET object_id = zeroblob(32)
+           WHERE object_id IS NOT NULL AND sha256 = (SELECT min(sha256)
+               FROM local_shared_capture_images WHERE object_id IS NOT NULL)",
+        ],
+        // Swaps the object IDs of the two selected images.
+        &[
+            "CREATE TEMP TABLE swapped AS SELECT sha256, object_id FROM local_shared_capture_images
+             WHERE object_id IS NOT NULL",
+            "UPDATE local_shared_capture_images SET object_id = (
+                 SELECT object_id FROM swapped
+                 WHERE swapped.sha256 != local_shared_capture_images.sha256)
+             WHERE object_id IS NOT NULL",
+        ],
+    ];
+    for statements in tampers {
+        let fixture = image_fixture().await;
+        let intent = bound_intent(&fixture).await;
+        {
+            let mut conn = fixture.1.acquire_writer().await.unwrap();
+            for statement in statements {
+                sqlx::query(*statement).execute(&mut *conn).await.unwrap();
+            }
+        }
+        crate::sync::shared_state::counters::take();
+        let error = intent_error_with(&fixture, &mut trusting(&intent)).await;
+        // Capture loading refuses some tampering before the binding is checked.
+        assert!(
+            [
+                "seed-capture-changed",
+                "local-shared-capture-image-set-mismatch",
+                "local-shared-capture-history-mismatch",
+            ]
+            .iter()
+            .any(|code| error.contains(code)),
+            "{statements:?}: {error}"
+        );
+        assert_eq!(crate::sync::shared_state::counters::take().0, 0);
+    }
+}
+
+#[tokio::test]
+async fn bound_intent_upload_refuses_a_tampered_record() {
+    let fixture = image_fixture().await;
+    let intent = bound_intent(&fixture).await;
+    let (_, database, source, seed, key, _) = &fixture;
+    database
+        .seal_seed_publication_intent(source, &intent)
+        .await
+        .unwrap();
+    sql(
+        database,
+        "UPDATE local_shared_capture_package_records SET record = zeroblob(length(record))
+         WHERE component = 'image'",
+    )
+    .await;
+    let upload = database
+        .seed_publication_upload(source, &intent, seed, key, &mut trusting(&intent))
+        .await
+        .unwrap()
+        .unwrap();
+    let error = upload.read(database, upload.slots()).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("seed-package-mismatch"),
+        "{error:#}"
+    );
+}
+
+#[tokio::test]
+async fn unsupported_receipt_version_fails_without_touching_frozen_bytes() {
+    let fixture = image_fixture().await;
+    let intent = bound_intent(&fixture).await;
+    let (_, database, source, seed, _, _) = &fixture;
+    let text = String::from_utf8(intent.protected_storage_bytes().to_vec()).unwrap();
+    let future = text.replace("\"validation_version\":1", "\"validation_version\":2");
+    assert_ne!(future, text);
+    {
+        let mut conn = database.acquire_writer().await.unwrap();
+        sqlx::query("UPDATE local_seed_publication_intent SET intent = ?")
+            .bind(future.as_bytes())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let future =
+        SeedPublicationIntent::from_protected_storage(future.as_bytes(), source, seed.genesis())
+            .unwrap();
+    let frozen = |database: &Database| {
+        let database = database.clone();
+        async move {
+            let mut conn = database.acquire_reader().await.unwrap();
+            let rows: Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+                "SELECT snapshot_json, frozen_descriptor_commitment, frozen_capture_commitment
+                 FROM local_shared_capture_journal",
+            )
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+            let records: Vec<Vec<u8>> =
+                sqlx::query_scalar("SELECT record FROM local_shared_capture_package_records")
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap();
+            (rows, records)
+        }
+    };
+    let before = frozen(database).await;
+    let error = intent_error_with(&fixture, &mut trusting(&future)).await;
+    assert!(error.contains("seed-intent-receipt-unsupported"), "{error}");
+    // A keyed pass cannot promote it either.
+    let error = intent_error_with(&fixture, &mut ProofCache::default()).await;
+    assert!(error.contains("seed-intent-receipt-unsupported"), "{error}");
+    assert_eq!(frozen(database).await, before);
+}
+
+#[tokio::test]
+async fn older_freeze_without_commitments_fails_closed() {
+    let fixture = image_fixture().await;
+    sql(
+        &fixture.1,
+        "UPDATE local_shared_capture_journal SET frozen_capture_commitment = NULL",
+    )
+    .await;
+    let error = intent_error(&fixture).await.unwrap();
+    assert!(error.contains("seed-freeze-unsupported"), "{error}");
+    let (root, database, _, seed, key, _) = &fixture;
+    let error = database
+        .package_local_shared_state_never_dispatched(
+            root.path(),
+            seed.genesis().context(),
+            key,
+            seed.genesis().commitment(),
+        )
+        .await
+        .err()
+        .map(|error| format!("{error:#}"))
+        .unwrap();
+    assert!(
+        error
+            .contains("seed-freeze-unsupported hint=cancel-never-dispatched-capture-and-recapture"),
+        "{error}"
+    );
+}
