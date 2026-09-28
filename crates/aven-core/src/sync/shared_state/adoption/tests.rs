@@ -887,3 +887,60 @@ async fn history_stored_as_legacy_value_text_still_validates() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn captured_history_adoption_leaves_rows_already_at_their_rank() {
+    let fixture = history_fixture().await;
+    let mut conn = fixture.1.acquire_writer().await.unwrap();
+    let mut tx = db::begin_immediate(&mut conn).await.unwrap();
+    // Moves one row onto its rank, so rows both at and off their rank remain.
+    let (id, rank): (String, i64) = sqlx::query_as(
+        "SELECT c.change_id, c.prefix_rank FROM local_shared_capture_changes c
+         WHERE NOT EXISTS(SELECT 1 FROM changes WHERE server_seq = c.prefix_rank)
+         ORDER BY c.prefix_rank LIMIT 1",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE changes SET server_seq = ? WHERE change_id = ?")
+        .bind(rank)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE shared_history_provenance SET source_server_seq = ? WHERE change_id = ?")
+        .bind(rank)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE local_shared_capture_changes SET source_server_seq = ? WHERE change_id = ?",
+    )
+    .bind(rank)
+    .bind(&id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    for statement in [
+        "CREATE TEMP TABLE rewritten(change_id TEXT)",
+        "CREATE TEMP TRIGGER record_rewrite AFTER UPDATE ON changes
+         BEGIN INSERT INTO rewritten VALUES (NEW.change_id); END",
+    ] {
+        sqlx::query(statement).execute(&mut *tx).await.unwrap();
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_changes")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    adopt_captured_history(&mut tx, &fixture.5, count as u64)
+        .await
+        .unwrap();
+    let rewritten: Vec<String> = sqlx::query_scalar("SELECT DISTINCT change_id FROM rewritten")
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+    assert!(!rewritten.is_empty());
+    assert!(!rewritten.contains(&id), "{id} was already at rank {rank}");
+    assert!(ranks(&mut tx).await.contains(&(id, Some(rank))));
+}

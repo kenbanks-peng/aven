@@ -555,30 +555,39 @@ async fn adopt_captured_history(
     .execute(&mut *conn)
     .await?;
     // The unique server_seq index requires clearing old ranks before
-    // assigning the new ones.
+    // assigning the new ones. Rows already at their rank, usually most of
+    // them, are left alone: rewriting a change rewrites its whole payload.
     sqlx::query(
-        "UPDATE changes SET server_seq = NULL WHERE change_id IN
-         (SELECT change_id FROM local_shared_capture_changes WHERE candidate_id = ?)",
+        "UPDATE changes SET server_seq = NULL
+         WHERE server_seq IS NOT NULL AND EXISTS(
+             SELECT 1 FROM local_shared_capture_changes c
+             WHERE c.candidate_id = ? AND c.change_id = changes.change_id
+               AND c.prefix_rank != changes.server_seq
+         )",
     )
     .bind(candidate)
     .execute(&mut *conn)
     .await?;
-    let ranked = sqlx::query(
+    sqlx::query(
         "UPDATE changes SET server_seq = (
              SELECT prefix_rank FROM local_shared_capture_changes c
              WHERE c.candidate_id = ?1 AND c.change_id = changes.change_id
          )
-         WHERE change_id IN
+         WHERE server_seq IS NULL AND change_id IN
          (SELECT change_id FROM local_shared_capture_changes WHERE candidate_id = ?1)",
     )
     .bind(candidate)
     .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    ensure!(
-        i64::try_from(ranked)? == captured,
-        "error seed-history-coverage-changed"
-    );
+    .await?;
+    let ranked: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM local_shared_capture_changes c
+         JOIN changes ch ON ch.change_id = c.change_id
+         WHERE c.candidate_id = ? AND ch.server_seq = c.prefix_rank",
+    )
+    .bind(candidate)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(ranked == captured, "error seed-history-coverage-changed");
     Ok(())
 }
 
