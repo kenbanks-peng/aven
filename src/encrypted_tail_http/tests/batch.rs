@@ -3,12 +3,14 @@ use aven_core::sync::encrypted_tail::{BatchOperation, BatchRecord, BatchReply};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod adversarial;
+mod compatibility;
 
 #[derive(Default)]
 struct Traffic {
     legacy: bool,
     lose: AtomicBool,
     fail_lookup: AtomicUsize,
+    feature_refusal: Option<(StatusCode, &'static str)>,
     requests: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
 }
 async fn intercept(
@@ -34,8 +36,13 @@ async fn intercept(
     {
         return http_admission::refusal(StatusCode::REQUEST_TIMEOUT, "encrypted-tail-timeout");
     }
-    if state.legacy && value["operation"] == "Features" {
-        return http_admission::refusal(StatusCode::BAD_REQUEST, "encrypted-tail-malformed");
+    if value["operation"] == "Features" {
+        if let Some((status, code)) = state.feature_refusal {
+            return http_admission::refusal(status, code);
+        }
+        if state.legacy {
+            return http_admission::refusal(StatusCode::BAD_REQUEST, "encrypted-tail-malformed");
+        }
     }
     if state.legacy && path == aven_core::sync::client::tail::BATCH_PATH {
         panic!("legacy server received a batch request");

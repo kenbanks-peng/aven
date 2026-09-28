@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+expected_candidate=2948a456d6e31e5c6d836dabae6518a058b2d9b3
+baseline_revision=a2b7af024cc357483dac0301c38d27297d24ba72
+baseline_server_artifact=/private/tmp/aven-batch-baseline/target/release/deps/aven-51ecc2ffdae0fab4
+baseline_server_sha256=e467fb80a914cbd223a79f52228194485d711dd26349a103d3452b25d1cd9c48
+candidate_revision=$(git -C "$repo_root" rev-parse HEAD)
+if ! git -C "$repo_root" merge-base --is-ancestor \
+    "$expected_candidate" "$candidate_revision"; then
+    printf 'candidate checkout %s does not descend from %s\n' \
+        "$candidate_revision" "$expected_candidate" >&2
+    exit 2
+fi
+candidate_source_paths=(
+    crates/aven-core/migrations/20260928163800_ordered_e2ee_outbox.sql
+    crates/aven-core/src/sync/client/exchange.rs
+    crates/aven-core/src/sync/client/tail.rs
+    crates/aven-core/src/sync/client/tail/images.rs
+    crates/aven-core/src/sync/encrypted_tail.rs
+    crates/aven-core/src/sync/encrypted_tail/attachments/client.rs
+    crates/aven-core/src/sync/encrypted_tail/batch.rs
+    crates/aven-core/src/sync/encrypted_tail/client.rs
+    crates/aven-core/src/sync/encrypted_tail/server.rs
+    src/encrypted_tail_http.rs
+    src/encrypted_tail_http/batch.rs
+    src/encrypted_tail_http/client.rs
+)
+if ! git -C "$repo_root" diff --quiet \
+    "$expected_candidate" "$candidate_revision" -- "${candidate_source_paths[@]}"; then
+    printf 'batch implementation sources differ from %s\n' \
+        "$expected_candidate" >&2
+    exit 2
+fi
+
+for tool in cargo git jq just shasum; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        printf 'required command not found: %s\n' "$tool" >&2
+        exit 2
+    fi
+done
+
+run_suffix=$(date +%H%M%S)
+log_prefix="$repo_root/history/$(date +%F)-batch-compatibility-$run_suffix"
+mkdir -p "$repo_root/history"
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/aven-batch-compatibility.XXXXXX")
+old_dir="$tmp_dir/pre-batch"
+baseline_target_dir="$tmp_dir/pre-batch-target"
+cleanup() {
+    git -C "$repo_root" worktree remove --force "$old_dir" >/dev/null 2>&1 || true
+    rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+patch_blob=$(git -C "$repo_root" hash-object \
+    "$repo_root/scripts/batch-compatibility-prebatch.patch")
+printf 'candidate implementation revision: %s\ncandidate checkout revision: %s\nbaseline revision: %s\nbaseline harness patch blob: %s\n' \
+    "$expected_candidate" "$candidate_revision" "$baseline_revision" "$patch_blob" \
+    | tee "$log_prefix-revisions.log"
+git -C "$repo_root" worktree add --detach "$old_dir" "$baseline_revision" \
+    2>&1 | tee -a "$log_prefix-revisions.log"
+git -C "$old_dir" apply "$repo_root/scripts/batch-compatibility-prebatch.patch"
+
+printf '\ncommand: (cd %q && env SQLX_OFFLINE=true RUST_MIN_STACK=4194304 cargo test --locked --package aven --lib --no-run --target-dir %q --message-format=json)\n' \
+    "$old_dir" "$baseline_target_dir" | tee -a "$log_prefix-revisions.log" >/dev/null
+build_json="$tmp_dir/pre-batch-build.json"
+build_stderr="$log_prefix-pre-batch-build.stderr"
+if (
+    cd "$old_dir"
+    env SQLX_OFFLINE=true RUST_MIN_STACK=4194304 cargo test \
+        --locked --package aven --lib --no-run \
+        --target-dir "$baseline_target_dir" --message-format=json \
+        >"$build_json" 2>"$build_stderr"
+); then
+    printf 'pre-batch build exit status: 0\n' | tee -a "$log_prefix-revisions.log"
+else
+    status=$?
+    printf 'pre-batch build exit status: %s\n' "$status" \
+        | tee -a "$log_prefix-revisions.log"
+    tee -a "$log_prefix-revisions.log" < "$build_stderr"
+    cp "$build_json" "$log_prefix-pre-batch-build.json"
+    exit "$status"
+fi
+cp "$build_json" "$log_prefix-pre-batch-build.json"
+tee -a "$log_prefix-revisions.log" < "$build_stderr"
+prebatch_test_bin=$(jq -r '
+    select(
+        .reason == "compiler-artifact" and
+        .target.name == "aven" and
+        (.target.kind | index("lib") != null) and
+        .executable != null
+    ) | .executable
+' "$build_json" | tail -n 1)
+if [[ -z "$prebatch_test_bin" || ! -x "$prebatch_test_bin" ]]; then
+    printf 'could not find the pre-batch library test executable in %s\n' \
+        "$log_prefix-pre-batch-build.json" >&2
+    exit 1
+fi
+built_prebatch_test_bin=$prebatch_test_bin
+prebatch_test_bin="$tmp_dir/pre-batch-a2b7af02-test-binary"
+cp "$built_prebatch_test_bin" "$prebatch_test_bin"
+chmod u+x "$prebatch_test_bin"
+printf 'pre-batch client test executable: %s\n' "$prebatch_test_bin" \
+    | tee -a "$log_prefix-revisions.log"
+printf 'pre-batch client SHA-256: %s\n' \
+    "$(shasum -a 256 "$prebatch_test_bin" | awk '{print $1}')" \
+    | tee -a "$log_prefix-revisions.log"
+server_sha256=''
+if [[ -x "$baseline_server_artifact" ]]; then
+    server_sha256=$(shasum -a 256 "$baseline_server_artifact" | awk '{print $1}')
+fi
+if [[ "$server_sha256" == "$baseline_server_sha256" ]]; then
+    prebatch_server_test_bin="$tmp_dir/pre-batch-a2b7af02-server-binary"
+    cp "$baseline_server_artifact" "$prebatch_server_test_bin"
+    chmod u+x "$prebatch_server_test_bin"
+    server_source='reused recorded a2b7af02 release test artifact'
+else
+    prebatch_server_test_bin="$prebatch_test_bin"
+    server_source='pinned-source test binary built above'
+fi
+printf 'pre-batch server test executable: %s (%s)\n' \
+    "$prebatch_server_test_bin" "$server_source" \
+    | tee -a "$log_prefix-revisions.log"
+printf 'pre-batch server SHA-256: %s\n' \
+    "$(shasum -a 256 "$prebatch_server_test_bin" | awk '{print $1}')" \
+    | tee -a "$log_prefix-revisions.log"
+
+printf '\ncommand: env SQLX_OFFLINE=true RUST_MIN_STACK=4194304 AVEN_BATCH_PREBATCH_CLIENT_TEST_BIN=%q AVEN_BATCH_PREBATCH_SERVER_TEST_BIN=%q AVEN_BATCH_PREBATCH_REVISION=%q just _test --package aven --lib %q --run-ignored all\n' \
+    "$prebatch_test_bin" "$prebatch_server_test_bin" "$baseline_revision" \
+    'encrypted_tail_http::tests::batch::compatibility::' \
+    | tee -a "$log_prefix-revisions.log"
+test_log="$log_prefix-candidate-tests.log"
+if env SQLX_OFFLINE=true RUST_MIN_STACK=4194304 \
+    AVEN_BATCH_PREBATCH_CLIENT_TEST_BIN="$prebatch_test_bin" \
+    AVEN_BATCH_PREBATCH_SERVER_TEST_BIN="$prebatch_server_test_bin" \
+    AVEN_BATCH_PREBATCH_REVISION="$baseline_revision" \
+    just _test --package aven --lib \
+        'encrypted_tail_http::tests::batch::compatibility::' \
+        --run-ignored all 2>&1 | tee "$test_log"; then
+    if ! grep -Eq 'Starting [1-9][0-9]* tests? across' "$test_log"; then
+        printf 'candidate compatibility tests selected no tests\n' \
+            | tee -a "$log_prefix-revisions.log" >&2
+        exit 1
+    fi
+    printf 'candidate compatibility tests exit status: 0\n' \
+        | tee -a "$log_prefix-revisions.log"
+else
+    status=$?
+    printf 'candidate compatibility tests exit status: %s\n' "$status" \
+        | tee -a "$log_prefix-revisions.log"
+    exit "$status"
+fi
+printf 'full logs: %s-*\n' "$log_prefix" | tee -a "$log_prefix-revisions.log"
