@@ -1,18 +1,63 @@
 use super::*;
 use crate::sync::{LocalSharedStatePackageContext, LocalSharedStatePackageKey};
 
-async fn fixture() -> (
+type Fixture = (
     tempfile::TempDir,
     Database,
     SeedSourceAuthority,
     SeedAuthority,
     LocalSharedStatePackageKey,
     String,
-) {
+);
+
+async fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let database = Database::open(&root.path().join("seed.sqlite"))
         .await
         .unwrap();
+    freeze(root, database).await
+}
+
+async fn add_task(database: &Database, title: &str) {
+    let workspace = database.list_workspaces().await.unwrap().remove(0);
+    database
+        .create_task(
+            &workspace,
+            crate::operations::TaskDraft {
+                title: title.into(),
+                description: String::new(),
+                project: Some("app".into()),
+                status: "todo".into(),
+                priority: "none".into(),
+                source: crate::choices::TaskSource::Cli,
+                labels: vec![],
+                metadata: vec![],
+                available_at: None,
+                due_on: None,
+                is_epic: false,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// A frozen capture with accepted, provenance-carrying and pending history.
+async fn history_fixture() -> Fixture {
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(&root.path().join("seed.sqlite"))
+        .await
+        .unwrap();
+    add_task(&database, "one").await;
+    add_task(&database, "two").await;
+    {
+        let mut conn = database.acquire_writer().await.unwrap();
+        sqlx::query("UPDATE changes SET server_seq = local_seq * 3 WHERE change_id IN (SELECT change_id FROM changes ORDER BY local_seq LIMIT 3)").execute(&mut *conn).await.unwrap();
+        sqlx::query("INSERT INTO shared_history_provenance(change_id, source_server_seq, source_pending_rank) SELECT change_id, 999, NULL FROM changes ORDER BY local_seq LIMIT 1").execute(&mut *conn).await.unwrap();
+    }
+    freeze(root, database).await
+}
+
+async fn freeze(root: tempfile::TempDir, database: Database) -> Fixture {
     let key = LocalSharedStatePackageKey::new([7; 32]);
     let context = LocalSharedStatePackageContext {
         vault_id: [8; 32],
@@ -194,4 +239,147 @@ async fn lost_intent_row_does_not_restore_local_cancellation_authority() {
             .unwrap(),
         1
     );
+}
+
+async fn sql(database: &Database, statement: &'static str) {
+    let mut conn = database.acquire_writer().await.unwrap();
+    sqlx::query(statement).execute(&mut *conn).await.unwrap();
+}
+
+async fn intent_error(fixture: &Fixture) -> Option<String> {
+    let (_, database, source, seed, key, _) = fixture;
+    database
+        .prepare_seed_publication_intent(source, seed, key)
+        .await
+        .err()
+        .map(|error| format!("{error:#}"))
+}
+
+#[tokio::test]
+async fn history_validation_accepts_later_pending_edits() {
+    let fixture = history_fixture().await;
+    add_task(&fixture.1, "after capture").await;
+    assert_eq!(intent_error(&fixture).await, None);
+}
+
+#[tokio::test]
+async fn history_validation_compares_payloads_semantically() {
+    let fixture = history_fixture().await;
+    let mut conn = fixture.1.acquire_writer().await.unwrap();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT change_id, payload FROM changes WHERE payload LIKE '{%'")
+            .fetch_all(&mut *conn)
+            .await
+            .unwrap();
+    let mut reordered = 0;
+    for (change_id, payload) in rows {
+        let serde_json::Value::Object(map) = serde_json::from_str(&payload).unwrap() else {
+            continue;
+        };
+        if map.len() < 2 {
+            continue;
+        }
+        let entries = map
+            .iter()
+            .rev()
+            .map(|(key, value)| format!("{} : {}", serde_json::to_string(key).unwrap(), value))
+            .collect::<Vec<_>>();
+        let rewritten = format!("{{ {} }}", entries.join(" ,\n "));
+        assert_ne!(rewritten, payload);
+        sqlx::query("UPDATE changes SET payload = ? WHERE change_id = ?")
+            .bind(rewritten)
+            .bind(change_id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        reordered += 1;
+    }
+    drop(conn);
+    assert!(reordered > 0);
+    assert_eq!(intent_error(&fixture).await, None);
+}
+
+#[tokio::test]
+async fn history_validation_refuses_semantic_payload_change() {
+    let fixture = history_fixture().await;
+    sql(
+        &fixture.1,
+        "UPDATE changes SET payload = json_set(payload, '$.injected', 1)
+         WHERE change_id = (SELECT change_id FROM changes WHERE payload LIKE '{%' LIMIT 1)",
+    )
+    .await;
+    let error = intent_error(&fixture).await.unwrap();
+    assert!(error.contains("seed-captured-history-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn history_validation_refuses_changed_original_sequence() {
+    let fixture = history_fixture().await;
+    sql(
+        &fixture.1,
+        "UPDATE changes SET server_seq = server_seq + 100000
+         WHERE change_id = (SELECT change_id FROM changes WHERE server_seq IS NOT NULL LIMIT 1)",
+    )
+    .await;
+    let error = intent_error(&fixture).await.unwrap();
+    assert!(error.contains("seed-captured-history-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn history_validation_refuses_missing_captured_row() {
+    let fixture = history_fixture().await;
+    sql(
+        &fixture.1,
+        "DELETE FROM changes WHERE change_id = (SELECT max(change_id) FROM changes)",
+    )
+    .await;
+    let error = intent_error(&fixture).await.unwrap();
+    assert!(error.contains("seed-captured-history-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn history_validation_refuses_uncaptured_accepted_history() {
+    let fixture = history_fixture().await;
+    add_task(&fixture.1, "after capture").await;
+    sql(
+        &fixture.1,
+        "UPDATE changes SET server_seq = 500000 WHERE change_id NOT IN
+         (SELECT change_id FROM local_shared_capture_changes) AND change_id =
+         (SELECT max(change_id) FROM changes WHERE change_id NOT IN
+          (SELECT change_id FROM local_shared_capture_changes))",
+    )
+    .await;
+    let error = intent_error(&fixture).await.unwrap();
+    assert!(
+        error.contains("seed-uncaptured-accepted-history"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn history_validation_refuses_changed_provenance() {
+    for statement in [
+        "UPDATE shared_history_provenance SET source_server_seq = 998",
+        "DELETE FROM shared_history_provenance",
+        "INSERT INTO shared_history_provenance(change_id, source_server_seq, source_pending_rank)
+         SELECT change_id, NULL, 7 FROM changes WHERE change_id NOT IN
+         (SELECT change_id FROM shared_history_provenance) LIMIT 1",
+    ] {
+        let fixture = history_fixture().await;
+        sql(&fixture.1, statement).await;
+        let error = intent_error(&fixture).await.unwrap();
+        assert!(error.contains("seed-source-provenance-changed"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn history_validation_refuses_changed_capture_map() {
+    let fixture = history_fixture().await;
+    sql(
+        &fixture.1,
+        "DELETE FROM local_shared_capture_changes WHERE change_id =
+         (SELECT max(change_id) FROM local_shared_capture_changes)",
+    )
+    .await;
+    assert!(intent_error(&fixture).await.is_some());
 }

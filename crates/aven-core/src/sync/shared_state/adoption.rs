@@ -176,108 +176,203 @@ pub(super) fn history_bytes(
     Ok(serde_json::to_string(&values)?)
 }
 
-async fn load_history_tables(
-    conn: &mut SqliteConnection,
-) -> Result<(
-    Vec<crate::data_safety::ChangeRow>,
-    Vec<crate::data_safety::SharedHistoryProvenanceRow>,
-)> {
-    let changes = sqlx::query_as(
-        "SELECT change_id, client_id, local_seq, entity_type, entity_id, field,
-                op_type, payload, base_version, created_at, server_seq
-         FROM changes",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    let provenance = sqlx::query_as(
-        "SELECT change_id, source_server_seq, source_pending_rank
-         FROM shared_history_provenance",
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-    Ok((changes, provenance))
+/// One row of the stored source history map, borrowing its payload text.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceChange<'a> {
+    change_id: String,
+    client_id: String,
+    local_seq: i64,
+    entity_type: String,
+    entity_id: String,
+    field: Option<String>,
+    op_type: String,
+    #[serde(borrow)]
+    payload: &'a serde_json::value::RawValue,
+    base_version: Option<String>,
+    created_at: String,
+    server_seq: Option<i64>,
 }
+
+impl SourceChange<'_> {
+    /// Compares every field, the original server sequence only when asked.
+    /// Payloads match byte-for-byte first and semantically otherwise.
+    fn matches(&self, row: &crate::data_safety::ChangeRow, with_server_seq: bool) -> Result<bool> {
+        if self.change_id != row.change_id
+            || self.client_id != row.client_id
+            || self.local_seq != row.local_seq
+            || self.entity_type != row.entity_type
+            || self.entity_id != row.entity_id
+            || self.field != row.field
+            || self.op_type != row.op_type
+            || self.base_version != row.base_version
+            || self.created_at != row.created_at
+            || (with_server_seq && self.server_seq != row.server_seq)
+        {
+            return Ok(false);
+        }
+        let source = self.payload.get();
+        if source == row.payload {
+            return Ok(true);
+        }
+        Ok(serde_json::from_str::<serde_json::Value>(source)?
+            == serde_json::from_str::<serde_json::Value>(&row.payload)?)
+    }
+}
+
+const HISTORY_PAGE: i64 = 1024;
 
 async fn validate_history(
     conn: &mut SqliteConnection,
     candidate: &str,
     source: &SeedSourceAuthority,
 ) -> Result<[u8; 32]> {
-    let (capture_source, history, captured_generation): (Option<Vec<u8>>, Option<String>, i64) = sqlx::query_as("SELECT source_authority, source_history, sync_generation FROM local_shared_capture_journal WHERE candidate_id = ?").bind(candidate).fetch_optional(&mut *conn).await?.context("error seed-capture-missing")?;
+    let (capture_source, history, stored_provenance, captured_generation): (
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT source_authority, source_history, source_provenance, sync_generation
+         FROM local_shared_capture_journal WHERE candidate_id = ?",
+    )
+    .bind(candidate)
+    .fetch_optional(&mut *conn)
+    .await?
+    .context("error seed-capture-missing")?;
     ensure!(
         capture_source.as_deref() == Some(source.0.as_slice())
             && captured_generation == generation(conn).await?,
         "error seed-capture-source-changed"
     );
     let history = history.context("error seed-capture-incompatible recapture-never-dispatched")?;
-    let expected: Vec<serde_json::Value> = serde_json::from_str(&history)?;
+    let stored_provenance =
+        stored_provenance.context("error seed-capture-incompatible recapture-never-dispatched")?;
+    let expected: Vec<SourceChange<'_>> =
+        serde_json::from_str(&history).context("error seed-history-invalid")?;
+    ensure!(
+        expected
+            .windows(2)
+            .all(|pair| pair[0].change_id < pair[1].change_id),
+        "error seed-history-invalid"
+    );
+
     let capture = load_persisted_local_capture(conn)
         .await?
         .context("error seed-capture-missing")?;
-    let frozen: Vec<serde_json::Value> =
-        serde_json::from_str(&history_bytes(&capture.capture.snapshot.tables.changes)?)?;
-    let without_rank = |rows: &[serde_json::Value]| {
-        rows.iter()
-            .map(|row| {
-                let mut row = row.clone();
-                if let Some(object) = row.as_object_mut() {
-                    object.remove("server_seq");
-                }
-                row
-            })
-            .collect::<Vec<_>>()
-    };
+    let mut frozen = capture
+        .capture
+        .snapshot
+        .tables
+        .changes
+        .iter()
+        .collect::<Vec<_>>();
+    frozen.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     ensure!(
-        without_rank(&expected) == without_rank(&frozen),
+        frozen.len() == expected.len(),
         "error seed-captured-history-map-mismatch"
     );
-    let (changes, provenance) = load_history_tables(conn).await?;
-    let stored_provenance: String = sqlx::query_scalar(
-        "SELECT source_provenance FROM local_shared_capture_journal WHERE candidate_id = ?",
+    for (source_row, frozen_row) in expected.iter().zip(&frozen) {
+        ensure!(
+            source_row.matches(frozen_row, false)?,
+            "error seed-captured-history-map-mismatch"
+        );
+    }
+    drop(frozen);
+    drop(capture);
+
+    let captured: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM local_shared_capture_changes WHERE candidate_id = ?",
     )
     .bind(candidate)
     .fetch_one(&mut *conn)
     .await?;
-    let expected_provenance: Vec<crate::data_safety::SharedHistoryProvenanceRow> =
-        serde_json::from_str(&stored_provenance)?;
-    let captured_ids = expected
-        .iter()
-        .filter_map(|v| v["change_id"].as_str())
-        .collect::<std::collections::HashSet<_>>();
-    let mut current_provenance = provenance
-        .iter()
-        .filter(|p| captured_ids.contains(p.change_id.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    current_provenance.sort_by(|a, b| a.change_id.cmp(&b.change_id));
     ensure!(
-        current_provenance == expected_provenance,
-        "error seed-source-provenance-changed"
+        usize::try_from(captured)? == expected.len(),
+        "error seed-captured-history-map-mismatch"
     );
-    let current: Vec<serde_json::Value> = serde_json::from_str(&history_bytes(&changes)?)?;
-    let current = current
-        .into_iter()
-        .map(|v| (v["change_id"].as_str().unwrap_or_default().to_string(), v))
-        .collect::<std::collections::HashMap<_, _>>();
-    for row in &expected {
-        let id = row["change_id"]
-            .as_str()
-            .context("error seed-history-invalid")?;
-        ensure!(
-            current.get(id) == Some(row),
-            "error seed-captured-history-changed"
-        );
+    // Captured IDs are exactly the source IDs, so an ordered walk of the live
+    // rows joined to them must meet every source row once, in the same order.
+    let mut pending = expected.iter();
+    let mut after = String::new();
+    loop {
+        let page: Vec<crate::data_safety::ChangeRow> = sqlx::query_as(
+            "SELECT ch.change_id, ch.client_id, ch.local_seq, ch.entity_type, ch.entity_id,
+                    ch.field, ch.op_type, ch.payload, ch.base_version, ch.created_at,
+                    ch.server_seq
+             FROM local_shared_capture_changes c
+             JOIN changes ch ON ch.change_id = c.change_id
+             WHERE c.candidate_id = ? AND c.change_id > ?
+             ORDER BY c.change_id LIMIT ?",
+        )
+        .bind(candidate)
+        .bind(&after)
+        .bind(HISTORY_PAGE)
+        .fetch_all(&mut *conn)
+        .await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.change_id.clone();
+        for row in &page {
+            let source_row = pending
+                .next()
+                .context("error seed-captured-history-changed")?;
+            ensure!(
+                source_row.matches(row, true)?,
+                "error seed-captured-history-changed"
+            );
+        }
     }
-    let ids = expected
-        .iter()
-        .filter_map(|v| v["change_id"].as_str())
-        .collect::<std::collections::HashSet<_>>();
     ensure!(
-        current
-            .iter()
-            .all(|(id, row)| row["server_seq"].is_null() || ids.contains(id.as_str())),
-        "error seed-uncaptured-accepted-history"
+        pending.next().is_none(),
+        "error seed-captured-history-changed"
     );
+
+    let provenance_changed: bool = sqlx::query_scalar(
+        "WITH source(change_id, server_seq, pending_rank) AS (
+             SELECT json_extract(value, '$.change_id'),
+                    json_extract(value, '$.source_server_seq'),
+                    json_extract(value, '$.source_pending_rank')
+             FROM json_each(?2)
+         )
+         SELECT EXISTS(
+             SELECT 1 FROM shared_history_provenance p
+             JOIN local_shared_capture_changes c
+               ON c.candidate_id = ?1 AND c.change_id = p.change_id
+             LEFT JOIN source s ON s.change_id = p.change_id
+             WHERE s.change_id IS NULL
+                OR s.server_seq IS NOT p.source_server_seq
+                OR s.pending_rank IS NOT p.source_pending_rank
+         ) OR EXISTS(
+             SELECT 1 FROM source s
+             LEFT JOIN shared_history_provenance p ON p.change_id = s.change_id
+             LEFT JOIN local_shared_capture_changes c
+               ON c.candidate_id = ?1 AND c.change_id = s.change_id
+             WHERE p.change_id IS NULL OR c.change_id IS NULL
+                OR s.server_seq IS NOT p.source_server_seq
+                OR s.pending_rank IS NOT p.source_pending_rank
+         )",
+    )
+    .bind(candidate)
+    .bind(&stored_provenance)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(!provenance_changed, "error seed-source-provenance-changed");
+
+    let uncaptured: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM changes ch
+             WHERE ch.server_seq IS NOT NULL
+               AND NOT EXISTS(SELECT 1 FROM local_shared_capture_changes c
+                              WHERE c.candidate_id = ? AND c.change_id = ch.change_id)
+         )",
+    )
+    .bind(candidate)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(!uncaptured, "error seed-uncaptured-accepted-history");
+
     let mut digest = Sha256::new();
     digest.update(b"aven-local-source-history-v1");
     digest.update((history.len() as u64).to_be_bytes());
