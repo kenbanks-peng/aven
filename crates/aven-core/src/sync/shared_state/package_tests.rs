@@ -884,3 +884,51 @@ fn artifact_writer_encrypts_pieces_across_chunk_boundaries() {
     let mut undeclared = writer();
     assert!(undeclared.write(&[0]).is_err());
 }
+
+#[test]
+fn artifact_reader_authenticates_one_chunk_at_a_time() {
+    let context = package_context();
+    let (stream, artifact_id, key) = ([0x41; 32], [0x42; 32], [0x43; 32]);
+    let total = 2 * CHUNK_PLAINTEXT_BYTES + 5;
+    let plaintext = (0..total).map(|i| (i % 253) as u8).collect::<Vec<_>>();
+    let artifact = encrypt_artifact(&plaintext, context, stream, artifact_id, 2, 1, &key).unwrap();
+    let reader = |artifact| {
+        ArtifactReader::new(artifact, context, stream, artifact_id, 2, 1, &key, total).unwrap()
+    };
+
+    let mut whole = reader(&artifact);
+    let mut read = Vec::new();
+    loop {
+        assert_eq!(whole.remaining(), (total - read.len()) as u64);
+        let piece = whole.take(100_003).unwrap();
+        if piece.is_empty() {
+            break;
+        }
+        assert!(piece.len() <= 100_003);
+        read.extend_from_slice(piece);
+    }
+    assert_eq!(read, plaintext);
+    assert!(whole.finish().is_ok());
+
+    let mut partial = reader(&artifact);
+    partial.take(usize::MAX).unwrap();
+    assert!(partial.finish().is_err());
+
+    // A forged middle chunk with consistent commitments is only refused when
+    // it is reached, after the first chunk's plaintext was handed out.
+    let mut forged = artifact.clone();
+    let record = forged.chunks[1].record.to_mut();
+    let last = record.len() - 1;
+    record[last] ^= 1;
+    forged.chunks[1].record_commitment = codec::hash(&forged.chunks[1].record);
+    forged.aggregate_commitment = aggregate_commitment(&forged.chunks);
+    let mut tampered = reader(&forged);
+    assert_eq!(
+        tampered.take(usize::MAX).unwrap(),
+        &plaintext[..CHUNK_PLAINTEXT_BYTES]
+    );
+    assert!(tampered.take(usize::MAX).is_err());
+    assert!(
+        ArtifactReader::new(&forged, context, stream, artifact_id, 2, 1, &key, total - 1).is_err()
+    );
+}

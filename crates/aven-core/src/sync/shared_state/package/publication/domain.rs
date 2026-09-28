@@ -288,11 +288,18 @@ pub(super) type Stats = [(u64, u64); SECTIONS];
 // null), no whitespace, and serde_json string/integer encoding. Re-encoding
 // rejects alternate encodings, unknown/duplicate fields and omitted nulls.
 fn payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
-    struct Bounded {
-        bytes: Vec<u8>,
+    let mut bytes = Vec::new();
+    payload_into(&mut bytes, value)?;
+    Ok(bytes)
+}
+
+/// [`payload`] into `bytes`, replacing its contents but keeping its capacity.
+fn payload_into<T: Serialize>(bytes: &mut Vec<u8>, value: &T) -> Result<()> {
+    struct Bounded<'a> {
+        bytes: &'a mut Vec<u8>,
         refused: bool,
     }
-    impl std::io::Write for Bounded {
+    impl std::io::Write for Bounded<'_> {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
             if self
                 .bytes
@@ -311,8 +318,9 @@ fn payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
             Ok(())
         }
     }
+    bytes.clear();
     let mut writer = Bounded {
-        bytes: Vec::new(),
+        bytes,
         refused: false,
     };
     serde_json::to_writer(&mut writer, value).map_err(|_| {
@@ -321,8 +329,7 @@ fn payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
         } else {
             Error::Invalid
         }
-    })?;
-    Ok(writer.bytes)
+    })
 }
 
 /// Where [`encode_into`] writes the domain bytes.
@@ -345,48 +352,13 @@ impl Out for Vec<u8> {
     }
 }
 
-/// Compares the encoding with `expected` as it is produced, without
-/// materializing a second copy.
-pub(super) struct Matcher<'a> {
-    expected: &'a [u8],
-    written: usize,
-    equal: bool,
-}
-
-impl<'a> Matcher<'a> {
-    pub(super) fn new(expected: &'a [u8]) -> Self {
-        Self {
-            expected,
-            written: 0,
-            equal: true,
-        }
-    }
-
-    /// Whether the whole encoding equalled `expected`.
-    pub(super) fn matched(&self) -> bool {
-        self.equal && self.written == self.expected.len()
-    }
-}
-
-impl Out for Matcher<'_> {
-    fn begin(&mut self, total: usize) {
-        self.equal &= total == self.expected.len();
-    }
-    fn len(&self) -> usize {
-        self.written
-    }
-    fn put(&mut self, bytes: &[u8]) {
-        let end = self.written + bytes.len();
-        self.equal &= self.expected.get(self.written..end) == Some(bytes);
-        self.written = end;
-    }
-}
-
 /// Every section's sorted rows, gathered before any byte is written so the
-/// encoding's exact length is known up front.
+/// encoding's exact length is known up front. Each row is held at its exact
+/// size.
 struct Sections {
     total: u64,
-    rows: Vec<Vec<Vec<u8>>>,
+    rows: Vec<Vec<Box<[u8]>>>,
+    scratch: Vec<u8>,
 }
 
 fn section<T: Serialize>(sections: &mut Sections, kind: usize, values: &[T]) -> Result<()> {
@@ -395,10 +367,10 @@ fn section<T: Serialize>(sections: &mut Sections, kind: usize, values: &[T]) -> 
     let mut rows = Vec::with_capacity(values.len());
     let mut total = add(sections.total, 10)?;
     for value in values {
-        let row = payload(value)?;
-        total = add(total, add(8, number(row.len())?)?)?;
+        payload_into(&mut sections.scratch, value)?;
+        total = add(total, add(8, number(sections.scratch.len())?)?)?;
         bound(total, STATE_LIMIT)?;
-        rows.push(row);
+        rows.push(Box::from(sections.scratch.as_slice()));
     }
     rows.sort();
     valid(rows.windows(2).all(|pair| pair[0] < pair[1]))?;
@@ -407,15 +379,17 @@ fn section<T: Serialize>(sections: &mut Sections, kind: usize, values: &[T]) -> 
     Ok(())
 }
 
-fn write_section(out: &mut impl Out, kind: usize, rows: &[Vec<u8>]) -> Result<(u64, u64)> {
+/// Writes one section, releasing each row once it is written.
+fn write_section(out: &mut impl Out, kind: usize, rows: Vec<Box<[u8]>>) -> Result<(u64, u64)> {
     let start = out.len();
+    let count = number(rows.len())?;
     out.put(&(kind as u16).to_be_bytes());
-    out.put(&number(rows.len())?.to_be_bytes());
+    out.put(&count.to_be_bytes());
     for row in rows {
         out.put(&number(row.len())?.to_be_bytes());
-        out.put(row);
+        out.put(&row);
     }
-    Ok((number(rows.len())?, number(out.len() - start)?))
+    Ok((count, number(out.len() - start)?))
 }
 
 fn read_section<T: Serialize + for<'de> Deserialize<'de>>(
@@ -457,6 +431,7 @@ pub(super) fn encode_into(
     let mut sections = Sections {
         total: 6,
         rows: Vec::with_capacity(SECTIONS),
+        scratch: Vec::new(),
     };
     section(
         &mut sections,
@@ -658,10 +633,11 @@ pub(super) fn encode_into(
     out.put(b"AVBD");
     out.put(&(super::DOMAIN_VERSION as u16).to_be_bytes());
     let mut stats = [(0, 0); SECTIONS];
-    for (index, rows) in sections.rows.iter().enumerate() {
+    let total = sections.total;
+    for (index, rows) in sections.rows.into_iter().enumerate() {
         stats[index] = write_section(out, index + 1, rows)?;
     }
-    debug_assert_eq!(number(out.len())?, sections.total);
+    debug_assert_eq!(number(out.len())?, total);
     bound(
         stats.iter().try_fold(0, |n, (count, _)| add(n, *count))?,
         RECORD_LIMIT,
@@ -669,24 +645,50 @@ pub(super) fn encode_into(
     Ok(stats)
 }
 
+/// Plaintext read front to back, for [`decode_mappings`].
+pub(super) trait In {
+    /// The bytes not yet read.
+    fn remaining(&self) -> u64;
+    fn read(&mut self, into: &mut [u8]) -> Result<()>;
+    fn skip(&mut self, n: u64) -> Result<()>;
+}
+
+fn read_u64(input: &mut impl In) -> Result<u64> {
+    let mut bytes = [0; 8];
+    input.read(&mut bytes)?;
+    Ok(u64::from_be_bytes(bytes))
+}
+
 /// Reads only the private image mappings, framing past the domain sections
-/// without parsing their rows. Callers must still compare the complete bytes.
-pub(super) fn decode_mappings(input: &[u8]) -> Result<Vec<Mapping>> {
-    bound(number(input.len())?, STATE_LIMIT)?;
-    let mut r = Reader(input);
+/// without parsing their rows, so only the mappings section is ever held.
+/// Callers must still compare the complete bytes.
+pub(super) fn decode_mappings(input: &mut impl In) -> Result<Vec<Mapping>> {
+    bound(input.remaining(), STATE_LIMIT)?;
     let mut remaining = RECORD_LIMIT;
-    valid(r.take(4)? == b"AVBD")?;
-    valid(u16::from_be_bytes(r.array()?) as u32 == super::DOMAIN_VERSION)?;
+    let mut head = [0; 6];
+    input.read(&mut head)?;
+    valid(
+        head[..4] == *b"AVBD"
+            && u16::from_be_bytes([head[4], head[5]]) as u32 == super::DOMAIN_VERSION,
+    )?;
     for kind in 1..SECTIONS {
-        valid(u16::from_be_bytes(r.array()?) == kind as u16)?;
-        let n = r.u64()?;
+        let mut tag = [0; 2];
+        input.read(&mut tag)?;
+        valid(u16::from_be_bytes(tag) == kind as u16)?;
+        let n = read_u64(input)?;
         bound(n, remaining)?;
         remaining -= n;
-        valid(n <= number(r.0.len())? / 8)?;
+        valid(n <= input.remaining() / 8)?;
         for _ in 0..n {
-            r.bytes(STATE_LIMIT)?;
+            let len = read_u64(input)?;
+            bound(len, STATE_LIMIT)?;
+            valid(len <= input.remaining())?;
+            input.skip(len)?;
         }
     }
+    let mut tail = vec![0; size(input.remaining())?];
+    input.read(&mut tail)?;
+    let mut r = Reader(&tail);
     let (mappings, _) = read_section::<Mapping>(&mut r, SECTIONS, &mut remaining)?;
     r.end()?;
     Ok(mappings)

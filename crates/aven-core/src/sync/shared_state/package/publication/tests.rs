@@ -777,23 +777,161 @@ async fn streaming_self_check_agrees_with_decoding_validator() {
     }
 }
 
+fn encrypted_state(plaintext: &[u8]) -> crypto::EncryptedArtifact<'static> {
+    crypto::encrypt_artifact(
+        plaintext,
+        package_context(),
+        [1; 32],
+        [2; 32],
+        2,
+        1,
+        &[3; 32],
+    )
+    .unwrap()
+}
+
+fn plain_reader<'a>(artifact: &'a crypto::EncryptedArtifact<'a>) -> crypto::ArtifactReader<'a> {
+    crypto::ArtifactReader::new(
+        artifact,
+        package_context(),
+        [1; 32],
+        [2; 32],
+        2,
+        1,
+        &[3; 32],
+        size(STATE_LIMIT).unwrap(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
-async fn domain_matcher_accepts_only_the_exact_encoding() {
+async fn state_matcher_accepts_only_the_exact_encoding() {
     let (_, _, capture, _, _) = specimen().await;
     let tables = &capture.capture.snapshot.tables;
     let (encoded, stats) = domain::encode(tables, &[]).unwrap();
     let matches = |expected: &[u8]| {
-        let mut matcher = domain::Matcher::new(expected);
-        assert_eq!(
-            domain::encode_into(&mut matcher, tables, &[]).unwrap(),
-            stats
-        );
-        matcher.matched()
+        let artifact = encrypted_state(expected);
+        match_state(plain_reader(&artifact), tables, &[]).map(|found| assert_eq!(found, stats))
     };
-    assert!(matches(&encoded));
+    assert!(matches(&encoded).is_ok());
     let mut flipped = encoded.clone();
     *flipped.last_mut().unwrap() ^= 1;
-    assert!(!matches(&flipped));
-    assert!(!matches(&encoded[..encoded.len() - 1]));
-    assert!(!matches(&[encoded.as_slice(), b"x"].concat()));
+    assert!(matches(&flipped).is_err());
+    assert!(matches(&encoded[..encoded.len() - 1]).is_err());
+    assert!(matches(&[encoded.as_slice(), b"x"].concat()).is_err());
+}
+
+#[test]
+fn plain_matcher_and_reads_cross_chunk_boundaries() {
+    let chunk = crypto::CHUNK_PLAINTEXT_BYTES;
+    let plaintext = (0..2 * chunk + 5)
+        .map(|i| (i % 251) as u8)
+        .collect::<Vec<_>>();
+    let pieces = [7, chunk, 3, chunk - 5];
+    let compare = |expected: &[u8]| {
+        let artifact = encrypted_state(expected);
+        let mut reader = plain_reader(&artifact);
+        let mut matcher = PlainMatcher {
+            reader: &mut reader,
+            written: 0,
+            equal: true,
+            failed: false,
+        };
+        domain::Out::begin(&mut matcher, plaintext.len());
+        let mut rest = plaintext.as_slice();
+        for n in pieces {
+            let (piece, tail) = rest.split_at(n);
+            domain::Out::put(&mut matcher, piece);
+            rest = tail;
+        }
+        assert!(rest.is_empty() && !matcher.failed);
+        matcher.equal && reader.remaining() == 0 && reader.finish().is_ok()
+    };
+    assert!(compare(&plaintext));
+    let mut flipped = plaintext.clone();
+    flipped[chunk + 1] ^= 1;
+    assert!(!compare(&flipped));
+    assert!(!compare(&plaintext[..plaintext.len() - 1]));
+
+    let artifact = encrypted_state(&plaintext);
+    let mut reader = plain_reader(&artifact);
+    let mut plain = Plain(&mut reader);
+    let mut head = [0; 9];
+    domain::In::read(&mut plain, &mut head).unwrap();
+    domain::In::skip(&mut plain, (chunk - 20) as u64).unwrap();
+    let mut straddling = vec![0; chunk];
+    domain::In::read(&mut plain, &mut straddling).unwrap();
+    assert_eq!(head, plaintext[..9]);
+    assert_eq!(straddling, plaintext[chunk - 11..2 * chunk - 11]);
+    assert_eq!(domain::In::remaining(&plain), 16);
+    assert!(domain::In::skip(&mut plain, 17).is_err());
+
+    let mut reader = plain_reader(&artifact);
+    domain::In::skip(&mut Plain(&mut reader), plaintext.len() as u64).unwrap();
+    assert!(reader.finish().is_ok());
+    let mut reader = plain_reader(&artifact);
+    domain::In::skip(&mut Plain(&mut reader), chunk as u64 + 1).unwrap();
+    assert!(reader.finish().is_err());
+}
+
+#[tokio::test]
+async fn state_mappings_stream_out_of_the_encrypted_state() {
+    let (_, _, _, _, package) = specimen().await;
+    let key = package_key();
+    let d = Descriptor::decode(&package.descriptor).unwrap();
+    let state = decode_state_catalog(&package.catalogs[0])
+        .unwrap()
+        .encrypted(&package.state);
+    let plaintext = crypto::decrypt_artifact(
+        &state,
+        d.context(),
+        d.stream,
+        d.bootstrap,
+        2,
+        1,
+        &crypto::derive_bootstrap_class_key(&key, d.context(), d.stream, d.bootstrap, 1).unwrap(),
+        size(STATE_LIMIT).unwrap(),
+    )
+    .unwrap();
+    let (_, decoded, _) = domain::decode(&plaintext).unwrap();
+    assert!(!decoded.is_empty());
+    let mut reader = state_reader(&d, &state, &key).unwrap();
+    assert!(domain::decode_mappings(&mut Plain(&mut reader)).unwrap() == decoded);
+}
+
+#[tokio::test]
+async fn built_package_check_requires_the_state_to_be_the_encoded_bytes() {
+    let (_, _, capture, _, package) = specimen().await;
+    let key = package_key();
+    let d = Descriptor::decode(&package.descriptor).unwrap();
+    let state = decode_state_catalog(&package.catalogs[0])
+        .unwrap()
+        .encrypted(&package.state);
+    let mappings =
+        domain::decode_mappings(&mut Plain(&mut state_reader(&d, &state, &key).unwrap())).unwrap();
+    let (encoded, stats) = domain::encode(&capture.capture.snapshot.tables, &mappings).unwrap();
+    let digest = crate::sync::codec::hash(&encoded);
+    let check = |digest, mappings: &[domain::Mapping]| {
+        check_capture(
+            &package,
+            &capture,
+            &key,
+            [0x64; 32],
+            StateCheck::Encoded {
+                digest,
+                mappings,
+                stats: &stats,
+            },
+        )
+    };
+    let expected = authenticate_capture(&package, &capture, &key, [0x64; 32]).unwrap();
+    let built = check(digest, &mappings).unwrap();
+    assert_eq!(
+        (built.objects, built.references),
+        (expected.objects, expected.references)
+    );
+    let mut other = digest;
+    other[0] ^= 1;
+    assert!(check(other, &mappings).is_err());
+    assert!(check(digest, &mappings[1..]).is_err());
 }

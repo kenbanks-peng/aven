@@ -232,9 +232,11 @@ fn manifest_plaintext(d: &Descriptor, stats: &domain::Stats) -> Vec<u8> {
     out
 }
 
-/// Encrypts the domain encoding as it is produced.
+/// Encrypts the domain encoding as it is produced, hashing the plaintext so
+/// the finished ciphertext can be checked against exactly these bytes.
 struct StateOut {
     writer: crypto::ArtifactWriter,
+    digest: sha2::Sha256,
     len: usize,
     failed: bool,
 }
@@ -248,6 +250,7 @@ impl domain::Out for StateOut {
     }
     fn put(&mut self, bytes: &[u8]) {
         self.len += bytes.len();
+        sha2::Digest::update(&mut self.digest, bytes);
         self.failed = self.failed || self.writer.write(bytes).is_err();
     }
 }
@@ -283,11 +286,13 @@ pub(super) fn build(
     let mut out = StateOut {
         writer: crypto::ArtifactWriter::new(context, stream_id, bootstrap, 2, 1, &state_key)
             .map_err(|_| Error::Authentication)?,
+        digest: sha2::Digest::new(),
         len: 0,
         failed: false,
     };
     let stats = domain::encode_into(&mut out, &capture.capture.snapshot.tables, &mappings)?;
     valid(!out.failed)?;
+    let encoded = <[u8; 32]>::from(sha2::Digest::finalize(out.digest));
     let state = out.writer.finish().map_err(|_| Error::Authentication)?;
     let objects = images
         .iter()
@@ -368,7 +373,17 @@ pub(super) fn build(
         manifest: manifest.into_records(),
         images: image_records,
     };
-    let index = authenticate_capture(&package, capture, key, membership_predecessor)?;
+    let index = check_capture(
+        &package,
+        capture,
+        key,
+        membership_predecessor,
+        StateCheck::Encoded {
+            digest: encoded,
+            mappings: &mappings,
+            stats: &stats,
+        },
+    )?;
     Ok((package, index))
 }
 
@@ -404,6 +419,12 @@ pub(super) fn context_and_membership(
 /// image-byte obligations without a key. Catalogs are aggregate-verified before
 /// any records are trusted. No partial catalog can establish completeness.
 pub fn validate_keyless(package: &Package) -> Result<Completeness> {
+    keyless(package).map(|(completeness, _, _)| completeness)
+}
+
+/// [`validate_keyless`], also returning the verified descriptor and image
+/// catalog.
+fn keyless(package: &Package) -> Result<(Completeness, Descriptor, Images)> {
     let metadata = download::MetadataView::from(package);
     let (d, images) = validate_metadata(&metadata)?;
     valid(images.objects.len() == package.images.len())?;
@@ -418,11 +439,12 @@ pub fn validate_keyless(package: &Package) -> Result<Completeness> {
         .chain(package.images.iter().map(|i| &i.records))
         .flatten()
         .try_fold(0, |total, record| add(total, number(record.len())?))?;
-    Ok(Completeness {
+    let completeness = Completeness {
         prefix_count: d.prefix,
         image_count: number(images.objects.len())?,
         ciphertext_bytes,
-    })
+    };
+    Ok((completeness, d, images))
 }
 
 fn validate_metadata(metadata: &download::MetadataView<'_>) -> Result<(Descriptor, Images)> {
@@ -594,46 +616,198 @@ pub fn validate_against_capture(
 /// The one keyed pass over a frozen package. The decrypted state must equal
 /// the canonical encoding of the capture under the package's own private
 /// mappings, so the state is never decoded into a second copy of the tables.
-/// Images are decrypted and hashed one at a time.
+/// The state and images are decrypted one chunk at a time.
 pub(crate) fn authenticate_capture(
     package: &Package,
     capture: &NeverDispatchedLocalSharedCapture,
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
 ) -> Result<AttachmentIndex> {
+    check_capture(
+        package,
+        capture,
+        key,
+        membership_predecessor,
+        StateCheck::Capture,
+    )
+}
+
+/// How [`check_capture`] establishes that the decrypted state is the
+/// capture's canonical encoding.
+enum StateCheck<'a> {
+    /// Re-encode the capture under the mappings read from the state and
+    /// compare it with the state as both are produced.
+    Capture,
+    /// The state was encrypted from one encoding pass over this capture, which
+    /// wrote these mappings, gave these section stats and hashed to `digest`.
+    /// The state must decrypt to bytes with that hash.
+    Encoded {
+        digest: [u8; 32],
+        mappings: &'a [domain::Mapping],
+        stats: &'a domain::Stats,
+    },
+}
+
+/// Hands out a state reader's plaintext to the domain decoder.
+struct Plain<'r, 'a>(&'r mut crypto::ArtifactReader<'a>);
+
+impl domain::In for Plain<'_, '_> {
+    fn remaining(&self) -> u64 {
+        self.0.remaining()
+    }
+    fn read(&mut self, into: &mut [u8]) -> Result<()> {
+        let mut filled = 0;
+        while filled < into.len() {
+            let piece = self
+                .0
+                .take(into.len() - filled)
+                .map_err(|_| Error::Authentication)?;
+            valid(!piece.is_empty())?;
+            into[filled..filled + piece.len()].copy_from_slice(piece);
+            filled += piece.len();
+        }
+        Ok(())
+    }
+    fn skip(&mut self, n: u64) -> Result<()> {
+        let mut left = size(n)?;
+        while left > 0 {
+            let piece = self.0.take(left).map_err(|_| Error::Authentication)?;
+            valid(!piece.is_empty())?;
+            left -= piece.len();
+        }
+        Ok(())
+    }
+}
+
+/// Compares the encoding with a state reader's plaintext as both are
+/// produced, so neither is ever held whole.
+struct PlainMatcher<'r, 'a> {
+    reader: &'r mut crypto::ArtifactReader<'a>,
+    written: usize,
+    equal: bool,
+    failed: bool,
+}
+
+impl domain::Out for PlainMatcher<'_, '_> {
+    fn begin(&mut self, total: usize) {
+        self.equal &= total as u64 == self.reader.remaining();
+    }
+    fn len(&self) -> usize {
+        self.written
+    }
+    fn put(&mut self, mut bytes: &[u8]) {
+        self.written += bytes.len();
+        while self.equal && !bytes.is_empty() {
+            match self.reader.take(bytes.len()) {
+                Ok(piece) if !piece.is_empty() => {
+                    self.equal = piece == &bytes[..piece.len()];
+                    bytes = &bytes[piece.len()..];
+                }
+                Ok(_) => self.equal = false,
+                Err(_) => {
+                    self.failed = true;
+                    self.equal = false;
+                }
+            }
+        }
+    }
+}
+
+/// Encodes the capture tables under `mappings`, comparing the encoding with
+/// the whole of the reader's plaintext as both are produced.
+fn match_state(
+    mut reader: crypto::ArtifactReader<'_>,
+    tables: &crate::data_safety::export_types::ExportTables,
+    mappings: &[domain::Mapping],
+) -> Result<domain::Stats> {
+    let mut matcher = PlainMatcher {
+        reader: &mut reader,
+        written: 0,
+        equal: true,
+        failed: false,
+    };
+    let stats = domain::encode_into(&mut matcher, tables, mappings)?;
+    if matcher.failed {
+        return Err(Error::Authentication);
+    }
+    valid(matcher.equal && reader.remaining() == 0)?;
+    reader.finish().map_err(|_| Error::Invalid)?;
+    Ok(stats)
+}
+
+/// The SHA-256 of an artifact's complete plaintext.
+fn hash_plaintext(mut reader: crypto::ArtifactReader<'_>) -> Result<[u8; 32]> {
+    let mut hash = <sha2::Sha256 as sha2::Digest>::new();
+    loop {
+        let piece = reader.take(usize::MAX).map_err(|_| Error::Authentication)?;
+        if piece.is_empty() {
+            break;
+        }
+        sha2::Digest::update(&mut hash, piece);
+    }
+    reader.finish().map_err(|_| Error::Invalid)?;
+    Ok(sha2::Digest::finalize(hash).into())
+}
+
+fn state_reader<'a>(
+    d: &Descriptor,
+    state: &'a crypto::EncryptedArtifact<'a>,
+    key: &LocalSharedStatePackageKey,
+) -> Result<crypto::ArtifactReader<'a>> {
+    let state_key = crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 1)
+        .map_err(|_| Error::Authentication)?;
+    crypto::ArtifactReader::new(
+        state,
+        d.context(),
+        d.stream,
+        d.bootstrap,
+        2,
+        1,
+        &state_key,
+        size(STATE_LIMIT)?,
+    )
+    .map_err(|_| Error::Authentication)
+}
+
+/// Authenticates every byte of `package` against the independent capture:
+/// the state per `check`, then the manifest, the prefix and image catalogs,
+/// the private mappings, and each image's plaintext hash.
+fn check_capture(
+    package: &Package,
+    capture: &NeverDispatchedLocalSharedCapture,
+    key: &LocalSharedStatePackageKey,
+    membership_predecessor: [u8; 32],
+    check: StateCheck<'_>,
+) -> Result<AttachmentIndex> {
     #[cfg(test)]
     crate::sync::shared_state::counters::keyed_pass();
-    let d = Descriptor::decode(&package.descriptor)?;
+    let (_, d, images) = keyless(package)?;
     valid(
         d.membership == membership_predecessor
             && capture.stream_id() == hex::encode(d.stream)
             && capture.candidate_id() == hex::encode(d.bootstrap),
     )?;
-    validate_keyless(package)?;
     let metadata = download::MetadataView::from(package);
-    let (_, images) = validate_metadata(&metadata)?;
     let state = decode_state_catalog(&metadata.catalogs[0])?;
-    let state_key = crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 1)
-        .map_err(|_| Error::Authentication)?;
-    let plaintext = Zeroizing::new(
-        crypto::decrypt_artifact(
-            &state.encrypted(metadata.state),
-            d.context(),
-            d.stream,
-            d.bootstrap,
-            2,
-            1,
-            &state_key,
-            size(STATE_LIMIT)?,
-        )
-        .map_err(|_| Error::Authentication)?,
-    );
-    let mappings = domain::decode_mappings(&plaintext)?;
+    let state = state.encrypted(metadata.state);
     let tables = &capture.capture.snapshot.tables;
-    let mut matcher = domain::Matcher::new(&plaintext);
-    let stats = domain::encode_into(&mut matcher, tables, &mappings)?;
-    valid(matcher.matched())?;
-    drop(plaintext);
+    let decoded;
+    let computed;
+    let (mappings, stats) = match check {
+        StateCheck::Capture => {
+            decoded = domain::decode_mappings(&mut Plain(&mut state_reader(&d, &state, key)?))?;
+            computed = match_state(state_reader(&d, &state, key)?, tables, &decoded)?;
+            (&decoded[..], &computed)
+        }
+        StateCheck::Encoded {
+            digest,
+            mappings,
+            stats,
+        } => {
+            valid(hash_plaintext(state_reader(&d, &state, key)?)? == digest)?;
+            (mappings, stats)
+        }
+    };
     let manifest_key =
         crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 2)
             .map_err(|_| Error::Authentication)?;
@@ -650,11 +824,11 @@ pub(crate) fn authenticate_capture(
         )
         .map_err(|_| Error::Authentication)?,
     );
-    valid(*manifest == manifest_plaintext(&d, &stats))?;
+    valid(*manifest == manifest_plaintext(&d, stats))?;
     valid(projection::prefix(tables)? == catalog::prefix_decode(&metadata.catalogs[1], d.prefix)?)?;
     let expected_images = projection::images(
         tables,
-        &mappings,
+        mappings,
         Images {
             objects: images.objects.clone(),
             parents: Vec::new(),
@@ -668,7 +842,7 @@ pub(crate) fn authenticate_capture(
         .iter()
         .map(|r| (r.sha256.as_str(), r.classification.as_str()))
         .collect::<std::collections::HashMap<_, _>>();
-    for mapping in &mappings {
+    for mapping in mappings {
         valid(
             captured_images.get(mapping.sha256.as_str()).copied()
                 == Some(mapping.classification.as_str()),
@@ -681,22 +855,21 @@ pub(crate) fn authenticate_capture(
             .ok_or(Error::Invalid)?;
         let image_key = crypto::derive_image_key(key, d.context(), object.id)
             .map_err(|_| Error::Authentication)?;
-        let bytes = Zeroizing::new(
-            crypto::decrypt_artifact(
-                &object.artifact.encrypted(&records.records),
-                d.context(),
-                d.stream,
-                object.id,
-                1,
-                0,
-                &image_key,
-                size(IMAGE_LIMIT)?,
-            )
-            .map_err(|_| Error::Authentication)?,
-        );
-        valid(hex::encode(crate::sync::codec::hash(&bytes)) == mapping.sha256)?;
+        let artifact = object.artifact.encrypted(&records.records);
+        let reader = crypto::ArtifactReader::new(
+            &artifact,
+            d.context(),
+            d.stream,
+            object.id,
+            1,
+            0,
+            &image_key,
+            size(IMAGE_LIMIT)?,
+        )
+        .map_err(|_| Error::Authentication)?;
+        valid(hex::encode(hash_plaintext(reader)?) == mapping.sha256)?;
     }
-    index_from_mappings(&metadata, &mappings).map_err(|_| Error::Invalid)
+    index_from_mappings(&metadata, mappings).map_err(|_| Error::Invalid)
 }
 
 /// The decoding validator [`authenticate_capture`] replaced, kept so tests can

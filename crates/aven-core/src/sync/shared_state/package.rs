@@ -598,70 +598,159 @@ pub(crate) fn decrypt_artifact(
     key: &[u8; 32],
     maximum_plaintext_bytes: usize,
 ) -> Result<Vec<u8>> {
-    ensure!(
-        !artifact.chunks.is_empty()
-            && artifact.chunks.len() <= MAX_STATE_CHUNKS
-            && artifact.total_plaintext_bytes <= u64::try_from(maximum_plaintext_bytes)?,
-        "error encrypted-local-shared-package-artifact-bounds"
-    );
-    ensure!(
-        aggregate_commitment(&artifact.chunks) == artifact.aggregate_commitment
-            && artifact
-                .chunks
-                .iter()
-                .all(|chunk| codec::hash(&chunk.record) == chunk.record_commitment),
-        "error encrypted-local-shared-package-aggregate-mismatch"
-    );
-    let chunk_count = u32::try_from(artifact.chunks.len())?;
-    let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-invalid-key"))?;
+    let mut reader = ArtifactReader::new(
+        artifact,
+        context,
+        stream_id,
+        artifact_id,
+        family,
+        class,
+        key,
+        maximum_plaintext_bytes,
+    )?;
     let mut plaintext = Vec::with_capacity(usize::try_from(artifact.total_plaintext_bytes)?);
-    for (index, chunk) in artifact.chunks.iter().enumerate() {
+    loop {
+        let piece = reader.take(usize::MAX)?;
+        if piece.is_empty() {
+            break;
+        }
+        plaintext.extend_from_slice(piece);
+    }
+    reader.finish()?;
+    Ok(plaintext)
+}
+
+/// Authenticates and decrypts an artifact one chunk at a time, so at most one
+/// chunk of plaintext exists at once. Every byte handed out has passed its
+/// chunk's authentication, but only [`Self::finish`] establishes that the
+/// artifact was complete.
+pub(crate) struct ArtifactReader<'a> {
+    artifact: &'a EncryptedArtifact<'a>,
+    cipher: XChaCha20Poly1305,
+    context: LocalSharedStatePackageContext,
+    stream_id: [u8; 32],
+    artifact_id: [u8; 32],
+    family: u8,
+    class: u8,
+    /// Chunks decrypted so far.
+    index: usize,
+    chunk: Zeroizing<Vec<u8>>,
+    position: usize,
+}
+
+impl<'a> ArtifactReader<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        artifact: &'a EncryptedArtifact<'a>,
+        context: LocalSharedStatePackageContext,
+        stream_id: [u8; 32],
+        artifact_id: [u8; 32],
+        family: u8,
+        class: u8,
+        key: &[u8; 32],
+        maximum_plaintext_bytes: usize,
+    ) -> Result<Self> {
         ensure!(
-            codec::hash(&chunk.record) == chunk.record_commitment,
-            "error encrypted-local-shared-package-record-commitment-mismatch"
+            !artifact.chunks.is_empty()
+                && artifact.chunks.len() <= MAX_STATE_CHUNKS
+                && artifact.total_plaintext_bytes <= u64::try_from(maximum_plaintext_bytes)?,
+            "error encrypted-local-shared-package-artifact-bounds"
         );
-        let (header, ciphertext) = split_record(&chunk.record)?;
-        let nonce = validate_chunk_header(
-            header,
+        ensure!(
+            aggregate_commitment(&artifact.chunks) == artifact.aggregate_commitment
+                && artifact
+                    .chunks
+                    .iter()
+                    .all(|chunk| codec::hash(&chunk.record) == chunk.record_commitment),
+            "error encrypted-local-shared-package-aggregate-mismatch"
+        );
+        let cipher = XChaCha20Poly1305::new_from_slice(key)
+            .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-invalid-key"))?;
+        Ok(Self {
+            artifact,
+            cipher,
             context,
             stream_id,
             artifact_id,
             family,
             class,
+            index: 0,
+            chunk: Zeroizing::new(Vec::new()),
+            position: 0,
+        })
+    }
+
+    /// The plaintext bytes not yet taken.
+    pub(crate) fn remaining(&self) -> u64 {
+        let taken = self.index.saturating_sub(1) * CHUNK_PLAINTEXT_BYTES + self.position;
+        self.artifact.total_plaintext_bytes - taken as u64
+    }
+
+    /// Up to `n` further plaintext bytes, never crossing a chunk boundary.
+    /// Empty only at the end of the artifact.
+    pub(crate) fn take(&mut self, n: usize) -> Result<&[u8]> {
+        if self.position == self.chunk.len() {
+            if self.index == self.artifact.chunks.len() {
+                return Ok(&[]);
+            }
+            self.decrypt_next()?;
+        }
+        let end = self.position + n.min(self.chunk.len() - self.position);
+        let piece = &self.chunk[self.position..end];
+        self.position = end;
+        Ok(piece)
+    }
+
+    fn decrypt_next(&mut self) -> Result<()> {
+        let index = self.index;
+        let count = self.artifact.chunks.len();
+        let (header, ciphertext) = split_record(&self.artifact.chunks[index].record)?;
+        let nonce = validate_chunk_header(
+            header,
+            self.context,
+            self.stream_id,
+            self.artifact_id,
+            self.family,
+            self.class,
             u32::try_from(index)?,
-            chunk_count,
-            artifact.total_plaintext_bytes,
+            u32::try_from(count)?,
+            self.artifact.total_plaintext_bytes,
         )?;
         let nonce_value = XNonce::try_from(nonce.as_slice())
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-nonce-size"))?;
-        // Decrypts in place at the end of the plaintext.
         let (ciphertext, tag) = ciphertext.split_at(ciphertext.len() - TAG_BYTES);
-        let start = plaintext.len();
-        plaintext.extend_from_slice(ciphertext);
-        cipher
+        self.chunk.clear();
+        self.chunk.extend_from_slice(ciphertext);
+        self.cipher
             .decrypt_inout_detached(
                 &nonce_value,
                 header,
-                (&mut plaintext[start..]).into(),
+                (&mut self.chunk[..]).into(),
                 tag.try_into()?,
             )
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-authentication"))?;
         let expected = expected_chunk_plaintext_len(
             index,
-            artifact.chunks.len(),
-            usize::try_from(artifact.total_plaintext_bytes)?,
+            count,
+            usize::try_from(self.artifact.total_plaintext_bytes)?,
         )?;
         ensure!(
-            plaintext.len() - start == expected,
+            self.chunk.len() == expected,
             "error encrypted-local-shared-package-chunk-size-mismatch"
         );
+        self.index += 1;
+        self.position = 0;
+        Ok(())
     }
-    ensure!(
-        plaintext.len() == usize::try_from(artifact.total_plaintext_bytes)?,
-        "error encrypted-local-shared-package-total-size-mismatch"
-    );
-    Ok(plaintext)
+
+    /// Checks that every chunk was decrypted and every byte taken.
+    pub(crate) fn finish(self) -> Result<()> {
+        ensure!(
+            self.index == self.artifact.chunks.len() && self.position == self.chunk.len(),
+            "error encrypted-local-shared-package-total-size-mismatch"
+        );
+        Ok(())
+    }
 }
 
 fn expected_chunk_plaintext_len(index: usize, count: usize, total: usize) -> Result<usize> {
