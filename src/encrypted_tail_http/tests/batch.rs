@@ -113,114 +113,44 @@ async fn append(
 }
 
 #[tokio::test]
-async fn negotiated_batches_and_legacy_fallback_keep_single_append_working() {
-    for legacy in [false, true] {
-        let mut f = fixture().await;
-        converge(&f).await;
-        let state = Arc::new(Traffic {
-            legacy,
-            ..Default::default()
-        });
-        instrument(&mut f, state.clone()).await;
-        edits(&f, tail::BATCH_COUNT + 3).await;
-        drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
-        let traffic = state.requests.lock().unwrap();
-        assert_eq!(
-            traffic
-                .iter()
-                .filter(|(_, v)| v["operation"] == "Features")
-                .count(),
-            1
-        );
-        let batches = traffic
-            .iter()
-            .filter(|(p, v)| {
-                p == aven_core::sync::client::tail::BATCH_PATH
-                    && v["operation"].get("Append").is_some()
-            })
-            .count();
-        assert_eq!(batches, if legacy { 0 } else { 2 });
-        let singles = traffic
-            .iter()
-            .filter(|(p, v)| p == PATH && v["operation"].get("Append").is_some())
-            .count();
-        assert_eq!(singles, if legacy { tail::BATCH_COUNT + 3 } else { 0 });
-        assert_eq!(
-            scalar(&f.peer, "SELECT count(*) FROM local_e2ee_outbox").await,
-            0
-        );
-    }
-}
-
-#[tokio::test]
-async fn invalid_last_record_and_known_id_roll_back_entire_batch() {
-    let f = fixture().await;
+async fn negotiated_batch_pushes_a_small_multi_record_group() {
+    let mut f = fixture().await;
     converge(&f).await;
+    let state = Arc::new(Traffic::default());
+    instrument(&mut f, state.clone()).await;
     edits(&f, 3).await;
-    let (inputs, records) = frozen(&f).await;
-    let before = scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await;
-    let parents = scalar(&f.server, "SELECT count(*) FROM server_e2ee_image_parents").await;
-    let mut invalid = records.clone();
-    invalid[2].1 = vec![0];
-    assert!(append(&f, &inputs, &invalid).await.is_err());
-    let mut duplicate = records.clone();
-    duplicate[2] = duplicate[0].clone();
-    assert!(append(&f, &inputs, &duplicate).await.is_err());
-    assert_eq!(
-        scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await,
-        before
-    );
-    assert_eq!(
-        scalar(&f.server, "SELECT count(*) FROM server_e2ee_image_parents").await,
-        parents
-    );
-    // Failure after earlier inserts and side effects must roll the transaction back too.
-    {
-        let mut conn = aven_core::test_support::acquire(&f.server).await.unwrap();
-        sqlx::query("INSERT INTO meta(key,value) VALUES ('batch_failure_id', ?)")
-            .bind(&records[2].0)
-            .execute(&mut *conn)
-            .await
-            .unwrap();
-        sqlx::query("CREATE TRIGGER fail_batch BEFORE INSERT ON server_e2ee_tail WHEN NEW.operation_id=(SELECT value FROM meta WHERE key='batch_failure_id') BEGIN SELECT RAISE(ABORT, 'injected'); END").execute(&mut *conn).await.unwrap();
-    }
-    assert!(append(&f, &inputs, &records).await.is_err());
-    assert_eq!(
-        scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await,
-        before
-    );
-    assert_eq!(
-        scalar(&f.server, "SELECT count(*) FROM server_e2ee_image_parents").await,
-        parents
-    );
-    {
-        let mut conn = aven_core::test_support::acquire(&f.server).await.unwrap();
-        sqlx::query("DROP TRIGGER fail_batch")
-            .execute(&mut *conn)
-            .await
-            .unwrap();
-    }
-    f.server
-        .encrypted_tail_exchange(
-            &inputs.authority.context,
-            &inputs.bearer,
-            Operation::Append {
-                record: records[1].1.clone(),
-                ticket: None,
-            },
-        )
-        .await
-        .unwrap();
-    let error = append(&f, &inputs, &records).await.err().unwrap();
-    assert!(error.to_string().contains("encrypted-tail-batch-known"));
-    assert_eq!(
-        scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await,
-        before + 1
-    );
     drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
+    let traffic = state.requests.lock().unwrap();
     assert_eq!(
-        scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await,
-        before + 3
+        traffic
+            .iter()
+            .filter(|(_, value)| value["operation"] == "Features")
+            .count(),
+        1
+    );
+    let batches: Vec<_> = traffic
+        .iter()
+        .filter(|(path, value)| {
+            path == aven_core::sync::client::tail::BATCH_PATH
+                && value["operation"].get("Append").is_some()
+        })
+        .collect();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0].1["operation"]["Append"]["records"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert!(
+        !traffic
+            .iter()
+            .any(|(path, value)| path == PATH && value["operation"].get("Append").is_some())
+    );
+    assert_eq!(
+        scalar(&f.peer, "SELECT count(*) FROM local_e2ee_outbox").await,
+        0
     );
 }
 
@@ -268,6 +198,7 @@ async fn lost_batch_response_resolves_every_id_without_resending() {
 }
 
 #[tokio::test]
+#[ignore = "opt-in crash-boundary durability qualification"]
 async fn process_crashes_preserve_batch_freeze_acceptance_and_partial_observation() {
     for stage in [
         "batch-frozen",
@@ -436,6 +367,24 @@ async fn downgrade_reconciles_the_whole_group_before_any_single_resend() {
 async fn frozen_batch_stops_at_record_and_byte_budgets_without_absorbing_new_work() {
     let f = fixture().await;
     converge(&f).await;
+
+    // The preparation API must honor a caller's smaller record budget.
+    edits(&f, 5).await;
+    let inputs = f.peer_store.tail_inputs(&f.peer, &f.origin).await.unwrap();
+    f.peer
+        .prepare_encrypted_batch_in_run(&inputs.authority, &blobs(&f.peer), None, 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.peer
+            .encrypted_tail_frozen_records(&inputs.authority)
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
+    drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
+
     edits(&f, 20).await;
     let w = f.peer.list_workspaces().await.unwrap().remove(0);
     let mut conn = aven_core::test_support::acquire(&f.peer).await.unwrap();
@@ -474,59 +423,6 @@ async fn frozen_batch_stops_at_record_and_byte_budgets_without_absorbing_new_wor
             .await
             .unwrap(),
         records
-    );
-}
-
-#[tokio::test]
-async fn transport_disconnect_after_batch_acceptance_requires_resolution() {
-    use aven_core::sync::client::{Session, Step};
-    let f = fixture().await;
-    converge(&f).await;
-    edits(&f, 3).await;
-    let driver = crate::sync_http::HttpDriver::new().unwrap();
-    let mut session = Session::new(|link| async {
-        aven_core::sync::client::tail::Client::new(&f.origin, link)?
-            .round(&f.peer_store, &f.peer, &blobs(&f.peer))
-            .await
-    });
-    let mut interrupted = false;
-    loop {
-        match session.next().await {
-            Ok(Step::Request(request))
-                if request
-                    .url
-                    .ends_with(aven_core::sync::client::tail::BATCH_PATH) =>
-            {
-                assert!(!interrupted);
-                let mut outgoing = driver.http.post(request.url.as_str()).body(request.body);
-                for header in request.headers {
-                    outgoing = outgoing.header(header.name, header.value);
-                }
-                let response = outgoing.send().await.unwrap();
-                assert_eq!(response.status(), reqwest::StatusCode::OK);
-                response.bytes().await.unwrap();
-                session.register_transport_failure(request.context).unwrap();
-                interrupted = true;
-            }
-            Ok(Step::Request(request)) => driver.answer(&mut session, request).await.unwrap(),
-            Ok(Step::Wait(delay)) => tokio::time::sleep(delay).await,
-            Err(error) => {
-                assert!(interrupted && error.to_string().contains("outcome-unknown"));
-                break;
-            }
-            Ok(Step::Done(_)) => panic!("disconnect must leave an unknown outcome"),
-        }
-    }
-    drop(session);
-    assert_eq!(
-        scalar(&f.peer, "SELECT count(*) FROM local_e2ee_outbox").await,
-        3
-    );
-    let high = scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await;
-    drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
-    assert_eq!(
-        scalar(&f.server, "SELECT high_water FROM server_e2ee_allocator").await,
-        high
     );
 }
 

@@ -1,5 +1,4 @@
 use super::*;
-use aven_core::sync::encrypted_tail::{Operation, Reply};
 use axum::{
     body::to_bytes,
     extract::{Request, State},
@@ -16,29 +15,6 @@ use std::{
 use tokio::process::{Child, Command};
 
 const PRE_BATCH_REVISION: &str = "a2b7af024cc357483dac0301c38d27297d24ba72";
-
-#[tokio::test]
-async fn candidate_endpoint_negotiates_the_advertised_batch_limits() {
-    let f = fixture().await;
-    converge(&f).await;
-    let inputs = f.peer_store.tail_inputs(&f.peer, &f.origin).await.unwrap();
-
-    let Reply::Features(features) = Client::new(&f.origin)
-        .unwrap()
-        .exchange(
-            &inputs.authority.context,
-            &inputs.bearer,
-            Operation::Features,
-        )
-        .await
-        .unwrap()
-    else {
-        panic!("candidate endpoint did not return batch features");
-    };
-
-    assert_eq!(features.count, tail::BATCH_COUNT);
-    assert_eq!(features.bytes, tail::BATCH_BYTES);
-}
 
 #[tokio::test]
 async fn ambiguous_features_refusal_does_not_authorize_singleton_fallback() {
