@@ -233,28 +233,35 @@ impl Database {
             .iter()
             .map(|row| (row.change_id.as_str(), row))
             .collect::<HashMap<_, _>>();
+        let mut rank_rows = Vec::with_capacity(persisted.snapshot.tables.changes.len());
         for change in &persisted.snapshot.tables.changes {
             let provenance = provenance_by_id
                 .get(change.change_id.as_str())
                 .context("shared history provenance is missing")?;
-            sqlx::query(
-                "INSERT INTO local_shared_capture_changes(
-                     candidate_id, change_id, prefix_rank, source_server_seq,
-                     source_pending_rank
-                 ) VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(&candidate_id)
-            .bind(&change.change_id)
-            .bind(
+            rank_rows.push((
+                change.change_id.as_str(),
                 change
                     .server_seq
                     .context("shared history rank is missing")?,
-            )
-            .bind(provenance.source_server_seq)
-            .bind(provenance.source_pending_rank)
-            .execute(&mut *tx)
-            .await?;
+                provenance.source_server_seq,
+                provenance.source_pending_rank,
+            ));
         }
+        // One statement over a JSON array; per-row inserts cost several
+        // times the write itself.
+        sqlx::query(
+            "INSERT INTO local_shared_capture_changes(
+                 candidate_id, change_id, prefix_rank, source_server_seq,
+                 source_pending_rank
+             )
+             SELECT ?, json_extract(value, '$[0]'), json_extract(value, '$[1]'),
+                    json_extract(value, '$[2]'), json_extract(value, '$[3]')
+             FROM json_each(?)",
+        )
+        .bind(&candidate_id)
+        .bind(serde_json::to_string(&rank_rows)?)
+        .execute(&mut *tx)
+        .await?;
         for image in &persisted.images {
             sqlx::query(
                 "INSERT INTO local_shared_capture_images(candidate_id, sha256, classification)
