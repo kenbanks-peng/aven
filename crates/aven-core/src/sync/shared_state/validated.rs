@@ -501,3 +501,7 @@ impl ProofCache {
         Ok(self.seed.as_ref().expect("proof was just loaded"))
     }
 }
+
+#[cfg(test)]
+#[path = "validated_tests.rs"]
+mod tests;
