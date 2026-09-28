@@ -51,11 +51,11 @@ pub(super) async fn load_sync_status(
         Ok(addr) => SyncStatusCheck::new(true, addr.to_string()),
         Err(error) => SyncStatusCheck::new(false, format!("{error:#}")),
     };
-    let phase = crate::sync::encrypted::local_phase(&database).await?;
+    let phase = crate::sync::encrypted::local_phase(database).await?;
     // A sync operation holds the association while it runs; keep the last
     // snapshot until it finishes instead of waiting on or reporting it.
     let (association, protected_storage) =
-        match crate::sync::encrypted::try_association_status(&database, config).await {
+        match crate::sync::encrypted::try_association_status(database, config).await {
             Ok(Some(association)) => (
                 association,
                 SyncStatusCheck::new(true, "available".to_string()),
