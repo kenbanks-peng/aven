@@ -9,7 +9,7 @@ use super::*;
 use aven_core::{
     operations::{AttachmentAddInput, TaskDraft},
     sync::{
-        bootstrap_staging::{self, batch},
+        bootstrap_staging::{self, Component, batch},
         client::{
             ClientHost, SetupInvitation,
             engine::{self, Amount, Progress, Stage},
@@ -26,6 +26,8 @@ use axum::{
     middleware::Next,
 };
 use std::{
+    collections::BTreeMap,
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -49,6 +51,7 @@ impl Drop for Server {
 
 #[derive(Default)]
 struct Traffic {
+    capture_batches: bool,
     requests: AtomicU64,
     request_body_bytes: AtomicU64,
     batch_body_bytes: AtomicU64,
@@ -61,6 +64,7 @@ async fn count_traffic(
     traffic: Arc<Traffic>,
     metrics_path: PathBuf,
     trace_path: PathBuf,
+    capture_path: PathBuf,
     request: Request,
     next: Next,
 ) -> axum::response::Response {
@@ -89,6 +93,7 @@ async fn count_traffic(
     } else {
         0
     };
+    let captured_batch = (is_batch && traffic.capture_batches).then(|| request_body.clone());
     let request = Request::from_parts(parts, Body::from(request_body));
     let response = next.run(request).await;
     let (parts, body) = response.into_parts();
@@ -98,6 +103,20 @@ async fn count_traffic(
         .unwrap();
     let response_len = response_body.len() as u64;
     let response = axum::response::Response::from_parts(parts, Body::from(response_body));
+
+    if status.is_success()
+        && let Some(captured_batch) = captured_batch
+    {
+        let mut capture = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(capture_path)
+            .unwrap();
+        capture
+            .write_all(&(captured_batch.len() as u32).to_be_bytes())
+            .unwrap();
+        capture.write_all(&captured_batch).unwrap();
+    }
 
     traffic.requests.fetch_add(1, Ordering::Relaxed);
     traffic
@@ -189,6 +208,197 @@ fn duration_max(samples: &[Duration]) -> Duration {
     samples.iter().max().copied().unwrap_or_default()
 }
 
+type CapturedRecord = (Vec<u8>, u64, Vec<u8>);
+
+fn component_key(component: Component) -> Vec<u8> {
+    match component {
+        Component::DataCatalog => vec![0],
+        Component::PrefixCatalog => vec![1],
+        Component::ImageCatalog => vec![2],
+        Component::Manifest => vec![3],
+        Component::State => vec![4],
+        Component::Image(id) => std::iter::once(5).chain(id).collect(),
+    }
+}
+
+fn read_captured_records(path: &Path, start: u64) -> Vec<CapturedRecord> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut offset = usize::try_from(start).unwrap();
+    let mut records = Vec::new();
+    while offset < bytes.len() {
+        let header_end = offset.checked_add(4).unwrap();
+        let size = u32::from_be_bytes(bytes[offset..header_end].try_into().unwrap()) as usize;
+        let body_end = header_end.checked_add(size).unwrap();
+        let decoded = batch::decode(&bytes[header_end..body_end]).unwrap();
+        records.extend(
+            decoded
+                .header
+                .records
+                .iter()
+                .copied()
+                .zip(decoded.records.iter())
+                .map(|(slot, bytes)| (component_key(slot.component), slot.index, bytes.to_vec())),
+        );
+        offset = body_end;
+    }
+    records
+}
+
+fn unique_record_map(records: Vec<CapturedRecord>) -> BTreeMap<(Vec<u8>, u64), Vec<u8>> {
+    let mut result = BTreeMap::new();
+    for (component, index, bytes) in records {
+        assert!(
+            result.insert((component, index), bytes).is_none(),
+            "upload repeated a frozen chunk slot"
+        );
+    }
+    result
+}
+
+async fn cancel_setup_at_percent(
+    percent: u64,
+    driver: &crate::sync_http::HttpDriver,
+    database: &Database,
+    host: &BenchHost,
+    invitation: &SetupInvitation,
+) -> (Option<anyhow::Result<engine::Outcome>>, Option<(u64, u64)>) {
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress = move |progress: Progress| {
+        if let Some(Amount::Bytes {
+            done,
+            total: Some(total),
+        }) = progress.amount
+        {
+            let _ = progress_tx.send((done, total));
+        }
+    };
+    let mut setup = Box::pin(driver.run(|link| async {
+        engine::run_setup(link, database, host, invitation, &progress).await
+    }));
+    loop {
+        tokio::select! {
+            biased;
+            progress = progress_rx.recv() => {
+                if let Some((done, total)) = progress
+                    && done.saturating_mul(100) >= percent.saturating_mul(total)
+                {
+                    drop(setup);
+                    return (None, Some((done, total)));
+                }
+            }
+            result = &mut setup => return (Some(result), None),
+        }
+    }
+}
+
+async fn run_interrupted_setup(
+    percent: u64,
+    driver: &crate::sync_http::HttpDriver,
+    database: &Database,
+    host: &BenchHost,
+    invitation: &SetupInvitation,
+    root: &Path,
+) {
+    let capture_path = root.join("captured-batches.bin");
+    println!(
+        "setup_path=engine::run_setup interruption=in_process_future_cancellation process_restart=false target_percent={percent} server_process=separate"
+    );
+    let (completed, progress) =
+        cancel_setup_at_percent(percent, driver, database, host, invitation).await;
+    let Some((done, total)) = progress else {
+        panic!("setup did not reach the {percent}% upload cancellation point: {completed:?}");
+    };
+    assert!(done < total, "cancellation must precede full upload");
+    println!(
+        "interrupted progress_bytes={done} total_bytes={total} achieved_percent={:.2}",
+        done as f64 * 100.0 / total as f64,
+    );
+
+    let (intent_before, state_before) = database
+        .seed_publication_intent_bytes()
+        .await
+        .unwrap()
+        .expect("setup interruption must retain its frozen intent");
+    assert_eq!(state_before, "sealed");
+    let initial_records = unique_record_map(read_captured_records(&capture_path, 0));
+    let capture_offset = std::fs::metadata(&capture_path).unwrap().len();
+    let server_database = Database::open(&root.join("server.sqlite")).await.unwrap();
+    let mut connection = aven_core::test_support::acquire(&server_database)
+        .await
+        .unwrap();
+    let (expected_bytes, expected_chunks): (i64, i64) = sqlx::query_as(
+        "SELECT byte_budget, chunk_budget FROM server_bootstrap_candidates WHERE canceled = 0",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let rows: Vec<(Vec<u8>, i64, Vec<u8>)> = sqlx::query_as(
+        "SELECT component, chunk_index, bytes FROM server_bootstrap_chunks ORDER BY component, chunk_index",
+    )
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    drop(connection);
+    let staged_records: BTreeMap<_, _> = rows
+        .into_iter()
+        .map(|(component, index, bytes)| ((component, u64::try_from(index).unwrap()), bytes))
+        .collect();
+    assert_eq!(initial_records, staged_records);
+    assert!(
+        !staged_records.is_empty(),
+        "interruption should follow a stored batch"
+    );
+    assert_eq!(total, u64::try_from(expected_bytes).unwrap());
+    assert!(staged_records.len() < usize::try_from(expected_chunks).unwrap());
+
+    let resumed = driver
+        .run(|link| async { engine::run_setup(link, database, host, invitation, &|_| {}).await })
+        .await;
+    resumed.unwrap_or_else(|error| panic!("resuming interrupted setup failed: {error:#}"));
+
+    let (intent_after, state_after) = database
+        .seed_publication_intent_bytes()
+        .await
+        .unwrap()
+        .expect("resumed setup must retain its adopted intent");
+    assert_eq!(
+        intent_after, intent_before,
+        "resume changed the frozen intent bytes"
+    );
+    assert_eq!(state_after, "adopted");
+    let replayed = unique_record_map(read_captured_records(&capture_path, capture_offset));
+    assert_eq!(replayed.len(), usize::try_from(expected_chunks).unwrap());
+    assert_eq!(
+        replayed
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>(),
+        u64::try_from(expected_bytes).unwrap()
+    );
+    for (slot, bytes) in &staged_records {
+        assert_eq!(
+            replayed.get(slot),
+            Some(bytes),
+            "resume changed an already-stored frozen chunk"
+        );
+    }
+    println!(
+        "resume exact_intent=true prior_staged_chunks={} prior_staged_bytes={} replayed_chunks={} replayed_bytes={} configured_chunks={} configured_bytes={} outcome=adopted",
+        staged_records.len(),
+        staged_records
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>(),
+        replayed.len(),
+        replayed
+            .values()
+            .map(|bytes| bytes.len() as u64)
+            .sum::<u64>(),
+        expected_chunks,
+        expected_bytes,
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "large-image release resource baseline"]
 async fn large_image_setup() {
@@ -196,9 +406,13 @@ async fn large_image_setup() {
         let root = Path::new(&root);
         let db = Database::open(&root.join("server.sqlite")).await.unwrap();
         crate::test_support::e2ee_http::issue_setup(&db).await;
-        let traffic = Arc::new(Traffic::default());
+        let traffic = Arc::new(Traffic {
+            capture_batches: std::env::var("AVEN_SETUP_CAPTURE_BATCHES").as_deref() == Ok("1"),
+            ..Default::default()
+        });
         let metrics_path = root.join("traffic.txt");
         let trace_path = root.join("traffic-requests.txt");
+        let capture_path = root.join("captured-batches.bin");
         let app = crate::seed_bootstrap_http::router(db.clone(), Default::default())
             .merge(crate::peer_enrollment_http::router(db.clone()))
             .merge(crate::encrypted_tail_http::router(
@@ -209,11 +423,13 @@ async fn large_image_setup() {
                 let traffic = traffic.clone();
                 let metrics_path = metrics_path.clone();
                 let trace_path = trace_path.clone();
+                let capture_path = capture_path.clone();
                 move |request, next| {
                     count_traffic(
                         traffic.clone(),
                         metrics_path.clone(),
                         trace_path.clone(),
+                        capture_path.clone(),
                         request,
                         next,
                     )
@@ -311,6 +527,14 @@ async fn large_image_setup() {
             "--nocapture",
         ])
         .env("AVEN_SETUP_SERVER_ROOT", root.path())
+        .env(
+            "AVEN_SETUP_CAPTURE_BATCHES",
+            if std::env::var_os("AVEN_SETUP_INTERRUPT_PERCENT").is_some() {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .stdout(Stdio::from(server_log.try_clone().unwrap()))
         .stderr(Stdio::from(server_log))
         .spawn()
@@ -338,6 +562,12 @@ async fn large_image_setup() {
         secret: Secret::new([7; 32]),
     };
     let driver = crate::sync_http::HttpDriver::new().unwrap();
+    if let Ok(percent) = std::env::var("AVEN_SETUP_INTERRUPT_PERCENT") {
+        let percent: u64 = percent.parse().unwrap();
+        assert!((1..100).contains(&percent));
+        run_interrupted_setup(percent, &driver, &db, &host, &invitation, root.path()).await;
+        return;
+    }
     println!(
         "setup_path=engine::run_setup proof_reuse=package_seed_capture_validated_to_resume_validated server_process=separate"
     );
