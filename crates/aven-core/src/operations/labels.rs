@@ -61,7 +61,6 @@ impl Database {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &format!("label {}", outcome.name),
                 UndoPayload {
                     commands: vec![UndoCommand::DeleteCreatedLabel {
                         label: outcome.name.clone(),
@@ -193,7 +192,6 @@ pub async fn rename_label_operation(
         record_tui_undo(
             &mut tx,
             &workspace.id,
-            &format!("label {new_name}"),
             UndoPayload {
                 commands: vec![UndoCommand::SetLabelName {
                     before: name.clone(),
@@ -267,7 +265,6 @@ pub async fn delete_label_operation(
         record_tui_undo(
             &mut tx,
             &workspace.id,
-            &format!("label {name}"),
             UndoPayload {
                 commands: vec![UndoCommand::RestoreDeletedLabel {
                     name: name.clone(),

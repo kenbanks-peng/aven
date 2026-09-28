@@ -36,7 +36,7 @@ impl Database {
         let outcome =
             add_task_to_epic_in_transaction(&mut tx, workspace, child_id, epic_id).await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             let mut commands = vec![UndoCommand::AddEpicChild {
                 epic_id: outcome.epic.id.clone(),
@@ -52,7 +52,7 @@ impl Database {
                     queue_activity_after: None,
                 });
             }
-            record_tui_undo(&mut tx, &workspace.id, &summary, UndoPayload { commands }).await?;
+            record_tui_undo(&mut tx, &workspace.id, UndoPayload { commands }).await?;
         }
         tx.commit().await?;
         Ok(outcome)
@@ -80,12 +80,11 @@ impl Database {
         let outcome =
             remove_task_from_epic_in_transaction(&mut tx, workspace, child_id, epic_id).await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::RemoveEpicChild {
                         epic_id: outcome.epic.id.clone(),

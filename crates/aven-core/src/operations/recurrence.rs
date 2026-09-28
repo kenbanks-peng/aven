@@ -257,12 +257,11 @@ impl Database {
         )
         .await?;
         if before.status != result.task.status
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::SetTaskField {
                         task_id: task_id.clone(),

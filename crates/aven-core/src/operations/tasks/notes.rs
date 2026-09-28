@@ -124,7 +124,6 @@ pub(in crate::operations) async fn add_note_operation(
         record_tui_undo(
             &mut tx,
             &workspace.id,
-            &format!("note {note_id}"),
             UndoPayload {
                 commands: vec![UndoCommand::DeleteCreatedNote {
                     task_id: task_id.clone(),
@@ -203,7 +202,6 @@ async fn edit_note_operation(
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &format!("edit note {note_id}"),
                 UndoPayload {
                     commands: vec![UndoCommand::SetNoteBody {
                         task_id: task_id.clone(),
@@ -289,7 +287,6 @@ async fn delete_note_operation(
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &format!("delete note {note_id}"),
                 UndoPayload {
                     commands: vec![UndoCommand::RestoreDeletedNote {
                         task_id: task_id.clone(),

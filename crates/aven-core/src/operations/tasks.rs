@@ -32,7 +32,6 @@ pub enum TaskCreationUndo {
     TuiTask,
     TuiEpicChild {
         epic_id: TaskId,
-        epic_display_ref: String,
     },
 }
 

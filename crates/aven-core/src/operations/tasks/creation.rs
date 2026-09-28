@@ -8,7 +8,7 @@ use crate::labels::{resolve_labels_in_workspace, resolve_or_create_labels_in_wor
 use crate::projects::{
     resolve_existing_project_in_workspace, resolve_or_create_project_in_workspace,
 };
-use crate::refs::{DisplayRefContext, get_task_in_workspace};
+use crate::refs::get_task_in_workspace;
 use crate::task_fields::TaskField;
 use crate::types::Task;
 use crate::undo::{UndoCommand, UndoPayload, record_tui_undo, task_snapshot};
@@ -166,7 +166,7 @@ pub(super) async fn record_task_creation_undo(
     attachment_change_ids: Vec<String>,
     undo: TaskCreationUndo,
 ) -> Result<()> {
-    let (summary, commands) = match undo {
+    let commands = match undo {
         TaskCreationUndo::None => return Ok(()),
         TaskCreationUndo::TuiTask => {
             let mut commands = vec![UndoCommand::DeleteCreatedTask {
@@ -177,24 +177,14 @@ pub(super) async fn record_task_creation_undo(
                 attachment_change_ids,
             }];
             append_created_label_undo_commands(&mut commands, &inserted.created_labels);
-            (format!("task {}", task.id), commands)
+            commands
         }
-        TaskCreationUndo::TuiEpicChild {
+        TaskCreationUndo::TuiEpicChild { epic_id } => vec![UndoCommand::AddEpicChild {
             epic_id,
-            epic_display_ref,
-        } => {
-            let display_refs = DisplayRefContext::for_workspace(conn, &workspace.id).await?;
-            let child_ref = display_refs.display_ref(task);
-            (
-                format!("add {child_ref} to {epic_display_ref}"),
-                vec![UndoCommand::AddEpicChild {
-                    epic_id,
-                    child_id: task.id.clone(),
-                }],
-            )
-        }
+            child_id: task.id.clone(),
+        }],
     };
-    record_tui_undo(conn, &workspace.id, &summary, UndoPayload { commands }).await
+    record_tui_undo(conn, &workspace.id, UndoPayload { commands }).await
 }
 
 pub(super) fn append_created_label_undo_commands(

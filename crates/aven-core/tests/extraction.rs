@@ -133,7 +133,7 @@ async fn tui_task_mutation_uses_one_transaction_for_change_and_undo() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("status atomic task"),
+            UndoContext::tui(),
         )
         .await
         .unwrap();
@@ -165,7 +165,7 @@ async fn tui_task_mutation_uses_one_transaction_for_change_and_undo() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("status atomic task"),
+            UndoContext::tui(),
         )
         .await
         .unwrap_err();
@@ -223,7 +223,7 @@ async fn task_metadata_undo_tracks_field_identity_across_renames() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("set metadata"),
+            UndoContext::tui(),
         )
         .await
         .unwrap();
@@ -265,7 +265,7 @@ async fn task_metadata_undo_tracks_field_identity_across_renames() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("remove metadata"),
+            UndoContext::tui(),
         )
         .await
         .unwrap();

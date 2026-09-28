@@ -67,7 +67,6 @@ impl Database {
         task_id: &TaskId,
         field: &str,
         value: &str,
-        summary: &str,
     ) -> Result<ConflictResolutionOutcome> {
         let mut conn = self.acquire_writer().await?;
         resolve_conflict_value(
@@ -77,7 +76,7 @@ impl Database {
             field,
             ConflictResolutionValue::Explicit(value),
             None,
-            Some(summary),
+            true,
         )
         .await
     }
@@ -249,7 +248,7 @@ pub async fn resolve_conflict(
         field,
         ConflictResolutionValue::Explicit(value),
         None,
-        None,
+        false,
     )
     .await?
     .outcome)
@@ -270,7 +269,7 @@ pub(crate) async fn resolve_conflict_transaction(
         field,
         resolution,
         Some(expected),
-        None,
+        false,
     )
     .await?
     .outcome)

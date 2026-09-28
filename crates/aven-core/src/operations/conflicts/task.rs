@@ -23,13 +23,10 @@ pub(super) async fn resolve_conflict_value(
     field: &str,
     resolution: ConflictResolutionValue<'_>,
     expected: Option<ExpectedConflictIdentity<'_>>,
-    tui_summary: Option<&str>,
+    tui_undo: bool,
 ) -> Result<ConflictResolutionOutcome> {
     if let Some(field_id) = field.strip_prefix("metadata:") {
-        ensure!(
-            tui_summary.is_none(),
-            "error metadata-conflicts-not-supported-in-tui"
-        );
+        ensure!(!tui_undo, "error metadata-conflicts-not-supported-in-tui");
         return super::metadata::resolve_metadata_conflict_value(
             conn,
             workspace,
@@ -131,11 +128,10 @@ pub(super) async fn resolve_conflict_value(
     .await?;
     let task = get_task_in_workspace(&mut tx, workspace, task_id).await?;
     let after = crate::undo::task_field_value(&mut tx, &workspace.id, task_id, field).await?;
-    if let Some(summary) = tui_summary {
+    if tui_undo {
         record_tui_undo(
             &mut tx,
             &workspace.id,
-            summary,
             UndoPayload {
                 commands: vec![UndoCommand::RestoreConflictResolution {
                     task_id: task_id.clone(),

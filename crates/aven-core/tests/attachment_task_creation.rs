@@ -437,7 +437,7 @@ async fn task_deletion_and_restore_reconcile_attachment_liveness() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("delete attachment task"),
+            UndoContext::tui(),
         )
         .await
         .unwrap();
@@ -481,7 +481,7 @@ async fn liveness_failure_rolls_back_task_deletion_and_undo() {
                     ..TaskUpdate::default()
                 },
             )],
-            UndoContext::tui("delete attachment task"),
+            UndoContext::tui(),
         )
         .await
         .unwrap_err();
