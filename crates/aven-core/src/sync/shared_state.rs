@@ -749,20 +749,36 @@ async fn load_persisted_local_capture(
     }))
 }
 
+/// One captured change: ID, prefix rank, source server sequence and source
+/// pending rank.
+pub(super) type RankRow<'a> = (std::borrow::Cow<'a, str>, i64, Option<i64>, Option<i64>);
+
+/// The capture's rank table as JSON text, parsed with [`RankRow`]. One array
+/// for the whole table: decoding thousands of rows one by one through the
+/// driver costs several times the query itself.
+pub(super) async fn rank_rows_json(
+    conn: &mut sqlx::SqliteConnection,
+    candidate_id: &str,
+) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT json_group_array(json_array(
+                    change_id, prefix_rank, source_server_seq, source_pending_rank))
+         FROM local_shared_capture_changes WHERE candidate_id = ?",
+    )
+    .bind(candidate_id)
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
 async fn validate_persisted_local_capture(
     conn: &mut sqlx::SqliteConnection,
     candidate_id: &str,
     persisted_images: &[PersistedCaptureImage],
     snapshot: &AvenExport,
 ) -> Result<()> {
-    let stored: Vec<(String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT change_id, prefix_rank, source_server_seq, source_pending_rank
-         FROM local_shared_capture_changes
-         WHERE candidate_id = ? ORDER BY prefix_rank",
-    )
-    .bind(candidate_id)
-    .fetch_all(&mut *conn)
-    .await?;
+    let stored = rank_rows_json(conn, candidate_id).await?;
+    let mut stored: Vec<RankRow<'_>> = serde_json::from_str(&stored)?;
+    stored.sort_by_key(|row| row.1);
     let provenance = snapshot
         .tables
         .shared_history_provenance
@@ -778,7 +794,7 @@ async fn validate_persisted_local_capture(
                 .get(change.change_id.as_str())
                 .context("shared history provenance is missing")?;
             Ok((
-                change.change_id.clone(),
+                std::borrow::Cow::Borrowed(change.change_id.as_str()),
                 change
                     .server_seq
                     .context("shared history rank is missing")?,

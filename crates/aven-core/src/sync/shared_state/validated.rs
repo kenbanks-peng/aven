@@ -283,13 +283,9 @@ impl FrozenIdentity {
 /// Commits to the capture's rank table and image rows, which adoption and
 /// packaging read directly.
 async fn tables_digest(conn: &mut SqliteConnection, candidate: &str) -> Result<[u8; 32]> {
-    let changes: Vec<(String, i64, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT change_id, prefix_rank, source_server_seq, source_pending_rank
-         FROM local_shared_capture_changes WHERE candidate_id = ? ORDER BY change_id",
-    )
-    .bind(candidate)
-    .fetch_all(&mut *conn)
-    .await?;
+    let changes = super::rank_rows_json(conn, candidate).await?;
+    let mut changes: Vec<super::RankRow<'_>> = serde_json::from_str(&changes)?;
+    changes.sort_by(|a, b| a.0.cmp(&b.0));
     let images = mapping_rows(conn, candidate).await?;
     let mut digest = Sha256::new();
     digest.update(b"aven-local-capture-tables-v1");
