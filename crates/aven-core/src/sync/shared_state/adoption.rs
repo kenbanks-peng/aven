@@ -3,6 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
+use std::borrow::Cow;
 
 use super::validated::{FreezeBinding, ProofCache, VALIDATION_VERSION, ValidatedSeed};
 use super::{NeverDispatchedLocalSharedCapture, package};
@@ -210,18 +211,61 @@ struct SourceChange<'a> {
     server_seq: Option<i64>,
 }
 
+/// One live `changes` row, decoded from a JSON array in column order.
+#[derive(Deserialize)]
+struct LiveChange<'a> {
+    #[serde(borrow)]
+    change_id: Cow<'a, str>,
+    #[serde(borrow)]
+    client_id: Cow<'a, str>,
+    local_seq: i64,
+    #[serde(borrow)]
+    entity_type: Cow<'a, str>,
+    #[serde(borrow)]
+    entity_id: Cow<'a, str>,
+    #[serde(borrow)]
+    field: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    op_type: Cow<'a, str>,
+    #[serde(borrow)]
+    payload: Cow<'a, str>,
+    #[serde(borrow)]
+    base_version: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    created_at: Cow<'a, str>,
+    server_seq: Option<i64>,
+}
+
+impl<'a> From<&'a crate::data_safety::ChangeRow> for LiveChange<'a> {
+    fn from(row: &'a crate::data_safety::ChangeRow) -> Self {
+        Self {
+            change_id: Cow::Borrowed(&row.change_id),
+            client_id: Cow::Borrowed(&row.client_id),
+            local_seq: row.local_seq,
+            entity_type: Cow::Borrowed(&row.entity_type),
+            entity_id: Cow::Borrowed(&row.entity_id),
+            field: row.field.as_deref().map(Cow::Borrowed),
+            op_type: Cow::Borrowed(&row.op_type),
+            payload: Cow::Borrowed(&row.payload),
+            base_version: row.base_version.as_deref().map(Cow::Borrowed),
+            created_at: Cow::Borrowed(&row.created_at),
+            server_seq: row.server_seq,
+        }
+    }
+}
+
 impl SourceChange<'_> {
     /// Compares every field, the original server sequence only when asked.
     /// Payloads match byte-for-byte first and semantically otherwise.
-    fn matches(&self, row: &crate::data_safety::ChangeRow, with_server_seq: bool) -> Result<bool> {
+    fn matches(&self, row: &LiveChange<'_>, with_server_seq: bool) -> Result<bool> {
         if self.change_id != row.change_id
             || self.client_id != row.client_id
             || self.local_seq != row.local_seq
             || self.entity_type != row.entity_type
             || self.entity_id != row.entity_id
-            || self.field != row.field
+            || self.field.as_deref() != row.field.as_deref()
             || self.op_type != row.op_type
-            || self.base_version != row.base_version
+            || self.base_version.as_deref() != row.base_version.as_deref()
             || self.created_at != row.created_at
             || (with_server_seq && self.server_seq != row.server_seq)
         {
@@ -288,24 +332,28 @@ async fn validate_history(
     let mut pending = expected.iter();
     let mut after = String::new();
     loop {
-        let page: Vec<crate::data_safety::ChangeRow> = sqlx::query_as(
-            "SELECT ch.change_id, ch.client_id, ch.local_seq, ch.entity_type, ch.entity_id,
-                    ch.field, ch.op_type, ch.payload, ch.base_version, ch.created_at,
-                    ch.server_seq
-             FROM local_shared_capture_changes c
-             JOIN changes ch ON ch.change_id = c.change_id
-             WHERE c.candidate_id = ? AND c.change_id > ?
-             ORDER BY c.change_id LIMIT ?",
+        // One JSON array per page: decoding thousands of rows one by one
+        // through the driver costs several times the query itself.
+        let page: String = sqlx::query_scalar(
+            "SELECT json_group_array(json_array(
+                        change_id, client_id, local_seq, entity_type, entity_id, field,
+                        op_type, payload, base_version, created_at, server_seq))
+             FROM (SELECT ch.* FROM local_shared_capture_changes c
+                   JOIN changes ch ON ch.change_id = c.change_id
+                   WHERE c.candidate_id = ? AND c.change_id > ?
+                   ORDER BY c.change_id LIMIT ?)",
         )
         .bind(candidate)
         .bind(&after)
         .bind(HISTORY_PAGE)
-        .fetch_all(&mut *conn)
+        .fetch_one(&mut *conn)
         .await?;
+        let page: Vec<LiveChange<'_>> =
+            serde_json::from_str(&page).context("error seed-captured-history-changed")?;
         let Some(last) = page.last() else {
             break;
         };
-        after = last.change_id.clone();
+        after = last.change_id.to_string();
         for row in &page {
             let source_row = pending
                 .next()
@@ -331,18 +379,21 @@ async fn validate_history(
     }
     let source: Vec<Provenance> =
         serde_json::from_str(&stored_provenance).context("error seed-history-invalid")?;
-    let current: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT p.change_id, p.source_server_seq, p.source_pending_rank
+    let current: String = sqlx::query_scalar(
+        "SELECT json_group_array(json_array(
+                    p.change_id, p.source_server_seq, p.source_pending_rank))
          FROM shared_history_provenance p
          JOIN local_shared_capture_changes c
            ON c.candidate_id = ? AND c.change_id = p.change_id",
     )
     .bind(candidate)
-    .fetch_all(&mut *conn)
+    .fetch_one(&mut *conn)
     .await?;
-    let current: std::collections::HashMap<String, (Option<i64>, Option<i64>)> = current
-        .into_iter()
-        .map(|(id, seq, rank)| (id, (seq, rank)))
+    let current: Vec<(Cow<'_, str>, Option<i64>, Option<i64>)> =
+        serde_json::from_str(&current).context("error seed-source-provenance-changed")?;
+    let current: std::collections::HashMap<&str, (Option<i64>, Option<i64>)> = current
+        .iter()
+        .map(|(id, seq, rank)| (id.as_ref(), (*seq, *rank)))
         .collect();
     // Every source row must match a current row of a captured change, and
     // no captured change may carry provenance the source lacks. Provenance of
@@ -352,7 +403,8 @@ async fn validate_history(
     let provenance_changed = unique.len() != source.len()
         || source.len() != current.len()
         || source.iter().any(|row| {
-            current.get(&row.change_id) != Some(&(row.source_server_seq, row.source_pending_rank))
+            current.get(row.change_id.as_str())
+                != Some(&(row.source_server_seq, row.source_pending_rank))
         });
     ensure!(!provenance_changed, "error seed-source-provenance-changed");
 
@@ -414,7 +466,7 @@ pub(super) async fn check_frozen_history(
     );
     for (source_row, frozen_row) in expected.iter().zip(&frozen) {
         ensure!(
-            source_row.matches(frozen_row, false)?,
+            source_row.matches(&LiveChange::from(*frozen_row), false)?,
             "error seed-captured-history-map-mismatch"
         );
     }
