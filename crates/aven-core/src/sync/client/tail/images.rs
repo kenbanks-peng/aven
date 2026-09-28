@@ -18,8 +18,10 @@ struct ImageRoundLimits {
     metadata_pull_skips: usize,
 }
 
-/// A round transfers one image at a time until either bound is reached. A
-/// complete metadata observation may be reused only for this many intervening
+/// A round transfers one image at a time until either bound is reached, and
+/// always attempts at least one transfer so slow pushes, pulls or stale-context
+/// refreshes earlier in the round cannot starve image progress. A complete
+/// metadata observation may be reused only for this many intervening
 /// image-only rounds before another pull is required.
 const IMAGE_ROUND_LIMITS: ImageRoundLimits = ImageRoundLimits {
     objects: 16,
@@ -128,8 +130,9 @@ impl Default for RoundProgress {
 
 impl RoundProgress {
     fn image_budget_available(&self) -> bool {
-        self.image_transfers < IMAGE_ROUND_LIMITS.objects
-            && self.image_started.elapsed() < IMAGE_ROUND_LIMITS.elapsed
+        self.image_transfers == 0
+            || (self.image_transfers < IMAGE_ROUND_LIMITS.objects
+                && self.image_started.elapsed() < IMAGE_ROUND_LIMITS.elapsed)
     }
 
     fn transferred_image(&mut self) {
@@ -530,5 +533,21 @@ fn settled(state: &tail::RoundState, publishing_blocked: bool) -> ImageTransfer 
         Some(d) if d.unavailable => ImageTransfer::Unavailable,
         Some(_) if !state.upload_pending || publishing_blocked => ImageTransfer::Complete,
         _ => ImageTransfer::Pending,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_round_time_still_allows_the_first_image_transfer() {
+        let mut progress = RoundProgress {
+            image_started: Instant::now() - IMAGE_ROUND_LIMITS.elapsed,
+            ..RoundProgress::default()
+        };
+        assert!(progress.image_budget_available());
+        progress.transferred_image();
+        assert!(!progress.image_budget_available());
     }
 }

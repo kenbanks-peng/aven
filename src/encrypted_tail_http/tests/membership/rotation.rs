@@ -652,9 +652,12 @@ async fn rotation_during_historical_image_read_keeps_the_selected_download() {
         resume.send(()).unwrap();
     });
     result.unwrap();
+    // The stale read is retried for the same selected object; the round may
+    // then continue to other pending images within its budget.
     let reads = fault.reads.lock().unwrap().clone();
-    assert_eq!(reads.len(), 2);
+    assert!(reads.len() >= 2, "{reads:?}");
     assert_eq!(reads[0], reads[1]);
+    assert!(reads[2..].iter().all(|read| *read != reads[0]), "{reads:?}");
     assert_eq!(
         floor(&third.store, &third.db, &f.origin).await.sequence(),
         7
