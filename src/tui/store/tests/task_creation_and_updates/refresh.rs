@@ -80,9 +80,14 @@ async fn late_refresh_failure_preserves_view_and_cached_state() {
         .iter()
         .map(|entry| (entry.label.clone(), entry.count))
         .collect::<Vec<_>>();
+    store.task_list_view();
+    store.column_board();
     store.fail_next_refresh_at(RefreshFailureStage::Tasks);
 
     let error = store.show_view(TaskQuery::Todo).await.unwrap_err();
+
+    assert!(store.derived.task_list.get().is_some());
+    assert!(store.derived.columns.get().is_some());
 
     assert!(error.to_string().contains("Tasks"));
     assert_eq!(store.refresh_health(), RefreshHealth::Failed);
@@ -161,6 +166,48 @@ async fn refresh_replacement_preserves_retained_state_without_cloning_projection
         projection_clone_count.load(std::sync::atomic::Ordering::Relaxed),
         0
     );
+}
+
+#[tokio::test]
+async fn projection_transitions_invalidate_only_affected_indexes() {
+    let mut store = test_store().await;
+    let (task_id, _) = create_selected_task(&mut store, "Indexed task").await;
+    store.show_view(TaskQuery::All).await.unwrap();
+    let warm = |store: &TuiStore| {
+        store.task_list_view();
+        store.column_board();
+    };
+    let cached = |store: &TuiStore| {
+        (
+            store.derived.task_list.get().is_some(),
+            store.derived.columns.get().is_some(),
+        )
+    };
+
+    warm(&store);
+    store
+        .ensure_task_details(std::slice::from_ref(&task_id))
+        .await
+        .unwrap();
+    store.take_new_undo_entry_id();
+    store.clear_recurrence_detail();
+    store.set_layout(TaskLayout::Columns).unwrap();
+    store.set_layout(TaskLayout::List).unwrap();
+    assert_eq!(cached(&store), (true, true));
+
+    store.set_task_columns(Vec::new());
+    assert_eq!(cached(&store), (true, false));
+
+    warm(&store);
+    let item = store.tasks[0].clone();
+    store.remove_tasks(std::slice::from_ref(&task_id));
+    assert_eq!(cached(&store), (false, false));
+    assert!(store.tasks.is_empty());
+
+    warm(&store);
+    store.insert_task(0, item);
+    assert_eq!(cached(&store), (false, false));
+    assert_eq!(store.task_list_view().row_count(), 1);
 }
 
 #[tokio::test]

@@ -47,56 +47,58 @@ impl TuiStore {
         let outcome = crate::operations::init_config_at(path)?;
         Ok(format!("created config {}", outcome.path.display()))
     }
+}
 
-    pub(super) async fn load_sync_status(&self) -> Result<TuiSyncStatus> {
-        let config = self.config();
-        let persistence = self.database.sync_persistence_status().await?;
-        let pinned_server = persistence.pinned_server.clone();
-        let configured_server = configured_server_check(config);
-        let server_match = configured_server
-            .as_ref()
-            .filter(|server| server.ok)
-            .and_then(|server| {
-                pinned_server.as_deref().map(|pinned| {
-                    let configured = server.value.trim_end_matches('/');
-                    SyncStatusCheck::new(
-                        pinned == configured,
-                        if pinned == configured {
-                            "yes".to_string()
-                        } else {
-                            format!("pinned={pinned} configured={configured}")
-                        },
-                    )
-                })
-            });
-        let daemon_server = daemon_server_check(config);
-        let daemon_wake = match config.wake_addr() {
-            Ok(addr) => SyncStatusCheck::new(true, addr.to_string()),
-            Err(error) => SyncStatusCheck::new(false, format!("{error:#}")),
-        };
-        Ok(TuiSyncStatus {
-            enabled: config.sync.enabled,
-            runtime_allowed: config.sync_is_allowed(),
-            config_error: None,
-            configured_server,
-            pinned_server,
-            server_match,
-            daemon_server,
-            auth_token_configured: config.sync_auth_token().is_some(),
-            interval_seconds: config.sync_interval_seconds(),
-            daemon_wake,
-            pending_changes: persistence.pending_changes,
-            conflicts: persistence.conflicts,
-            sync_cursor: persistence.sync_cursor,
-            local_sequence: persistence.local_sequence,
-            last_attempt: persistence.last_attempt,
-            last_success: persistence.last_success,
-            last_error: persistence.last_error,
-            last_pushed: persistence.last_pushed,
-            last_pulled: persistence.last_pulled,
-            last_cursor: persistence.last_cursor,
-        })
-    }
+pub(super) async fn load_sync_status(
+    database: &aven_core::db::Database,
+    config: &app_config::AppConfig,
+) -> Result<TuiSyncStatus> {
+    let persistence = database.sync_persistence_status().await?;
+    let pinned_server = persistence.pinned_server.clone();
+    let configured_server = configured_server_check(config);
+    let server_match = configured_server
+        .as_ref()
+        .filter(|server| server.ok)
+        .and_then(|server| {
+            pinned_server.as_deref().map(|pinned| {
+                let configured = server.value.trim_end_matches('/');
+                SyncStatusCheck::new(
+                    pinned == configured,
+                    if pinned == configured {
+                        "yes".to_string()
+                    } else {
+                        format!("pinned={pinned} configured={configured}")
+                    },
+                )
+            })
+        });
+    let daemon_server = daemon_server_check(config);
+    let daemon_wake = match config.wake_addr() {
+        Ok(addr) => SyncStatusCheck::new(true, addr.to_string()),
+        Err(error) => SyncStatusCheck::new(false, format!("{error:#}")),
+    };
+    Ok(TuiSyncStatus {
+        enabled: config.sync.enabled,
+        runtime_allowed: config.sync_is_allowed(),
+        config_error: None,
+        configured_server,
+        pinned_server,
+        server_match,
+        daemon_server,
+        auth_token_configured: config.sync_auth_token().is_some(),
+        interval_seconds: config.sync_interval_seconds(),
+        daemon_wake,
+        pending_changes: persistence.pending_changes,
+        conflicts: persistence.conflicts,
+        sync_cursor: persistence.sync_cursor,
+        local_sequence: persistence.local_sequence,
+        last_attempt: persistence.last_attempt,
+        last_success: persistence.last_success,
+        last_error: persistence.last_error,
+        last_pushed: persistence.last_pushed,
+        last_pulled: persistence.last_pulled,
+        last_cursor: persistence.last_cursor,
+    })
 }
 
 fn configured_server_check(config: &app_config::AppConfig) -> Option<SyncStatusCheck> {

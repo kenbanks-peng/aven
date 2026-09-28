@@ -390,7 +390,7 @@ impl App {
         if !had_overlay && self.detail.is_active() {
             self.detail.close();
             if self.store.view_state.query == crate::tui::store::TaskQuery::Recurring {
-                self.store.recurrence_detail = None;
+                self.store.clear_recurrence_detail();
             }
         } else if !had_overlay && self.list.focus() == Focus::Sidebar {
             self.list.focus_tasks();
@@ -445,8 +445,9 @@ impl App {
         let Some(return_state) = self.list.take_recent_action_return() else {
             return Ok(false);
         };
-        self.store.view_state = return_state.view_state;
-        self.store.refresh(None).await?;
+        self.store
+            .restore_view_state(return_state.view_state, None)
+            .await?;
         let selected = self
             .store
             .recent_actions
@@ -504,17 +505,29 @@ impl App {
                     .map(|task_id| detail.snapshot(task_id, self.store.view_state.clone()))
             }),
         };
-        self.store.view_state = TaskViewState::for_exact_task(task_id.clone());
-        let selected = self.store.refresh(Some(&task_id)).await?;
+        let selected = self
+            .store
+            .restore_view_state(
+                TaskViewState::for_exact_task(task_id.clone()),
+                Some(&MainRowSelection::Task(task_id.clone())),
+            )
+            .await?
+            .selected;
         let Some(selected) = selected.filter(|index| {
             self.store
                 .tasks
                 .get(*index)
                 .is_some_and(|item| item.task.id == task_id)
         }) else {
-            self.store.view_state = return_state.view_state;
             self.store
-                .refresh(return_state.selected_task_id.as_ref())
+                .restore_view_state(
+                    return_state.view_state,
+                    return_state
+                        .selected_task_id
+                        .clone()
+                        .map(MainRowSelection::Task)
+                        .as_ref(),
+                )
                 .await?;
             let selected = self
                 .store
@@ -540,11 +553,18 @@ impl App {
         self.cancel_authoring_overlay();
         self.overlay = None;
         self.detail.close();
-        self.store.view_state = return_state.view_state;
         let selected = self
             .store
-            .refresh(return_state.selected_task_id.as_ref())
+            .restore_view_state(
+                return_state.view_state,
+                return_state
+                    .selected_task_id
+                    .clone()
+                    .map(MainRowSelection::Task)
+                    .as_ref(),
+            )
             .await?
+            .selected
             .or_else(|| {
                 self.store
                     .restored_task_selection_at_index(return_state.selected_index)

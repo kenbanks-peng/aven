@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::tui::store::{ConflictTarget, MutationMessage};
 
-use super::TuiStore;
+use super::{TuiProjection, TuiStore};
 
 impl TuiStore {
     pub(crate) async fn conflict_targets(
@@ -59,67 +59,6 @@ impl TuiStore {
             );
         }
         Ok(targets)
-    }
-
-    pub(crate) async fn append_recurrence_conflict_tasks(&mut self) -> Result<()> {
-        let project = self.scope_project().map(str::to_string);
-        let conflicts = self
-            .database
-            .list_conflicts(&self.active_workspace, project.as_deref(), None)
-            .await?;
-        let mut task_ids = Vec::new();
-        for conflict in conflicts.into_iter().filter(|conflict| {
-            conflict.recurrence_series && !conflict.field.starts_with("metadata:")
-        }) {
-            let series_id = conflict.task_id.to_string().parse()?;
-            let detail = self
-                .database
-                .recurrence_series_detail_from_current_projection(
-                    &self.active_workspace.id,
-                    &series_id,
-                )
-                .await?;
-            if let Some(task_id) = detail
-                .current_occurrence
-                .and_then(|occurrence| occurrence.task_id)
-                && !task_ids.contains(&task_id)
-            {
-                task_ids.push(task_id);
-            }
-        }
-        if task_ids.is_empty() {
-            return Ok(());
-        }
-        let mut items = self
-            .database
-            .list_task_summary_items_from_current_projection(
-                &self.active_workspace.id,
-                crate::query::TaskFilters {
-                    task_ids: crate::query::TaskIdFilter::Only(task_ids),
-                    include_deleted: true,
-                    ..crate::query::TaskFilters::default()
-                },
-                crate::query::TaskQueryMode::Flat,
-                crate::query::TaskSort::Created,
-                crate::query::SortDirection::Asc,
-                None,
-            )
-            .await?;
-        for item in &mut items {
-            item.has_conflict = true;
-        }
-        for item in items {
-            if let Some(existing) = self
-                .tasks
-                .iter_mut()
-                .find(|existing| existing.task.id == item.task.id)
-            {
-                existing.has_conflict = true;
-            } else {
-                self.tasks.push(item);
-            }
-        }
-        Ok(())
     }
 
     pub(crate) async fn resolve_conflict_value(
@@ -192,5 +131,68 @@ impl TuiStore {
             .map(|task| task.has_conflict)
             .collect::<Vec<_>>();
         Self::next_conflict_flag_index(&flags, selected, delta)
+    }
+}
+
+impl TuiProjection {
+    pub(super) async fn append_recurrence_conflict_tasks(
+        &mut self,
+        database: &aven_core::db::Database,
+    ) -> Result<()> {
+        let project = self.scope_project().map(str::to_string);
+        let conflicts = database
+            .list_conflicts(&self.active_workspace, project.as_deref(), None)
+            .await?;
+        let mut task_ids = Vec::new();
+        for conflict in conflicts.into_iter().filter(|conflict| {
+            conflict.recurrence_series && !conflict.field.starts_with("metadata:")
+        }) {
+            let series_id = conflict.task_id.to_string().parse()?;
+            let detail = database
+                .recurrence_series_detail_from_current_projection(
+                    &self.active_workspace.id,
+                    &series_id,
+                )
+                .await?;
+            if let Some(task_id) = detail
+                .current_occurrence
+                .and_then(|occurrence| occurrence.task_id)
+                && !task_ids.contains(&task_id)
+            {
+                task_ids.push(task_id);
+            }
+        }
+        if task_ids.is_empty() {
+            return Ok(());
+        }
+        let mut items = database
+            .list_task_summary_items_from_current_projection(
+                &self.active_workspace.id,
+                crate::query::TaskFilters {
+                    task_ids: crate::query::TaskIdFilter::Only(task_ids),
+                    include_deleted: true,
+                    ..crate::query::TaskFilters::default()
+                },
+                crate::query::TaskQueryMode::Flat,
+                crate::query::TaskSort::Created,
+                crate::query::SortDirection::Asc,
+                None,
+            )
+            .await?;
+        for item in &mut items {
+            item.has_conflict = true;
+        }
+        for item in items {
+            if let Some(existing) = self
+                .tasks
+                .iter_mut()
+                .find(|existing| existing.task.id == item.task.id)
+            {
+                existing.has_conflict = true;
+            } else {
+                self.tasks.push(item);
+            }
+        }
+        Ok(())
     }
 }

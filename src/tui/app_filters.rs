@@ -91,7 +91,7 @@ impl App {
     }
 
     pub(super) fn set_layout(&mut self, layout: TaskLayout) {
-        if let Err(message) = self.store.view_state.set_layout(layout) {
+        if let Err(message) = self.store.set_layout(layout) {
             self.set_warning(message);
         }
     }

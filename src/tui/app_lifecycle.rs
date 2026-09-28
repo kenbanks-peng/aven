@@ -627,7 +627,7 @@ impl App {
                     let index = selected
                         .unwrap_or(self.store.tasks.len())
                         .min(self.store.tasks.len());
-                    self.store.tasks.insert(index, item);
+                    self.store.insert_task(index, item);
                     return Some(index);
                 }
                 result.selected
@@ -651,7 +651,7 @@ impl App {
                     self.store.load_recurrence_series_detail(&series_id).await?;
                 }
             } else {
-                self.store.recurrence_detail = None;
+                self.store.clear_recurrence_detail();
                 self.detail.close();
                 self.overlay = None;
                 self.set_warning("recurring series is no longer visible");
@@ -707,9 +707,7 @@ impl App {
     ) {
         let selected = self.list.selected_task().unwrap_or(0);
         let stale = hydration.stale_ids().cloned().collect::<Vec<_>>();
-        self.store
-            .tasks
-            .retain(|item| !stale.contains(&item.task.id));
+        self.store.remove_tasks(&stale);
         let rebound = (!self.store.tasks.is_empty())
             .then_some(selected.min(self.store.tasks.len().saturating_sub(1)));
         self.list.select_task(rebound);

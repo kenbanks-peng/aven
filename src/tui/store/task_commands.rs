@@ -477,7 +477,7 @@ impl TuiStore {
                 Some(index) => Some(index),
                 None => {
                     let index = selection.anchor_index().min(self.tasks.len());
-                    self.tasks.insert(index, item);
+                    self.insert_task(index, item);
                     Some(index)
                 }
             };
