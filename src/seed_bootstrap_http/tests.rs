@@ -11,6 +11,9 @@ use std::{
     process::{Child, Command, Stdio},
 };
 
+#[cfg(unix)]
+mod bench;
+
 #[tokio::test]
 async fn client_keeps_attachment_quota_refusal_code() {
     use axum::{Router, routing::post};

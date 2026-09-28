@@ -296,7 +296,7 @@ impl Database {
     /// `tx`; the keyed pass runs after it commits.
     async fn validate_frozen(
         &self,
-        mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+        mut tx: crate::db::WriterTransaction<'_>,
         package: EncryptedLocalSharedStatePackage,
         capture: NeverDispatchedLocalSharedCapture,
         context: LocalSharedStatePackageContext,

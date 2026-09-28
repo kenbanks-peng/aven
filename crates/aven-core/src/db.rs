@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(not(any(test, feature = "test-support")))]
+use sqlx::Transaction;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Connection as _, Sqlite, SqliteConnection, SqlitePool, Transaction};
+use sqlx::{Connection as _, Sqlite, SqliteConnection, SqlitePool};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::ids::new_id;
@@ -56,6 +58,8 @@ pub struct Database {
 pub(crate) struct WriterConnection {
     connection: sqlx::pool::PoolConnection<Sqlite>,
     _guard: OwnedMutexGuard<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    acquired: std::time::Instant,
 }
 
 impl Deref for WriterConnection {
@@ -69,6 +73,13 @@ impl Deref for WriterConnection {
 impl DerefMut for WriterConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.connection
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for WriterConnection {
+    fn drop(&mut self) {
+        crate::test_support::writer_timing::record_gate_hold(self.acquired.elapsed());
     }
 }
 
@@ -141,11 +152,17 @@ impl Database {
     }
 
     pub(crate) async fn acquire_writer(&self) -> Result<WriterConnection> {
+        #[cfg(any(test, feature = "test-support"))]
+        let waiting = std::time::Instant::now();
         let guard = self.writer.clone().lock_owned().await;
         let connection = self.pool.acquire().await?;
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::writer_timing::record_gate_wait(waiting.elapsed());
         Ok(WriterConnection {
             connection,
             _guard: guard,
+            #[cfg(any(test, feature = "test-support"))]
+            acquired: std::time::Instant::now(),
         })
     }
 }
@@ -294,10 +311,18 @@ pub(crate) async fn set_meta(conn: &mut SqliteConnection, key: &str, value: &str
     Ok(())
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) type WriterTransaction<'a> = Transaction<'a, Sqlite>;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) type WriterTransaction<'a> = crate::test_support::writer_timing::TimedTransaction<'a>;
+
 pub(crate) async fn begin_immediate(
     conn: &mut SqliteConnection,
-) -> sqlx::Result<Transaction<'_, Sqlite>> {
-    conn.begin_with("BEGIN IMMEDIATE").await
+) -> sqlx::Result<WriterTransaction<'_>> {
+    let transaction = conn.begin_with("BEGIN IMMEDIATE").await?;
+    #[cfg(any(test, feature = "test-support"))]
+    let transaction = WriterTransaction::new(transaction);
+    Ok(transaction)
 }
 
 async fn insert_meta_if_missing(conn: &mut SqliteConnection, key: &str, value: &str) -> Result<()> {
