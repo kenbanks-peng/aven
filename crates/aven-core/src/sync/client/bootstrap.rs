@@ -273,9 +273,9 @@ impl Client {
         self.resume_reporting(store, database, &|_, _| {}).await
     }
 
-    /// [`Self::resume`], reporting bytes the server holds of the package's
-    /// exact total: first what it already held, then again after each
-    /// stored batch. Only slots the server reports missing are sent.
+    /// [`Self::resume`], reporting acknowledged payload bytes for an
+    /// unpublished upload attempt against the package's exact total. Reporting
+    /// starts at zero; server presence never suppresses a frozen slot.
     pub async fn resume_reporting(
         &self,
         store: &ProtectedLocalKeyStore,
@@ -316,6 +316,9 @@ impl Client {
                     .ok_or_else(|| anyhow::anyhow!("error bootstrap-outcome-missing"))?;
                 let _timer = StageTimer::start("upload");
                 let budget = upload.budget();
+                if let Reply::Staging(ref current) = status {
+                    validate_staging(current, upload.slots(), binding, budget)?;
+                }
                 let staging = match status {
                     Reply::Missing => {
                         self.exchange(
@@ -328,13 +331,7 @@ impl Client {
                         )
                         .await?
                     }
-                    Reply::Staging(ref s) => {
-                        ensure!(
-                            s.descriptor_commitment == binding.descriptor_commitment
-                                && s.stream_id == binding.stream_id
-                                && s.budget == budget,
-                            "error bootstrap-status-mismatch"
-                        );
+                    Reply::Staging(_) => {
                         self.exchange(
                             seed.genesis(),
                             seed.bearer(),
@@ -347,6 +344,10 @@ impl Client {
                     }
                     _ => unreachable!(),
                 };
+                let Reply::Staging(staging) = staging else {
+                    anyhow::bail!("error bootstrap-response");
+                };
+                validate_staging(&staging, upload.slots(), binding, budget)?;
                 let header = |records| staging::batch::Header {
                     vault: seed.genesis().context().vault_id,
                     genesis: seed.genesis().commitment(),
@@ -354,59 +355,25 @@ impl Client {
                     commitment: binding.descriptor_commitment,
                     records,
                 };
-                let mut staging = staging;
-                let mut reported = false;
-                // Catalog slices must verify before the server lists the
-                // records they describe, so the second round sends those.
-                for _ in 0..3 {
-                    let Reply::Staging(status) = staging else {
-                        anyhow::bail!("error bootstrap-response");
-                    };
+                uploaded(0, budget.bytes);
+                let mut sent = 0_u64;
+                // Catalog slices precede every artifact batch, so the server
+                // can verify each catalog before it accepts dependent records.
+                for batch in pack(upload.slots(), header) {
+                    let records = upload.read(database, &batch).await?;
+                    let refs: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
+                    let reply = self.put_batch(seed.bearer(), &header(batch), &refs).await?;
                     ensure!(
-                        status.descriptor_commitment == binding.descriptor_commitment
-                            && status.stream_id == binding.stream_id
-                            && status.budget == budget,
-                        "error bootstrap-status-mismatch"
+                        matches!(reply, Reply::Stored),
+                        "error bootstrap-upload-refused"
                     );
-                    let missing = missing_slots(upload.slots(), &status)?;
-                    let listed = status.components.len();
-                    let mut held = budget.bytes
-                        - missing.iter().map(|slot| slot.len).sum::<u64>()
-                        - unlisted_bytes(upload.slots(), &status);
-                    if !reported {
-                        tracing::debug!(held, total = budget.bytes, "server holds staged bytes");
-                        uploaded(held, budget.bytes);
-                        reported = true;
-                    }
-                    let mut sent = 0_u64;
-                    for batch in pack(&missing, header) {
-                        let records = upload.read(database, &batch).await?;
-                        let refs: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
-                        let reply = self.put_batch(seed.bearer(), &header(batch), &refs).await?;
-                        ensure!(
-                            matches!(reply, Reply::Stored),
-                            "error bootstrap-upload-refused"
-                        );
-                        let length: u64 = records.iter().map(|r| r.len() as u64).sum();
-                        sent += length;
-                        held += length;
-                        uploaded(held, budget.bytes);
-                    }
-                    tracing::debug!(sent, "uploaded missing staged bytes");
-                    // Every component was listed, so every missing slot was sent.
-                    if listed == component_count(upload.slots()) {
-                        break;
-                    }
-                    staging = self
-                        .exchange(
-                            seed.genesis(),
-                            seed.bearer(),
-                            Operation::Status {
-                                bootstrap: binding.bootstrap_id,
-                            },
-                        )
-                        .await?;
+                    sent += records
+                        .iter()
+                        .map(|record| record.len() as u64)
+                        .sum::<u64>();
+                    uploaded(sent, budget.bytes);
                 }
+                tracing::debug!(sent, total = budget.bytes, "uploaded frozen staged bytes");
                 match self
                     .exchange(
                         seed.genesis(),
@@ -438,59 +405,79 @@ impl Client {
     }
 }
 
-/// Slots of `slots` the server lists as missing, in upload order.
-fn missing_slots(
-    slots: &[staging::batch::Slot],
+/// Validates a staging reply without treating server presence as an upload
+/// filter. Artifact components may be absent until their catalog is complete.
+fn validate_staging(
     status: &staging::StagingStatus,
-) -> Result<Vec<staging::batch::Slot>> {
-    let mut missing = Vec::new();
+    slots: &[staging::batch::Slot],
+    binding: &crate::sync::seed_claim::PublicationBinding,
+    budget: staging::Budget,
+) -> Result<()> {
+    ensure!(
+        status.descriptor_commitment == binding.descriptor_commitment
+            && status.stream_id == binding.stream_id
+            && status.budget == budget,
+        "error bootstrap-status-mismatch"
+    );
+
+    let mut seen = Vec::new();
     for listed in &status.components {
         let expected = slots
             .iter()
             .filter(|slot| slot.component == listed.component)
             .count();
         ensure!(
-            listed.chunks.len() == expected,
+            expected > 0 && listed.chunks.len() == expected && !seen.contains(&listed.component),
             "error bootstrap-status-mismatch"
         );
+        seen.push(listed.component);
     }
-    for slot in slots {
-        let listed = status
+
+    // Catalog slots and the descriptor's manifest are always listed. State
+    // and image slots appear only after their describing catalogs verify.
+    for component in [
+        staging::Component::DataCatalog,
+        staging::Component::PrefixCatalog,
+        staging::Component::ImageCatalog,
+        staging::Component::Manifest,
+    ] {
+        ensure!(seen.contains(&component), "error bootstrap-status-mismatch");
+    }
+
+    let catalog_complete = |component| {
+        status
             .components
             .iter()
-            .find(|listed| listed.component == slot.component);
-        if let Some(listed) = listed
-            && listed.chunks[slot.index as usize] == staging::Presence::Missing
-        {
-            missing.push(*slot);
-        }
-    }
-    Ok(missing)
-}
-
-/// Bytes of components the server does not list yet because their
-/// describing catalog has not verified.
-fn unlisted_bytes(slots: &[staging::batch::Slot], status: &staging::StagingStatus) -> u64 {
-    slots
-        .iter()
-        .filter(|slot| {
-            !status
-                .components
-                .iter()
-                .any(|listed| listed.component == slot.component)
-        })
-        .map(|slot| slot.len)
-        .sum()
-}
-
-fn component_count(slots: &[staging::batch::Slot]) -> usize {
-    let mut components: Vec<staging::Component> = Vec::new();
+            .find(|listed| listed.component == component)
+            .is_some_and(|listed| {
+                listed
+                    .chunks
+                    .iter()
+                    .all(|presence| *presence == staging::Presence::Verified)
+            })
+    };
+    let data_complete = catalog_complete(staging::Component::DataCatalog);
+    let images_complete = catalog_complete(staging::Component::ImageCatalog);
+    let listed = |component| seen.contains(&component);
+    ensure!(
+        listed(staging::Component::State) == data_complete,
+        "error bootstrap-status-mismatch"
+    );
+    let mut image_components = Vec::new();
     for slot in slots {
-        if !components.contains(&slot.component) {
-            components.push(slot.component);
+        if let staging::Component::Image(_) = slot.component
+            && !image_components.contains(&slot.component)
+        {
+            image_components.push(slot.component);
         }
     }
-    components.len()
+    ensure!(
+        image_components
+            .iter()
+            .all(|component| listed(*component) == images_complete),
+        "error bootstrap-status-mismatch"
+    );
+    Ok(())
 }
 
 /// Splits `slots` into batches within every batch limit, keeping catalog

@@ -532,7 +532,7 @@ async fn loopback_process_restart_recovers_exact_upload_and_remote_commit_before
     drop(http);
     drop(store);
     drop(db);
-    // Server exits after the first PUT commits, before writing its response.
+    // Server exits after the second binary batch commits, before its response.
     process_client(root.path(), &server.origin, "uncertain");
     drop(server);
     let db = Database::open(&root.path().join("client.sqlite"))
@@ -702,9 +702,11 @@ async fn server_worker() {
     let fault = std::env::var("AVEN_HTTP_TEST_FAULT").unwrap();
     let database = Database::open(&root.join("server.sqlite")).await.unwrap();
     e2ee_http::issue_setup(&database).await;
+    let batches = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = router(database, Default::default()).layer(axum::middleware::from_fn(
         move |request: Request, next: axum::middleware::Next| {
             let fault = fault.clone();
+            let batches = batches.clone();
             async move {
                 let (parts, body) = request.into_parts();
                 let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
@@ -713,7 +715,10 @@ async fn server_worker() {
                         fault == "publish"
                             && matches!(envelope.operation, Operation::Publish { .. })
                     }
-                    Err(_) => fault == "put",
+                    Err(_) => {
+                        fault == "put"
+                            && batches.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+                    }
                 };
                 let response = next
                     .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
@@ -832,85 +837,162 @@ async fn invalid_http_outcome_preserves_sealed_intent_and_capture_until_verified
 }
 
 #[tokio::test]
-async fn resumed_upload_reports_held_bytes_and_sends_only_missing_slots() {
+async fn unpublished_resume_replays_all_verified_slots_in_bounded_batches() {
     let root = tempfile::tempdir().unwrap();
     let (db, store, seed, package) = fixture(root.path()).await;
-    let expected = budget(&package).bytes;
+    let expected_bytes = budget(&package).bytes;
+    let expected_chunks = budget(&package).chunks;
+    let intent = store.prepare_seed_adoption_intent(&db).await.unwrap();
+    let binding = *intent.publication(seed.genesis()).unwrap().binding();
+    let expected: Vec<_> = components(&package)
+        .into_iter()
+        .flat_map(|(component, records)| {
+            records.into_iter().enumerate().map(move |(index, record)| {
+                (
+                    batch::Slot {
+                        component,
+                        index: index as u64,
+                        len: record.len() as u64,
+                    },
+                    record.to_vec(),
+                )
+            })
+        })
+        .collect();
     let server = Database::open(&root.path().join("server.sqlite"))
         .await
         .unwrap();
     e2ee_http::issue_setup(&server).await;
-    // After the claim, status, declaration and two stored batches (the
-    // catalogs, then the manifest), the server fails the next request.
-    let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
-        move |request: Request, next: axum::middleware::Next| {
-            let requests = requests.clone();
-            async move {
-                if requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 5 {
-                    return axum::response::IntoResponse::into_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    );
-                }
-                next.run(request).await
+        |request: Request, next: axum::middleware::Next| async move {
+            let (parts, body) = request.into_parts();
+            let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
+            if serde_json::from_slice::<Envelope>(&bytes)
+                .is_ok_and(|envelope| matches!(envelope.operation, Operation::Publish { .. }))
+            {
+                return axum::response::IntoResponse::into_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                );
             }
+            next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                .await
         },
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let http = Client::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
-    let task = tokio::spawn(async move {
+    let first_http = Client::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let first_task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    http.claim(
-        seed.genesis(),
-        ClaimAuthentication::SetupSecret(&Secret::new([7; 32])),
+    first_http
+        .claim(
+            seed.genesis(),
+            ClaimAuthentication::SetupSecret(&Secret::new([7; 32])),
+        )
+        .await
+        .unwrap();
+    let first_progress = std::sync::Mutex::new(Vec::new());
+    let record_first = |done, total| first_progress.lock().unwrap().push((done, total));
+    assert!(
+        first_http
+            .resume_reporting(&store, &db, &record_first)
+            .await
+            .is_err()
+    );
+    let first_progress = first_progress.into_inner().unwrap();
+    assert_eq!(first_progress.first(), Some(&(0, expected_bytes)));
+    assert_eq!(
+        first_progress.last(),
+        Some(&(expected_bytes, expected_bytes))
+    );
+
+    let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
+    let (held_bytes, held_chunks): (i64, i64) = sqlx::query_as(
+        "SELECT coalesce(sum(length(bytes)), 0), count(*) FROM server_bootstrap_chunks",
     )
+    .fetch_one(&mut *conn)
     .await
     .unwrap();
-    let log = std::sync::Mutex::new(Vec::new());
-    let record = |done, total| log.lock().unwrap().push((done, total));
-    assert!(http.resume_reporting(&store, &db, &record).await.is_err());
-    task.abort();
-    let first = std::mem::take(&mut *log.lock().unwrap());
-    let stored = |server: &Database| {
-        let server = server.clone();
-        async move {
-            let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
-            let (bytes, chunks): (i64, i64) = sqlx::query_as(
-                "SELECT coalesce(sum(length(bytes)), 0), count(*) FROM server_bootstrap_chunks",
-            )
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap();
-            (bytes as u64, chunks as u64)
-        }
-    };
-    let (held, held_chunks) = stored(&server).await;
-    assert!(held > 0 && held < expected);
-    // Two batches were stored before the refusal; nothing claimed more.
-    assert_eq!(first.len(), 3);
-    assert_eq!(first.first(), Some(&(0, expected)));
-    assert_eq!(first.last(), Some(&(held, expected)));
-
-    // Staging expired meanwhile; the retry ensures it again, then sends only
-    // the slots the server does not hold.
-    let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
-    sqlx::query("UPDATE server_bootstrap_candidates SET expires_at = 0")
-        .execute(&mut *conn)
+    let publications: i64 = sqlx::query_scalar("SELECT count(*) FROM server_bootstrap_publication")
+        .fetch_one(&mut *conn)
         .await
         .unwrap();
     drop(conn);
+    assert_eq!(held_bytes as u64, expected_bytes);
+    assert_eq!(held_chunks as u64, expected_chunks);
+    assert_eq!(publications, 0);
+    let Reply::Staging(status) = first_http
+        .exchange(
+            seed.genesis(),
+            seed.bearer(),
+            Operation::Status {
+                bootstrap: binding.bootstrap_id,
+            },
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("unpublished staging should remain resumable");
+    };
+    assert!(status.components.iter().all(|component| {
+        component
+            .chunks
+            .iter()
+            .all(|presence| *presence == staging::Presence::Verified)
+    }));
+    first_task.abort();
+
+    let expected_vault = seed.genesis().context().vault_id;
+    let expected_genesis = seed.genesis().commitment();
     let batches = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = batches.clone();
-    let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
+    let app = router(server, Default::default()).layer(axum::middleware::from_fn(
         move |request: Request, next: axum::middleware::Next| {
             let seen = seen.clone();
             async move {
                 let (parts, body) = request.into_parts();
                 let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
-                if let Ok(decoded) = batch::decode(&bytes) {
-                    seen.lock().unwrap().extend(decoded.header.records);
+                let is_batch = parts
+                    .headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(batch::CONTENT_TYPE);
+                if !is_batch {
+                    return next
+                        .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                        .await;
                 }
+                let decoded = batch::decode(&bytes).expect("upload must remain binary batches");
+                assert!(decoded.header.records.len() <= batch::MAX_RECORDS);
+                assert!(
+                    decoded
+                        .header
+                        .records
+                        .iter()
+                        .map(|slot| slot.len)
+                        .sum::<u64>()
+                        <= batch::MAX_PAYLOAD as u64
+                );
+                let catalog = decoded.header.records[0].component.is_catalog();
+                assert!(
+                    decoded
+                        .header
+                        .records
+                        .iter()
+                        .all(|slot| slot.component.is_catalog() == catalog)
+                );
+                assert_eq!(decoded.header.vault, expected_vault);
+                assert_eq!(decoded.header.genesis, expected_genesis);
+                assert_eq!(decoded.header.bootstrap, binding.bootstrap_id);
+                assert_eq!(decoded.header.commitment, binding.descriptor_commitment);
+                seen.lock().unwrap().push(
+                    decoded
+                        .header
+                        .records
+                        .iter()
+                        .copied()
+                        .zip(decoded.records.iter().map(|record| record.to_vec()))
+                        .collect::<Vec<_>>(),
+                );
                 next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
                     .await
             }
@@ -921,27 +1003,269 @@ async fn resumed_upload_reports_held_bytes_and_sends_only_missing_slots() {
     let task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
+    let progress = std::sync::Mutex::new(Vec::new());
+    let record = |done, total| progress.lock().unwrap().push((done, total));
     assert!(http.resume_reporting(&store, &db, &record).await.unwrap());
     task.abort();
-    let retry = std::mem::take(&mut *log.lock().unwrap());
-    let resent = std::mem::take(&mut *batches.lock().unwrap());
+
+    let observed_batches = std::mem::take(&mut *batches.lock().unwrap());
+    let observed: Vec<_> = observed_batches.iter().flatten().cloned().collect();
+    assert_eq!(observed, expected);
     assert_eq!(
-        resent.iter().map(|slot| slot.len).sum::<u64>(),
-        expected - held
+        observed.iter().map(|(slot, _)| slot.len).sum::<u64>(),
+        expected_bytes
     );
-    assert_eq!(resent.len() as u64, budget(&package).chunks - held_chunks);
-    assert!(
-        resent
-            .iter()
-            .all(|slot| !slot.component.is_catalog()
-                && slot.component != staging::Component::Manifest)
-    );
-    assert_eq!(retry.first(), Some(&(held, expected)));
-    assert_eq!(retry.last(), Some(&(expected, expected)));
-    for reports in [first, retry] {
-        assert!(reports.windows(2).all(|pair| pair[0].0 < pair[1].0));
-        assert!(reports.iter().all(|&(_, total)| total == expected));
+    assert_eq!(observed.len() as u64, expected_chunks);
+    let mut dependent_records_started = false;
+    for (slot, _) in &observed {
+        if slot.component.is_catalog() {
+            assert!(
+                !dependent_records_started,
+                "catalogs must be uploaded first"
+            );
+        } else {
+            dependent_records_started = true;
+        }
     }
+
+    let progress = progress.into_inner().unwrap();
+    assert_eq!(progress.len(), observed_batches.len() + 1);
+    assert_eq!(progress.first(), Some(&(0, expected_bytes)));
+    assert_eq!(progress.last(), Some(&(expected_bytes, expected_bytes)));
+    for (reports, batch) in progress.windows(2).zip(&observed_batches) {
+        let payload: u64 = batch.iter().map(|(slot, _)| slot.len).sum();
+        assert_eq!(reports[1].0 - reports[0].0, payload);
+        assert_eq!(reports[1].1, expected_bytes);
+    }
+}
+
+#[tokio::test]
+async fn inconsistent_staging_responses_fail_before_upload() {
+    // Cover the descriptor-bearing Declare response, the initial Status, and
+    // both identity and component-shape checks on Ensure.
+    for fault in 0..4 {
+        let root = tempfile::tempdir().unwrap();
+        let (db, store, seed, package) = fixture(root.path()).await;
+        let server = Database::open(&root.path().join("server.sqlite"))
+            .await
+            .unwrap();
+        let (initial, initial_task) = serve(server.clone()).await;
+        initial
+            .claim(
+                seed.genesis(),
+                ClaimAuthentication::SetupSecret(&Secret::new([7; 32])),
+            )
+            .await
+            .unwrap();
+        if fault != 0 {
+            initial
+                .exchange(
+                    seed.genesis(),
+                    seed.bearer(),
+                    Operation::Declare {
+                        descriptor: package.descriptor.clone(),
+                        budget: budget(&package),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        initial_task.abort();
+
+        let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
+            move |request: Request, next: axum::middleware::Next| async move {
+                let (parts, body) = request.into_parts();
+                let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
+                let target =
+                    serde_json::from_slice::<Envelope>(&bytes)
+                        .ok()
+                        .is_some_and(|envelope| match fault {
+                            0 => matches!(&envelope.operation, Operation::Declare { .. }),
+                            1 => matches!(&envelope.operation, Operation::Status { .. }),
+                            2 | 3 => matches!(&envelope.operation, Operation::Ensure { .. }),
+                            _ => unreachable!(),
+                        });
+                let response = next
+                    .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                    .await;
+                if !target {
+                    return response;
+                }
+                let (mut parts, body) = response.into_parts();
+                let bytes = to_bytes(body, RESPONSE_LIMIT).await.unwrap();
+                let mut reply: Reply = serde_json::from_slice(&bytes).unwrap();
+                let Reply::Staging(status) = &mut reply else {
+                    panic!("staging operation must return a staging reply");
+                };
+                match fault {
+                    0 => status.descriptor_commitment[0] ^= 1,
+                    1 => status.stream_id[0] ^= 1,
+                    2 => status.budget.bytes += 1,
+                    3 => {
+                        status.components.remove(0);
+                    }
+                    _ => unreachable!(),
+                }
+                parts.headers.remove(header::CONTENT_LENGTH);
+                axum::response::Response::from_parts(
+                    parts,
+                    axum::body::Body::from(serde_json::to_vec(&reply).unwrap()),
+                )
+            },
+        ));
+        let (origin, task) = e2ee_http::serve(app, "127.0.0.1:0").await;
+        let hostile = Client::new(&origin).unwrap();
+        assert_eq!(
+            hostile.resume(&store, &db).await.unwrap_err().to_string(),
+            "error bootstrap-status-mismatch"
+        );
+        let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
+        let chunks: i64 = sqlx::query_scalar("SELECT count(*) FROM server_bootstrap_chunks")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(chunks, 0);
+        drop(conn);
+        task.abort();
+
+        let (honest, task) = serve(server).await;
+        assert!(honest.resume(&store, &db).await.unwrap());
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn corrupt_later_batch_keeps_partial_staging_unpublished_and_retryable() {
+    let root = tempfile::tempdir().unwrap();
+    let (db, store, seed, package) = fixture(root.path()).await;
+    let (object, image_records) = components(&package)
+        .into_iter()
+        .find_map(|(component, records)| match component {
+            staging::Component::Image(object) => Some((
+                object,
+                records.into_iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            )),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!image_records.is_empty());
+    let intent = store.prepare_seed_adoption_intent(&db).await.unwrap();
+    let sealed_intent = intent.protected_storage_bytes().to_vec();
+    let server = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    let (initial, initial_task) = serve(server.clone()).await;
+    initial
+        .claim(
+            seed.genesis(),
+            ClaimAuthentication::SetupSecret(&Secret::new([7; 32])),
+        )
+        .await
+        .unwrap();
+    initial_task.abort();
+
+    let corrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let did_corrupt = corrupted.clone();
+    let local = db.clone();
+    let app = router(server.clone(), Default::default()).layer(axum::middleware::from_fn(
+        move |request: Request, next: axum::middleware::Next| {
+            let did_corrupt = did_corrupt.clone();
+            let local = local.clone();
+            async move {
+                let (parts, body) = request.into_parts();
+                let bytes = to_bytes(body, batch::MAX_BYTES).await.unwrap();
+                let catalogs = batch::decode(&bytes).ok().is_some_and(|batch| {
+                    batch
+                        .header
+                        .records
+                        .iter()
+                        .all(|slot| slot.component.is_catalog())
+                });
+                let response = next
+                    .run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+                    .await;
+                if catalogs
+                    && response.status() == StatusCode::OK
+                    && !did_corrupt.swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let mut conn = aven_core::test_support::acquire(&local).await.unwrap();
+                    sqlx::query(
+                        "UPDATE local_shared_capture_package_records
+                         SET record = zeroblob(length(record))
+                         WHERE component = 'image' AND object_id = ? AND chunk_index = 0",
+                    )
+                    .bind(object.as_slice())
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap();
+                }
+                response
+            }
+        },
+    ));
+    let (origin, task) = e2ee_http::serve(app, "127.0.0.1:0").await;
+    let http = Client::new(&origin).unwrap();
+    let error = http.resume(&store, &db).await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("seed-package-mismatch"),
+        "{error:#}"
+    );
+    assert!(corrupted.load(std::sync::atomic::Ordering::SeqCst));
+    task.abort();
+
+    let (intent_bytes, state) = db.seed_publication_intent_bytes().await.unwrap().unwrap();
+    assert_eq!(intent_bytes, sealed_intent);
+    assert_eq!(state, "sealed");
+    let mut conn = aven_core::test_support::acquire(&db).await.unwrap();
+    let captures: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_journal")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let associated: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM changes WHERE server_seq IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(captures, 1);
+    assert_eq!(associated, 0);
+    drop(conn);
+
+    let component = std::iter::once(5).chain(object).collect::<Vec<_>>();
+    let mut conn = aven_core::test_support::acquire(&server).await.unwrap();
+    let (staged, publications): (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM server_bootstrap_chunks),
+                (SELECT count(*) FROM server_bootstrap_publication)",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let target_staged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM server_bootstrap_chunks
+         WHERE component = ? AND chunk_index = 0",
+    )
+    .bind(&component)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert!(staged > 0, "earlier catalog batch should remain staged");
+    assert_eq!(publications, 0, "corruption must prevent publication");
+    assert_eq!(target_staged, 0, "corrupt record must not be sent");
+    drop(conn);
+
+    let mut conn = aven_core::test_support::acquire(&db).await.unwrap();
+    sqlx::query(
+        "UPDATE local_shared_capture_package_records SET record = ?
+         WHERE component = 'image' AND object_id = ? AND chunk_index = 0",
+    )
+    .bind(&image_records[0])
+    .bind(object.as_slice())
+    .execute(&mut *conn)
+    .await
+    .unwrap();
+    drop(conn);
+    let (retry, retry_task) = serve(server).await;
+    assert!(retry.resume(&store, &db).await.unwrap());
+    retry_task.abort();
 }
 
 #[tokio::test]
