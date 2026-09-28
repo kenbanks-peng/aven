@@ -68,7 +68,8 @@ pub struct NeverDispatchedLocalSharedCapture {
     stream_id: String,
     capture: SharedStateCapture,
     images: Vec<PersistedCaptureImage>,
-    /// SHA-256 of the exact stored snapshot document this value was decoded from.
+    /// SHA-256 of the exact stored snapshot document this value was decoded
+    /// from or encoded as.
     snapshot_digest: [u8; 32],
 }
 

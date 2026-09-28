@@ -19,6 +19,7 @@ use std::{path::PathBuf, sync::atomic::AtomicU64};
 use crate::db::Database;
 use crate::sync::{
     EncryptedLocalSharedStatePackage, LocalSharedStatePackageContext, LocalSharedStatePackageKey,
+    NeverDispatchedLocalSharedCapture,
 };
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -272,7 +273,7 @@ impl ProtectedLocalKeyStore {
         membership_predecessor: [u8; 32],
     ) -> Result<EncryptedLocalSharedStatePackage, anyhow::Error> {
         Ok(self
-            .package_local_capture_validated(database, blob_dir, membership_predecessor)
+            .package_local_capture_validated(database, blob_dir, membership_predecessor, None)
             .await?
             .0)
     }
@@ -282,6 +283,7 @@ impl ProtectedLocalKeyStore {
         database: &Database,
         blob_dir: &Path,
         membership_predecessor: [u8; 32],
+        capture: Option<NeverDispatchedLocalSharedCapture>,
     ) -> Result<
         (
             EncryptedLocalSharedStatePackage,
@@ -305,6 +307,7 @@ impl ProtectedLocalKeyStore {
                 protected.context(),
                 protected.package_key(),
                 membership_predecessor,
+                capture,
             )
             .await
     }

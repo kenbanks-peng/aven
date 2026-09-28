@@ -321,21 +321,19 @@ async fn validate_history(
     candidate: &str,
     source: &SeedSourceAuthority,
 ) -> Result<[u8; 32]> {
-    let (capture_source, history, stored_provenance, captured_generation): (
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        Option<Vec<u8>>,
-        i64,
-    ) = sqlx::query_as(
-        "SELECT j.source_authority, d.source_history, d.source_provenance, j.sync_generation
+    // Source authority, history, provenance and sync generation.
+    type CaptureRow = (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, i64);
+    let (capture_source, history, stored_provenance, captured_generation): CaptureRow =
+        sqlx::query_as(
+            "SELECT j.source_authority, d.source_history, d.source_provenance, j.sync_generation
          FROM local_shared_capture_journal j
          JOIN local_shared_capture_documents d USING (candidate_id)
          WHERE j.candidate_id = ?",
-    )
-    .bind(candidate)
-    .fetch_optional(&mut *conn)
-    .await?
-    .context("error seed-capture-missing")?;
+        )
+        .bind(candidate)
+        .fetch_optional(&mut *conn)
+        .await?
+        .context("error seed-capture-missing")?;
     ensure!(
         capture_source.as_deref() == Some(source.0.as_slice())
             && captured_generation == generation(conn).await?,

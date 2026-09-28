@@ -311,16 +311,21 @@ pub async fn run_setup(
             let _timer = bootstrap::StageTimer::start("prepare_source");
             store.prepare_seed_source(database).await?;
         }
-        {
+        let capture = {
             let _timer = bootstrap::StageTimer::start("capture");
             database
                 .capture_local_shared_state_for_setup(&blob_dir)
-                .await?;
-        }
+                .await?
+        };
         let _timer = bootstrap::StageTimer::start("package");
         proof = Some(
             store
-                .package_seed_capture_validated(database, &blob_dir, invitation.setup_id)
+                .package_seed_capture_validated(
+                    database,
+                    &blob_dir,
+                    invitation.setup_id,
+                    Some(capture),
+                )
                 .await?,
         );
     }

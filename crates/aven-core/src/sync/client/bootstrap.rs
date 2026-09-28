@@ -379,7 +379,7 @@ impl Client {
                         reported = true;
                     }
                     let mut sent = 0_u64;
-                    for batch in pack(&missing, |records| header(records)) {
+                    for batch in pack(&missing, header) {
                         let records = upload.read(database, &batch).await?;
                         let refs: Vec<&[u8]> = records.iter().map(Vec::as_slice).collect();
                         let reply = self.put_batch(seed.bearer(), &header(batch), &refs).await?;

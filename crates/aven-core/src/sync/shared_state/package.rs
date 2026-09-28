@@ -193,25 +193,34 @@ impl Database {
         membership_predecessor: [u8; 32],
     ) -> Result<EncryptedLocalSharedStatePackage> {
         Ok(self
-            .package_and_validate(blob_dir, context, key, membership_predecessor)
+            .package_and_validate(blob_dir, context, key, membership_predecessor, None)
             .await?
             .0)
     }
 
     /// [`Self::package_local_shared_state_never_dispatched`], also returning
     /// the proof made by its single keyed pass.
+    ///
+    /// `capture`, when given, is the value capture returned and stands in for
+    /// reading the stored snapshot again. It is bound to the stored document
+    /// by its digest before the freeze commits, so a stale or foreign value
+    /// fails closed.
     pub(crate) async fn package_and_validate(
         &self,
         blob_dir: &Path,
         context: LocalSharedStatePackageContext,
         key: &LocalSharedStatePackageKey,
         membership_predecessor: [u8; 32],
+        mut capture: Option<NeverDispatchedLocalSharedCapture>,
     ) -> Result<(EncryptedLocalSharedStatePackage, ValidatedSeed)> {
         let (capture, selected) = loop {
-            let capture = self
-                .resume_local_shared_state_never_dispatched()
-                .await?
-                .context("error local-shared-capture-missing")?;
+            let capture = match capture.take() {
+                Some(capture) => capture,
+                None => self
+                    .resume_local_shared_state_never_dispatched()
+                    .await?
+                    .context("error local-shared-capture-missing")?,
+            };
             let candidate_id = capture.candidate_id().to_string();
             let mut conn = self.acquire_writer().await?;
             let mut tx = db::begin_immediate(&mut conn).await?;

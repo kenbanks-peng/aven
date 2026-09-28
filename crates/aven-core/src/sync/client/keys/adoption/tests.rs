@@ -1467,7 +1467,7 @@ async fn fresh_setup_authenticates_the_frozen_package_once() {
         .unwrap();
     counters::take();
     let proof = store
-        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .package_seed_capture_validated(&database, root.path(), [9; 32], None)
         .await
         .unwrap();
     let packaged = counters::take();
@@ -1495,13 +1495,13 @@ async fn resuming_after_sealing_authenticates_nothing_again() {
         .unwrap();
     // Interrupted after freezing, before any intent.
     store
-        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .package_seed_capture_validated(&database, root.path(), [9; 32], None)
         .await
         .unwrap();
     counters::take();
     // Resume repackages (loading the frozen bytes) and prepares the intent.
     let proof = store
-        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .package_seed_capture_validated(&database, root.path(), [9; 32], None)
         .await
         .unwrap();
     store

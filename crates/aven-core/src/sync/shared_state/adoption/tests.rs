@@ -752,7 +752,8 @@ async fn unsupported_receipt_version_fails_without_touching_frozen_bytes() {
         let database = database.clone();
         async move {
             let mut conn = database.acquire_reader().await.unwrap();
-            let rows: Vec<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+            type Row = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+            let rows: Vec<Row> = sqlx::query_as(
                 "SELECT d.snapshot, j.frozen_descriptor_commitment, j.frozen_capture_commitment
                  FROM local_shared_capture_journal j
                  JOIN local_shared_capture_documents d USING (candidate_id)",

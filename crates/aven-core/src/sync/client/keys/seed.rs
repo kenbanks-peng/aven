@@ -73,15 +73,23 @@ impl ProtectedLocalKeyStore {
     }
 
     /// [`Self::package_seed_capture`], keeping only the validation proof.
+    /// `capture` is the value the capture step just returned, if any; see
+    /// [`Database::package_and_validate`].
     pub(crate) async fn package_seed_capture_validated(
         &self,
         database: &Database,
         blob_dir: &Path,
         setup_id: [u8; 32],
+        capture: Option<NeverDispatchedLocalSharedCapture>,
     ) -> anyhow::Result<crate::sync::shared_state::validated::ValidatedSeed> {
         let seed = self.prepare_seed_claim(database, setup_id).await?;
         Ok(self
-            .package_local_capture_validated(database, blob_dir, seed.genesis().commitment())
+            .package_local_capture_validated(
+                database,
+                blob_dir,
+                seed.genesis().commitment(),
+                capture,
+            )
             .await?
             .1)
     }

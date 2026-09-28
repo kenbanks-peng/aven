@@ -573,6 +573,73 @@ async fn failed_freeze_marker_write_rolls_back_bytes_but_retains_capture_and_pin
 }
 
 #[tokio::test]
+async fn packaging_the_captured_value_freezes_what_a_resume_accepts() {
+    let (dir, database, task) = source_with_history().await;
+    add_selected_images(dir.path(), &database, &task).await;
+    let captured = database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    let reloaded = database
+        .resume_local_shared_state_never_dispatched()
+        .await
+        .unwrap()
+        .unwrap();
+    // The value capture returns must be exactly what its stored document
+    // decodes to, or a resume could not match the package built from it.
+    assert_eq!(format!("{captured:?}"), format!("{reloaded:?}"));
+    drop(reloaded);
+    let key = package_key();
+    let (frozen, _) = database
+        .package_and_validate(dir.path(), package_context(), &key, [7; 32], Some(captured))
+        .await
+        .unwrap();
+    let (resumed, _) = database
+        .package_and_validate(dir.path(), package_context(), &key, [7; 32], None)
+        .await
+        .unwrap();
+    assert_eq!(fingerprint(&frozen), fingerprint(&resumed));
+}
+
+#[tokio::test]
+async fn a_replaced_capture_value_is_refused_before_freezing() {
+    let (dir, database, _) = source_with_history().await;
+    let stale = database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    database
+        .cancel_local_shared_state_never_dispatched(stale.candidate_id())
+        .await
+        .unwrap();
+    let current = database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    assert_ne!(stale.candidate_id(), current.candidate_id());
+    let key = package_key();
+    let error = database
+        .package_and_validate(dir.path(), package_context(), &key, [7; 32], Some(stale))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "error local-shared-capture-changed-during-packaging"
+    );
+    assert!(
+        !database
+            .has_local_shared_state_package_never_dispatched()
+            .await
+            .unwrap()
+    );
+    database
+        .package_and_validate(dir.path(), package_context(), &key, [7; 32], None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn stored_package_matches_only_the_exact_rows() {
     let (dir, database, task) = source_with_history().await;
     add_selected_images(dir.path(), &database, &task).await;
