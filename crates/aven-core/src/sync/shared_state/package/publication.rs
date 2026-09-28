@@ -265,6 +265,7 @@ pub(super) fn build(
     let state =
         crypto::encrypt_artifact(&plaintext, context, stream_id, bootstrap, 2, 1, &state_key)
             .map_err(|_| Error::Authentication)?;
+    drop(plaintext);
     let objects = images
         .iter()
         .map(|image| {
@@ -606,9 +607,9 @@ pub(crate) fn authenticate_capture(
     );
     let mappings = domain::decode_mappings(&plaintext)?;
     let tables = &capture.capture.snapshot.tables;
-    let (expected, stats) = domain::encode(tables, &mappings)?;
-    valid(*plaintext == expected)?;
-    drop(expected);
+    let mut matcher = domain::Matcher::new(&plaintext);
+    let stats = domain::encode_into(&mut matcher, tables, &mappings)?;
+    valid(matcher.matched())?;
     drop(plaintext);
     let manifest_key =
         crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 2)

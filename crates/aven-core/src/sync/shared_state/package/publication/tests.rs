@@ -776,3 +776,24 @@ async fn streaming_self_check_agrees_with_decoding_validator() {
         assert_eq!(decoding.is_ok(), valid);
     }
 }
+
+#[tokio::test]
+async fn domain_matcher_accepts_only_the_exact_encoding() {
+    let (_, _, capture, _, _) = specimen().await;
+    let tables = &capture.capture.snapshot.tables;
+    let (encoded, stats) = domain::encode(tables, &[]).unwrap();
+    let matches = |expected: &[u8]| {
+        let mut matcher = domain::Matcher::new(expected);
+        assert_eq!(
+            domain::encode_into(&mut matcher, tables, &[]).unwrap(),
+            stats
+        );
+        matcher.matched()
+    };
+    assert!(matches(&encoded));
+    let mut flipped = encoded.clone();
+    *flipped.last_mut().unwrap() ^= 1;
+    assert!(!matches(&flipped));
+    assert!(!matches(&encoded[..encoded.len() - 1]));
+    assert!(!matches(&[encoded.as_slice(), b"x"].concat()));
+}

@@ -325,7 +325,56 @@ fn payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(writer.bytes)
 }
 
-fn section<T: Serialize>(out: &mut Vec<u8>, kind: usize, values: &[T]) -> Result<(u64, u64)> {
+/// Where [`encode_into`] writes the domain bytes.
+pub(super) trait Out {
+    fn len(&self) -> usize;
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl Out for Vec<u8> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Compares the encoding with `expected` as it is produced, without
+/// materializing a second copy.
+pub(super) struct Matcher<'a> {
+    expected: &'a [u8],
+    written: usize,
+    equal: bool,
+}
+
+impl<'a> Matcher<'a> {
+    pub(super) fn new(expected: &'a [u8]) -> Self {
+        Self {
+            expected,
+            written: 0,
+            equal: true,
+        }
+    }
+
+    /// Whether the whole encoding equalled `expected`.
+    pub(super) fn matched(&self) -> bool {
+        self.equal && self.written == self.expected.len()
+    }
+}
+
+impl Out for Matcher<'_> {
+    fn len(&self) -> usize {
+        self.written
+    }
+    fn put(&mut self, bytes: &[u8]) {
+        let end = self.written + bytes.len();
+        self.equal &= self.expected.get(self.written..end) == Some(bytes);
+        self.written = end;
+    }
+}
+
+fn section<T: Serialize>(out: &mut impl Out, kind: usize, values: &[T]) -> Result<(u64, u64)> {
     bound(number(values.len())?, RECORD_LIMIT)?;
     let mut rows = Vec::new();
     let mut total = add(number(out.len())?, 10)?;
@@ -338,14 +387,15 @@ fn section<T: Serialize>(out: &mut Vec<u8>, kind: usize, values: &[T]) -> Result
     rows.sort();
     valid(rows.windows(2).all(|pair| pair[0] < pair[1]))?;
     let start = out.len();
-    out.extend_from_slice(&(kind as u16).to_be_bytes());
-    u64_bytes(out, number(rows.len())?);
+    out.put(&(kind as u16).to_be_bytes());
+    out.put(&number(rows.len())?.to_be_bytes());
     for row in rows {
         bound(
             add(number(out.len())?, add(8, number(row.len())?)?)?,
             STATE_LIMIT,
         )?;
-        bytes(out, &row)?;
+        out.put(&number(row.len())?.to_be_bytes());
+        out.put(&row);
     }
     Ok((number(values.len())?, number(out.len() - start)?))
 }
@@ -375,11 +425,21 @@ fn read_section<T: Serialize + for<'de> Deserialize<'de>>(
 }
 
 pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(Vec<u8>, Stats)> {
-    let mut out = b"AVBD".to_vec();
-    out.extend_from_slice(&(super::DOMAIN_VERSION as u16).to_be_bytes());
+    let mut out = Vec::new();
+    let stats = encode_into(&mut out, t, mappings)?;
+    Ok((out, stats))
+}
+
+pub(super) fn encode_into(
+    out: &mut impl Out,
+    t: &local::ExportTables,
+    mappings: &[Mapping],
+) -> Result<Stats> {
+    out.put(b"AVBD");
+    out.put(&(super::DOMAIN_VERSION as u16).to_be_bytes());
     let mut stats = [(0, 0); SECTIONS];
     stats[0] = section(
-        &mut out,
+        out,
         1,
         &t.workspaces
             .iter()
@@ -387,12 +447,12 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[1] = section(
-        &mut out,
+        out,
         2,
         &t.projects.iter().map(ProjectRow::from).collect::<Vec<_>>(),
     )?;
     stats[2] = section(
-        &mut out,
+        out,
         3,
         &t.project_id_aliases
             .iter()
@@ -400,12 +460,12 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[3] = section(
-        &mut out,
+        out,
         4,
         &t.labels.iter().map(LabelRow::from).collect::<Vec<_>>(),
     )?;
     stats[4] = section(
-        &mut out,
+        out,
         5,
         &t.metadata_fields
             .iter()
@@ -413,7 +473,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[5] = section(
-        &mut out,
+        out,
         6,
         &t.metadata_field_id_aliases
             .iter()
@@ -421,12 +481,12 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[6] = section(
-        &mut out,
+        out,
         7,
         &t.tasks.iter().map(TaskRow::from).collect::<Vec<_>>(),
     )?;
     stats[7] = section(
-        &mut out,
+        out,
         8,
         &t.task_metadata
             .iter()
@@ -434,7 +494,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[8] = section(
-        &mut out,
+        out,
         9,
         &t.task_labels
             .iter()
@@ -442,12 +502,12 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[9] = section(
-        &mut out,
+        out,
         10,
         &t.notes.iter().map(NoteRow::from).collect::<Vec<_>>(),
     )?;
     stats[10] = section(
-        &mut out,
+        out,
         11,
         &t.task_dependencies
             .iter()
@@ -455,7 +515,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[11] = section(
-        &mut out,
+        out,
         12,
         &t.task_epic_links
             .iter()
@@ -463,7 +523,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[12] = section(
-        &mut out,
+        out,
         13,
         &t.task_related_links
             .iter()
@@ -471,7 +531,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[13] = section(
-        &mut out,
+        out,
         14,
         &t.task_attachments
             .iter()
@@ -479,7 +539,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[14] = section(
-        &mut out,
+        out,
         15,
         &t.recurrence_series
             .iter()
@@ -487,7 +547,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[15] = section(
-        &mut out,
+        out,
         16,
         &t.recurrence_series_labels
             .iter()
@@ -495,7 +555,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[16] = section(
-        &mut out,
+        out,
         17,
         &t.recurrence_series_metadata
             .iter()
@@ -503,7 +563,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[17] = section(
-        &mut out,
+        out,
         18,
         &t.recurrence_occurrences
             .iter()
@@ -511,7 +571,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[18] = section(
-        &mut out,
+        out,
         19,
         &t.recurrence_pause_intervals
             .iter()
@@ -519,12 +579,12 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[19] = section(
-        &mut out,
+        out,
         20,
         &t.changes.iter().map(ChangeRow::from).collect::<Vec<_>>(),
     )?;
     stats[20] = section(
-        &mut out,
+        out,
         21,
         &t.shared_history_provenance
             .iter()
@@ -532,7 +592,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[21] = section(
-        &mut out,
+        out,
         22,
         &t.field_versions
             .iter()
@@ -540,7 +600,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[22] = section(
-        &mut out,
+        out,
         23,
         &t.conflicts
             .iter()
@@ -548,7 +608,7 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             .collect::<Vec<_>>(),
     )?;
     stats[23] = section(
-        &mut out,
+        out,
         24,
         &t.blob_inventory
             .iter()
@@ -571,13 +631,13 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
             value: row.value.clone(),
         });
     }
-    stats[24] = section(&mut out, 25, &baselines)?;
-    stats[25] = section(&mut out, 26, mappings)?;
+    stats[24] = section(out, 25, &baselines)?;
+    stats[25] = section(out, 26, mappings)?;
     bound(
         stats.iter().try_fold(0, |n, (count, _)| add(n, *count))?,
         RECORD_LIMIT,
     )?;
-    Ok((out, stats))
+    Ok(stats)
 }
 
 /// Reads only the private image mappings, framing past the domain sections
