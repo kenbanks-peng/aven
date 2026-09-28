@@ -749,6 +749,36 @@ fn availability_preserves_attention_filters_and_explicit_discovery() {
 }
 
 #[test]
+fn edit_sets_replaces_and_clears_task_agent() {
+    let env = TestEnv::new();
+    let db = env.db("task-agent.sqlite");
+    let task_ref = extract_ref(&ok(
+        env.aven(&db, ["add", "delegate implementation", "--project", "app"])
+    ));
+
+    ok(env.aven(&db, ["edit", &task_ref, "--agent", "claude"]));
+    let shown: serde_json::Value =
+        serde_json::from_str(&ok(env.aven(&db, ["show", &task_ref, "--full", "--json"]))).unwrap();
+    assert_eq!(shown["metadata"]["agent"], "claude");
+
+    ok(env.aven(&db, ["edit", &task_ref, "--agent", "cursor"]));
+    let shown: serde_json::Value =
+        serde_json::from_str(&ok(env.aven(&db, ["show", &task_ref, "--full", "--json"]))).unwrap();
+    assert_eq!(shown["metadata"]["agent"], "cursor");
+
+    ok(env.aven(&db, ["edit", &task_ref, "--clear-agent"]));
+    let shown: serde_json::Value =
+        serde_json::from_str(&ok(env.aven(&db, ["show", &task_ref, "--full", "--json"]))).unwrap();
+    assert!(shown["metadata"].get("agent").is_none());
+
+    let conflict = fail(env.aven(&db, ["edit", &task_ref, "--agent", "pi", "--clear-agent"]));
+    contains_all(&conflict, &["cannot be used with"]);
+
+    let blank = fail(env.aven(&db, ["edit", &task_ref, "--agent", " "]));
+    contains_all(&blank, &["invalid-agent", "non-empty agent name"]);
+}
+
+#[test]
 fn due_dates_round_trip_filter_and_preserve_defer_semantics() {
     let env = TestEnv::new();
     let db = env.db("due-dates.sqlite");

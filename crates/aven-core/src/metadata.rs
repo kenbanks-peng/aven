@@ -7,6 +7,8 @@ mod fields;
 mod validation;
 mod values;
 
+pub const TASK_AGENT_METADATA_KEY: &str = "agent";
+
 pub(crate) const MAX_METADATA_VALUES: usize = 128;
 pub(crate) const MAX_METADATA_VALUE_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_METADATA_TOTAL_BYTES: usize = 32 * 1024;
@@ -77,8 +79,9 @@ pub(crate) use validation::{
     validate_metadata_update, validate_recurrence_metadata_result, validate_task_metadata_result,
 };
 pub(crate) use values::{
-    insert_initial_task_metadata, metadata_by_task_ids, remove_recurrence_metadata,
-    remove_task_metadata, resolve_metadata_inputs, set_recurrence_metadata, set_task_metadata,
+    insert_initial_task_metadata, metadata_by_task_ids, metadata_by_task_ids_for_key,
+    remove_recurrence_metadata, remove_task_metadata, resolve_metadata_inputs,
+    set_recurrence_metadata, set_task_metadata,
 };
 
 #[cfg(test)]

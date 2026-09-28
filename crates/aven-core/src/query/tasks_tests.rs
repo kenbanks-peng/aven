@@ -74,6 +74,68 @@ async fn empty_task_id_restriction_matches_nothing() {
 }
 
 #[tokio::test]
+async fn list_hydration_includes_only_agent_metadata() {
+    let (_temp, mut conn) = test_conn().await;
+    seed_default_project(&mut conn).await;
+    let workspace_id = crate::workspaces::default_workspace_id();
+    let task_id = "0000000000000001";
+    insert_test_task(&mut conn, task_id, "delegated task", "todo", "none", "001").await;
+    for (field_id, key, value) in [
+        (
+            "0000000000000101",
+            crate::metadata::TASK_AGENT_METADATA_KEY,
+            "claude",
+        ),
+        ("0000000000000102", "effort", "large"),
+    ] {
+        sqlx::query(
+            "INSERT INTO metadata_fields(id, workspace_id, key, created_at, updated_at)
+             VALUES (?, ?, ?, '001', '001')",
+        )
+        .bind(field_id)
+        .bind(&workspace_id)
+        .bind(key)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO task_metadata(workspace_id, task_id, field_id, value, created_at, updated_at)
+             VALUES (?, ?, ?, ?, '001', '001')",
+        )
+        .bind(&workspace_id)
+        .bind(task_id)
+        .bind(field_id)
+        .bind(value)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+
+    let items = list_task_summary_items_in_workspace(
+        &mut conn,
+        &workspace_id,
+        TaskFilters {
+            task_ids: TaskIdFilter::Only(vec![task_id.parse().unwrap()]),
+            ..TaskFilters::default()
+        },
+        TaskQueryMode::Flat,
+        TaskSort::Created,
+        SortDirection::Asc,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].metadata.len(), 1);
+    assert_eq!(
+        items[0].metadata[0].key,
+        crate::metadata::TASK_AGENT_METADATA_KEY
+    );
+    assert_eq!(items[0].metadata[0].value, "claude");
+}
+
+#[tokio::test]
 async fn queue_view_hides_done_and_canceled_tasks() {
     let (_temp, mut conn) = test_conn().await;
     seed_default_project(&mut conn).await;

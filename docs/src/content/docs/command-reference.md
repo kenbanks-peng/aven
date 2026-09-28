@@ -525,10 +525,12 @@ aven edit <task-ref> [options]
 | `--epic <on-or-off>` | Set epic state. Accepted true values are `on`, `true`, and `1`; accepted false values are `off`, `false`, and `0`. |
 | `--label <label>` | Add an existing label. Repeat as needed. |
 | `--remove-label <label>` | Remove a label. Repeat as needed. |
+| `--agent <agent>` | Tag the task with a coding agent. `codex`, `copilot`, `claude`, and `pi` have dedicated TUI icons; other names use a generic agent icon. |
+| `--clear-agent` | Remove the coding agent tag. |
 | `--metadata <KEY=VALUE>` | Assign custom metadata. Repeat for multiple fields. An empty value remains present metadata. |
 | `--remove-metadata <KEY>` | Remove custom metadata. Repeat for multiple fields. |
 
-Description sources are mutually exclusive. `--available-at` and `--clear-available-at` are mutually exclusive. `--due` and `--clear-due` are mutually exclusive. The same metadata key cannot appear in both `--metadata` and `--remove-metadata`. Aven reports whether the update changed the task.
+Description sources are mutually exclusive. `--available-at` and `--clear-available-at` are mutually exclusive. `--due` and `--clear-due` are mutually exclusive. `--agent` and `--clear-agent` are mutually exclusive. Agent tags use the `agent` metadata field and appear as Nerd Font icons in the TUI metadata column. The same metadata key cannot appear in both `--metadata` and `--remove-metadata`. Aven reports whether the update changed the task.
 
 A task with epic children cannot have epic state turned off. Epic containers cannot become children of another epic.
 
@@ -540,6 +542,8 @@ aven edit APP-7KQ9 --clear-available-at
 aven edit APP-7KQ9 --due "in 1 month"
 aven edit APP-7KQ9 --clear-due
 aven edit APP-7KQ9 --label docs --remove-label bug
+aven edit APP-7KQ9 --agent claude
+aven edit APP-7KQ9 --clear-agent
 aven edit APP-7KQ9 --metadata effort=large --metadata review-state=pending
 aven edit APP-7KQ9 --remove-metadata review-state
 aven edit APP-7KQ0 --epic on

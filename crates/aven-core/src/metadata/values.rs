@@ -416,10 +416,28 @@ pub(crate) async fn task_metadata_in_workspace(
         .collect())
 }
 
+pub(crate) async fn metadata_by_task_ids_for_key(
+    conn: &mut SqliteConnection,
+    workspace_id: &WorkspaceId,
+    task_ids: &[TaskId],
+    key: &str,
+) -> Result<HashMap<TaskId, Vec<TaskMetadataValue>>> {
+    metadata_by_task_ids_filtered(conn, workspace_id, task_ids, Some(key)).await
+}
+
 pub(crate) async fn metadata_by_task_ids(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
     task_ids: &[TaskId],
+) -> Result<HashMap<TaskId, Vec<TaskMetadataValue>>> {
+    metadata_by_task_ids_filtered(conn, workspace_id, task_ids, None).await
+}
+
+async fn metadata_by_task_ids_filtered(
+    conn: &mut SqliteConnection,
+    workspace_id: &WorkspaceId,
+    task_ids: &[TaskId],
+    key: Option<&str>,
 ) -> Result<HashMap<TaskId, Vec<TaskMetadataValue>>> {
     let mut values = HashMap::new();
     for chunk in task_ids.chunks(900) {
@@ -431,6 +449,10 @@ pub(crate) async fn metadata_by_task_ids(
              WHERE m.workspace_id = ",
         );
         query.push_bind(workspace_id);
+        if let Some(key) = key {
+            query.push(" AND f.key = ");
+            query.push_bind(key);
+        }
         query.push(" AND m.task_id IN (");
         {
             let mut separated = query.separated(", ");

@@ -632,7 +632,21 @@ pub(crate) async fn cmd_edit(
     )?;
     validate_optional_status(args.status.as_deref())?;
     validate_optional_priority(args.priority.as_deref())?;
-    let set_metadata = parse_metadata_args(&args.metadata)?;
+    let mut set_metadata = parse_metadata_args(&args.metadata)?;
+    let mut remove_metadata = args.remove_metadata;
+    if let Some(agent) = args.agent {
+        let agent = agent.trim();
+        if agent.is_empty() {
+            bail!("error invalid-agent hint=\"supply a non-empty agent name\"");
+        }
+        set_metadata.push(TaskMetadataInput {
+            expected_field_id: None,
+            key: aven_core::metadata::TASK_AGENT_METADATA_KEY.to_string(),
+            value: agent.to_string(),
+        });
+    } else if args.clear_agent {
+        remove_metadata.push(aven_core::metadata::TASK_AGENT_METADATA_KEY.to_string());
+    }
     if args.available_at.is_some() && args.clear_available_at {
         bail!(
             "error available-at-conflict hint=\"use --available-at or --clear-available-at, not both\""
@@ -679,7 +693,7 @@ pub(crate) async fn cmd_edit(
                 add_labels: args.label,
                 remove_labels: args.remove_label,
                 set_metadata,
-                remove_metadata: args.remove_metadata,
+                remove_metadata,
                 label_selection: None,
                 create_missing_labels: false,
             },

@@ -27,6 +27,7 @@ Recurrence rules:
 pub(super) const EDIT_EXAMPLES: &str = r#"Examples:
   aven edit APP-7KQ9 --status active --priority high
   aven edit APP-7KQ9 --available-at tomorrow --due "next monday"
+  aven edit APP-7KQ9 --agent claude
   aven edit APP-7KQ9 --description-file description.md
 
 --available-at accepts natural expressions, ISO dates, and ISO timestamps.
@@ -360,6 +361,12 @@ pub(crate) struct TaskEditArgs {
     /// Remove a label; repeat for multiple labels
     #[arg(long)]
     pub(crate) remove_label: Vec<String>,
+    /// Tag the task with a coding agent name
+    #[arg(long, value_name = "AGENT", conflicts_with = "clear_agent")]
+    pub(crate) agent: Option<String>,
+    /// Remove the coding agent tag
+    #[arg(long)]
+    pub(crate) clear_agent: bool,
     /// Set metadata; repeat for multiple fields
     #[arg(long, value_name = "KEY=VALUE")]
     pub(crate) metadata: Vec<String>,

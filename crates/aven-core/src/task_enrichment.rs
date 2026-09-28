@@ -103,7 +103,13 @@ async fn load_task_enrichment_with_detail(
                 HashMap::new(),
                 notes::task_ids_with_notes(conn, workspace_id, task_ids).await?,
                 HashMap::new(),
-                HashMap::new(),
+                crate::metadata::metadata_by_task_ids_for_key(
+                    conn,
+                    workspace_id,
+                    task_ids,
+                    crate::metadata::TASK_AGENT_METADATA_KEY,
+                )
+                .await?,
             )
         };
     let live_attachment_counts_by_task = if include_detail {

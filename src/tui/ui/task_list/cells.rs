@@ -16,6 +16,11 @@ use unicode_width::UnicodeWidthStr;
 
 pub(super) const EPIC_CHILD_MARKER: &str = "↳";
 pub(super) const DEFERRED_MARKER: &str = "\u{f017}";
+pub(super) const CODEX_AGENT_ICON: &str = "\u{ec81}";
+pub(super) const COPILOT_AGENT_ICON: &str = "\u{ec1e}";
+pub(super) const CLAUDE_AGENT_ICON: &str = "\u{ec82}";
+pub(super) const PI_AGENT_ICON: &str = "\u{f03ff}";
+pub(super) const OTHER_AGENT_ICON: &str = "\u{f007}";
 pub(super) const TASK_CURSOR_GLYPH: &str = "›";
 
 #[derive(Debug, Clone, Copy)]
@@ -590,6 +595,15 @@ pub(super) fn metadata_cell(
             Style::new().fg(RED).add_modifier(Modifier::BOLD),
         ));
     }
+    if let Some(icon) = task_agent_icon(item) {
+        if !spans.is_empty() {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            icon,
+            Style::new().fg(FG_MUTED).remove_modifier(Modifier::BOLD),
+        ));
+    }
     if item.unresolved_blocker_count > 0 {
         if !spans.is_empty() {
             spans.push(Span::raw(" "));
@@ -618,6 +632,26 @@ pub(super) fn metadata_cell(
         ));
     }
     Line::from(spans)
+}
+
+fn task_agent_icon(item: &TaskListItem) -> Option<&'static str> {
+    let agent = item
+        .metadata
+        .iter()
+        .find(|value| value.key == aven_core::metadata::TASK_AGENT_METADATA_KEY)?
+        .value
+        .trim();
+    Some(if agent.eq_ignore_ascii_case("codex") {
+        CODEX_AGENT_ICON
+    } else if agent.eq_ignore_ascii_case("copilot") {
+        COPILOT_AGENT_ICON
+    } else if agent.eq_ignore_ascii_case("claude") {
+        CLAUDE_AGENT_ICON
+    } else if agent.eq_ignore_ascii_case("pi") {
+        PI_AGENT_ICON
+    } else {
+        OTHER_AGENT_ICON
+    })
 }
 
 pub(super) fn inline_title_edit_cell(editor: &TextInputView, max_width: usize) -> Line<'static> {
@@ -958,6 +992,32 @@ mod tests {
             metadata_cell(&item, EpicSelectionContext::default(), false).to_string(),
             "✎"
         );
+    }
+
+    #[test]
+    fn metadata_cell_shows_coding_agent_icons() {
+        let cases = [
+            ("codex", CODEX_AGENT_ICON),
+            ("copilot", COPILOT_AGENT_ICON),
+            ("claude", CLAUDE_AGENT_ICON),
+            ("pi", PI_AGENT_ICON),
+            ("cursor", OTHER_AGENT_ICON),
+        ];
+
+        for (agent, expected_icon) in cases {
+            let mut item = task_list_item("delegated");
+            item.metadata = vec![aven_core::metadata::TaskMetadataValue {
+                field_id: aven_core::ids::MetadataFieldId::new(),
+                key: aven_core::metadata::TASK_AGENT_METADATA_KEY.to_string(),
+                value: agent.to_string(),
+            }];
+
+            assert_eq!(
+                metadata_cell(&item, EpicSelectionContext::default(), false).to_string(),
+                expected_icon,
+                "agent={agent}"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,20 @@
+[tasks.build]
+description = "Build the production binary"
+run = "env SQLX_OFFLINE=true cargo build --release --locked"
+
+[tasks.deploy]
+description = "Atomically deploy the production binary to ./bin/"
+depends = ["build"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p ./bin
+temporary="$(mktemp ./bin/.aven.XXXXXX)"
+trap 'rm -f "$temporary"' EXIT
+
+cp ./target/release/aven "$temporary"
+chmod 755 "$temporary"
+mv -f "$temporary" ./bin/aven
+trap - EXIT
+'''
