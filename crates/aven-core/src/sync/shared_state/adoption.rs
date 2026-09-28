@@ -321,35 +321,39 @@ async fn validate_history(
         "error seed-captured-history-changed"
     );
 
-    let provenance_changed: bool = sqlx::query_scalar(
-        "WITH source(change_id, server_seq, pending_rank) AS (
-             SELECT json_extract(value, '$.change_id'),
-                    json_extract(value, '$.source_server_seq'),
-                    json_extract(value, '$.source_pending_rank')
-             FROM json_each(?2)
-         )
-         SELECT EXISTS(
-             SELECT 1 FROM shared_history_provenance p
-             JOIN local_shared_capture_changes c
-               ON c.candidate_id = ?1 AND c.change_id = p.change_id
-             LEFT JOIN source s ON s.change_id = p.change_id
-             WHERE s.change_id IS NULL
-                OR s.server_seq IS NOT p.source_server_seq
-                OR s.pending_rank IS NOT p.source_pending_rank
-         ) OR EXISTS(
-             SELECT 1 FROM source s
-             LEFT JOIN shared_history_provenance p ON p.change_id = s.change_id
-             LEFT JOIN local_shared_capture_changes c
-               ON c.candidate_id = ?1 AND c.change_id = s.change_id
-             WHERE p.change_id IS NULL OR c.change_id IS NULL
-                OR s.server_seq IS NOT p.source_server_seq
-                OR s.pending_rank IS NOT p.source_pending_rank
-         )",
+    // Parsed once and compared in memory: joining SQL against json_each
+    // re-parses the whole document for every row.
+    #[derive(Deserialize)]
+    struct Provenance {
+        change_id: String,
+        source_server_seq: Option<i64>,
+        source_pending_rank: Option<i64>,
+    }
+    let source: Vec<Provenance> =
+        serde_json::from_str(&stored_provenance).context("error seed-history-invalid")?;
+    let current: Vec<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT p.change_id, p.source_server_seq, p.source_pending_rank
+         FROM shared_history_provenance p
+         JOIN local_shared_capture_changes c
+           ON c.candidate_id = ? AND c.change_id = p.change_id",
     )
     .bind(candidate)
-    .bind(&stored_provenance)
-    .fetch_one(&mut *conn)
+    .fetch_all(&mut *conn)
     .await?;
+    let current: std::collections::HashMap<String, (Option<i64>, Option<i64>)> = current
+        .into_iter()
+        .map(|(id, seq, rank)| (id, (seq, rank)))
+        .collect();
+    // Every source row must match a current row of a captured change, and
+    // no captured change may carry provenance the source lacks. Provenance of
+    // uncaptured changes appears in neither set.
+    let unique: std::collections::HashSet<&str> =
+        source.iter().map(|row| row.change_id.as_str()).collect();
+    let provenance_changed = unique.len() != source.len()
+        || source.len() != current.len()
+        || source.iter().any(|row| {
+            current.get(&row.change_id) != Some(&(row.source_server_seq, row.source_pending_rank))
+        });
     ensure!(!provenance_changed, "error seed-source-provenance-changed");
 
     let uncaptured: bool = sqlx::query_scalar(

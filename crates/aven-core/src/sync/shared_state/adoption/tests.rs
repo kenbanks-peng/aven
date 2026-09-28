@@ -787,3 +787,54 @@ async fn older_freeze_without_commitments_fails_closed() {
         "{error}"
     );
 }
+
+/// Real histories carry thousands of provenance rows; validation must stay
+/// linear in them. Comparing against a per-row `json_each` join took over
+/// twenty seconds for 7,676 rows and stalled setup before its upload.
+#[tokio::test]
+async fn history_validation_stays_linear_in_provenance() {
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(&root.path().join("seed.sqlite"))
+        .await
+        .unwrap();
+    add_task(&database, "many").await;
+    {
+        let mut conn = database.acquire_writer().await.unwrap();
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 8000)
+             INSERT INTO changes(change_id, client_id, local_seq, entity_type, entity_id,
+                                 field, op_type, payload, base_version, created_at)
+             SELECT printf('bulk-%05d', i), c.client_id, 1000 + i, c.entity_type, c.entity_id,
+                    c.field, c.op_type, c.payload, c.base_version, c.created_at
+             FROM n, (SELECT * FROM changes ORDER BY local_seq DESC LIMIT 1) c",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO shared_history_provenance(change_id, source_server_seq, source_pending_rank)
+             SELECT change_id, NULL, local_seq FROM changes WHERE change_id LIKE 'bulk-%'",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    let (_root, database, source, _, _, candidate) = freeze(root, database).await;
+    // Counts SQLite VM instructions, a deterministic measure of the work
+    // validation asks of SQLite, independent of build profile and machine.
+    let steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut conn = database.acquire_writer().await.unwrap();
+    let counter = steps.clone();
+    conn.lock_handle()
+        .await
+        .unwrap()
+        .set_progress_handler(1, move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        });
+    validate_history(&mut conn, &candidate, &source)
+        .await
+        .unwrap();
+    let steps = steps.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(steps < 8000 * 200, "{steps} VM steps for 8000 changes");
+}
