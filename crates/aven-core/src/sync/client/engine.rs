@@ -52,9 +52,47 @@ fn invitation_seconds() -> u64 {
         .unwrap_or(600)
 }
 #[cfg(not(any(test, feature = "test-support")))]
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const INVITER_POLL_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(any(test, feature = "test-support"))]
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const INVITER_POLL_INTERVAL: Duration = Duration::from_millis(100);
+// Two half-second waits keep the joiner responsive across the inviter's
+// one-second cadence before backing off to the steady interval.
+#[cfg(not(any(test, feature = "test-support")))]
+const JOIN_POLL_INTERVALS: [Duration; 5] = [
+    Duration::from_millis(250),
+    Duration::from_millis(500),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+];
+#[cfg(any(test, feature = "test-support"))]
+const JOIN_POLL_INTERVALS: [Duration; 4] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(75),
+    Duration::from_millis(100),
+];
+
+fn join_poll_interval(attempt: usize) -> Duration {
+    jittered(JOIN_POLL_INTERVALS[attempt.min(JOIN_POLL_INTERVALS.len() - 1)])
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+fn jittered(interval: Duration) -> Duration {
+    let millis = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    let spread = millis / 10;
+    let mut random = [0_u8; 2];
+    if getrandom::fill(&mut random).is_err() {
+        return interval;
+    }
+    let offset = u64::from(u16::from_le_bytes(random)) % (spread * 2 + 1);
+    Duration::from_millis(millis - spread + offset)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn jittered(interval: Duration) -> Duration {
+    interval
+}
 
 pub const NOT_SET_UP: &str = "error sync-not-set-up hint=\"run `aven sync setup` with an invitation from `aven server setup`, or `aven sync join` on a new database\"";
 
@@ -503,6 +541,12 @@ pub enum Admission {
 
 const INVITATION_UNUSED: &str = "error sync-invitation-unused hint=\"the invitation expired unused; if keys may have been sent with it, the next `aven sync` changes keys before uploading new changes\"";
 
+enum AdmissionPoll {
+    Waiting,
+    RequestPending,
+    Complete(Admission),
+}
+
 /// Checks this invitation's local state, then the server mailbox, and admits
 /// only once a join request is waiting, so an idle wait stays cheap.
 async fn poll_admission(
@@ -510,15 +554,19 @@ async fn poll_admission(
     host: &dyn ClientHost,
     client: &enrollment::Client,
     invitation: &PendingInvitation,
-) -> Result<Option<Admission>> {
+) -> Result<AdmissionPoll> {
     let store = key_store(host, database).await?;
     let _guard = coordination::acquire(database).await?;
     match store
         .invitation_progress(database, &invitation.handle)
         .await?
     {
-        InvitationProgress::Admitted => return Ok(Some(Admission::Admitted)),
-        InvitationProgress::Closed => return Ok(Some(Admission::Cancelled)),
+        InvitationProgress::Admitted => {
+            return Ok(AdmissionPoll::Complete(Admission::Admitted));
+        }
+        InvitationProgress::Closed => {
+            return Ok(AdmissionPoll::Complete(Admission::Cancelled));
+        }
         InvitationProgress::Open => {}
     }
     match client
@@ -526,18 +574,20 @@ async fn poll_admission(
         .await
     {
         Ok(true) => {}
-        Ok(false) => return Ok(None),
-        Err(error) if busy(&error) => return Ok(None),
+        Ok(false) => return Ok(AdmissionPoll::Waiting),
+        Err(error) if busy(&error) => return Ok(AdmissionPoll::Waiting),
         Err(error) => return Err(error),
     }
     match client
         .admit_handle(&store, database, Some(invitation.handle))
         .await
     {
-        Err(error) if busy(&error) => Ok(None),
-        result => Ok(track_access_result(database, result)
-            .await?
-            .then_some(Admission::Admitted)),
+        Err(error) if busy(&error) => Ok(AdmissionPoll::RequestPending),
+        result => Ok(if track_access_result(database, result).await? {
+            AdmissionPoll::Complete(Admission::Admitted)
+        } else {
+            AdmissionPoll::RequestPending
+        }),
     }
 }
 
@@ -550,11 +600,24 @@ pub async fn await_admission(
     invitation: &PendingInvitation,
 ) -> Result<Admission> {
     let client = enrollment::Client::new(&invitation.server, link.clone())?;
+    let mut pending_attempt = None;
     while Instant::now() < invitation.deadline {
-        if let Some(admission) = poll_admission(database, host, &client, invitation).await? {
-            return Ok(admission);
+        match poll_admission(database, host, &client, invitation).await? {
+            AdmissionPoll::Complete(admission) => return Ok(admission),
+            AdmissionPoll::RequestPending => {
+                pending_attempt.get_or_insert(0);
+            }
+            AdmissionPoll::Waiting => {}
         }
-        link.wait(POLL_INTERVAL).await;
+        let delay = match pending_attempt.as_mut() {
+            Some(attempt) => {
+                let delay = join_poll_interval(*attempt);
+                *attempt = attempt.saturating_add(1);
+                delay
+            }
+            None => jittered(INVITER_POLL_INTERVAL),
+        };
+        link.wait(delay).await;
     }
     bail!(INVITATION_UNUSED)
 }
@@ -709,6 +772,7 @@ pub async fn await_join(
     let mut posted = client.post(&peer).await;
     progress(Stage::WaitingForInviter.into());
     let others = client.has_other_attempts(store, database).await?;
+    let mut poll_attempt = 0_usize;
     loop {
         if posted.as_ref().is_err_and(busy) {
             posted = client.post(&peer).await;
@@ -726,7 +790,8 @@ pub async fn await_join(
                 Ok(()) => anyhow::anyhow!(JOIN_TIMEOUT),
             });
         }
-        client.link().wait(POLL_INTERVAL).await;
+        client.link().wait(join_poll_interval(poll_attempt)).await;
+        poll_attempt = poll_attempt.saturating_add(1);
     }
 }
 
@@ -1181,6 +1246,16 @@ pub async fn status_report(database: &Database, host: &dyn ClientHost) -> Result
 mod tests {
     use super::*;
     use crate::sync::client::errors::has_code;
+
+    #[test]
+    fn enrollment_polling_backs_off_to_a_bounded_steady_interval() {
+        assert_eq!(join_poll_interval(0), Duration::from_millis(25));
+        assert_eq!(join_poll_interval(1), Duration::from_millis(50));
+        assert_eq!(join_poll_interval(2), Duration::from_millis(75));
+        assert_eq!(join_poll_interval(3), Duration::from_millis(100));
+        assert_eq!(join_poll_interval(usize::MAX), Duration::from_millis(100));
+        assert_eq!(jittered(INVITER_POLL_INTERVAL), Duration::from_millis(100));
+    }
 
     #[test]
     fn images_done_counts_only_drops_in_remaining_images() {
