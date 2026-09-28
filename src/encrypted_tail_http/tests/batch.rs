@@ -529,3 +529,5 @@ async fn transport_disconnect_after_batch_acceptance_requires_resolution() {
         high
     );
 }
+
+mod recovery;
