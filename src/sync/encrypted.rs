@@ -51,14 +51,14 @@ pub(crate) const SINGLE_DEVICE_HINT: &str =
 const INVITATION_CANCELLED: &str = "error sync-invitation-cancelled hint=\"another command cancelled this invitation; run `aven sync invite` again to add a device\"";
 
 /// The desktop's answers to what the engine asks of its host.
-pub(crate) struct DesktopHost<'a> {
-    pub(crate) config: &'a AppConfig,
+pub(crate) struct DesktopHost {
+    pub(crate) config: AppConfig,
     keychain_interaction: crate::protected_local_keys::KeychainInteraction,
     protected_storage: Mutex<Option<Arc<dyn ProtectedStorage>>>,
 }
 
-impl<'a> DesktopHost<'a> {
-    fn foreground(config: &'a AppConfig) -> Self {
+impl DesktopHost {
+    fn foreground(config: &AppConfig) -> Self {
         let attended = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
         Self::new(
             config,
@@ -70,7 +70,7 @@ impl<'a> DesktopHost<'a> {
         )
     }
 
-    fn background(config: &'a AppConfig) -> Self {
+    fn background(config: &AppConfig) -> Self {
         Self::new(
             config,
             crate::protected_local_keys::KeychainInteraction::Deny,
@@ -78,18 +78,18 @@ impl<'a> DesktopHost<'a> {
     }
 
     fn new(
-        config: &'a AppConfig,
+        config: &AppConfig,
         keychain_interaction: crate::protected_local_keys::KeychainInteraction,
     ) -> Self {
         Self {
-            config,
+            config: config.clone(),
             keychain_interaction,
             protected_storage: Mutex::new(None),
         }
     }
 }
 
-impl ClientHost for DesktopHost<'_> {
+impl ClientHost for DesktopHost {
     fn ensure_sync_allowed(&self) -> Result<()> {
         self.config.ensure_sync_allowed()
     }
@@ -109,7 +109,7 @@ impl ClientHost for DesktopHost<'_> {
     }
 
     fn blob_dir(&self, database: &Database) -> Result<PathBuf> {
-        config::resolve_blob_dir(database.path(), self.config)
+        config::resolve_blob_dir(database.path(), &self.config)
     }
 
     fn device_label(&self) -> Option<String> {
@@ -251,15 +251,100 @@ pub(crate) async fn run_to_completion(database: &Database, config: &AppConfig) -
         .await
 }
 
-pub(crate) async fn daemon_round(
-    database: &Database,
-    config: &AppConfig,
-    round_limit: usize,
-) -> Result<DaemonRound> {
-    let host = DesktopHost::background(config);
-    driver()?
-        .run(|link| engine::daemon_round(link, database, &host, round_limit))
-        .await
+#[derive(Default)]
+pub(crate) struct DaemonSync {
+    cached: Option<DaemonResources>,
+}
+
+struct DaemonResources {
+    key: DaemonResourceKey,
+    host: DesktopHost,
+    driver: HttpDriver,
+    #[cfg(test)]
+    generation: u64,
+}
+
+#[derive(PartialEq, Eq)]
+struct DaemonResourceKey {
+    blob_dir: Option<PathBuf>,
+    automatic_sync_enabled: bool,
+    association: Option<String>,
+    setup_server: Option<String>,
+}
+
+impl DaemonSync {
+    async fn resource_key(database: &Database, config: &AppConfig) -> Result<DaemonResourceKey> {
+        Ok(DaemonResourceKey {
+            blob_dir: config.local.blob_dir.clone(),
+            automatic_sync_enabled: config.automatic_sync_is_enabled(),
+            association: database.meta("e2ee_association").await?,
+            setup_server: database.meta("sync_server_url").await?,
+        })
+    }
+
+    async fn prepare(&mut self, database: &Database, config: &AppConfig) -> Result<()> {
+        let key = Self::resource_key(database, config).await?;
+        if self.cached.as_ref().is_some_and(|cached| cached.key == key) {
+            return Ok(());
+        }
+        self.cached = Some(DaemonResources {
+            key,
+            host: DesktopHost::background(config),
+            driver: driver()?,
+            #[cfg(test)]
+            generation: next_daemon_resource_generation(),
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn round(
+        &mut self,
+        database: &Database,
+        config: &AppConfig,
+        round_limit: usize,
+    ) -> Result<DaemonRound> {
+        self.prepare(database, config).await?;
+        let cached = self.cached.as_ref().expect("daemon resources prepared");
+        let result = cached
+            .driver
+            .run(|link| engine::daemon_round(link, database, &cached.host, round_limit))
+            .await;
+        if let Err(error) = &result {
+            self.discard_after_error(error);
+        }
+        result
+    }
+
+    fn discard_after_error(&mut self, error: &anyhow::Error) {
+        if should_rebuild_daemon_resources(error) {
+            self.cached = None;
+        }
+    }
+}
+
+fn should_rebuild_daemon_resources(error: &anyhow::Error) -> bool {
+    use aven_core::sync::client::errors::has_code;
+
+    error
+        .chain()
+        .any(|cause| cause.is::<crate::protected_local_keys::ProtectedLocalKeyStoreError>())
+        || [
+            "sync-transport",
+            "encrypted-tail-network",
+            "encrypted-tail-tls",
+            "enrollment-network",
+            "enrollment-tls",
+        ]
+        .into_iter()
+        .any(|code| has_code(error, code))
+}
+
+#[cfg(test)]
+fn next_daemon_resource_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 pub(crate) async fn status_report(database: &Database, config: &AppConfig) -> Result<StatusReport> {

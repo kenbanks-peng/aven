@@ -149,6 +149,38 @@ fn contains_rustls_error(error: &(dyn std::error::Error + 'static)) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn one_driver_reuses_a_tcp_connection_across_requests() {
+        use axum::serve::ListenerExt;
+        use axum::{Router, routing::post};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let count = accepted.clone();
+        let listener = listener.tap_io(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+        });
+        let app = Router::new().route("/", post(|| async { "ok" }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let driver = HttpDriver::new().unwrap();
+
+        for _ in 0..3 {
+            let response = driver
+                .http
+                .post(format!("http://{address}/"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.bytes().await.unwrap(), "ok");
+        }
+
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
     #[test]
     fn finds_rustls_errors_nested_in_io_errors() {
         let tls = std::io::Error::new(

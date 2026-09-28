@@ -19,6 +19,62 @@ use super::{InvitationLabels, SetupInvitation};
 
 const WORKER: &str = "sync::encrypted::tests::cli_worker";
 
+#[tokio::test]
+async fn daemon_resources_persist_until_config_server_or_fatal_error_changes() {
+    use crate::protected_local_keys::{
+        ProtectedLocalKeyStoreError, ProtectedLocalKeyStoreErrorKind,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = aven_core::db::Database::open(&temp.path().join("daemon.sqlite"))
+        .await
+        .unwrap();
+    let mut config = crate::config::AppConfig::default();
+    let mut sync = super::DaemonSync::default();
+
+    sync.prepare(&database, &config).await.unwrap();
+    let original = sync.cached.as_ref().unwrap().generation;
+    sync.prepare(&database, &config).await.unwrap();
+    assert_eq!(sync.cached.as_ref().unwrap().generation, original);
+
+    config.local.blob_dir = Some(temp.path().join("other-blobs"));
+    sync.prepare(&database, &config).await.unwrap();
+    let reconfigured = sync.cached.as_ref().unwrap().generation;
+    assert_ne!(reconfigured, original);
+
+    sqlx::query("INSERT INTO meta(key, value) VALUES('sync_server_url', ?)")
+        .bind("https://sync.example.test")
+        .execute(&mut *aven_core::test_support::acquire(&database).await.unwrap())
+        .await
+        .unwrap();
+    sync.prepare(&database, &config).await.unwrap();
+    let rebound = sync.cached.as_ref().unwrap().generation;
+    assert_ne!(rebound, reconfigured);
+
+    sqlx::query("INSERT INTO meta(key, value) VALUES('e2ee_association', 'new-binding')")
+        .execute(&mut *aven_core::test_support::acquire(&database).await.unwrap())
+        .await
+        .unwrap();
+    sync.prepare(&database, &config).await.unwrap();
+    let reassociated = sync.cached.as_ref().unwrap().generation;
+    assert_ne!(reassociated, rebound);
+
+    let storage = anyhow::Error::new(ProtectedLocalKeyStoreError::new(
+        ProtectedLocalKeyStoreErrorKind::Unavailable,
+    ));
+    sync.discard_after_error(&storage);
+    assert!(sync.cached.is_none());
+
+    sync.prepare(&database, &config).await.unwrap();
+    let recovered = sync.cached.as_ref().unwrap().generation;
+    sync.discard_after_error(&anyhow::anyhow!(
+        "error encrypted-tail-network outcome-unknown"
+    ));
+    assert!(sync.cached.is_none());
+    sync.prepare(&database, &config).await.unwrap();
+    assert_ne!(sync.cached.as_ref().unwrap().generation, recovered);
+}
+
 #[test]
 fn protected_key_storage_failures_explain_setup_errors() {
     use crate::protected_local_keys::{

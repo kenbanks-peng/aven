@@ -87,6 +87,7 @@ async fn run_loop(
     let mut access_refused = false;
     let mut next_attachment_maintenance = Instant::now();
     let mut next_binary_check = Instant::now() + BINARY_CHECK_INTERVAL;
+    let mut sync = encrypted::DaemonSync::default();
     loop {
         tokio::select! {
             _ = shutdown_signal() => {
@@ -119,7 +120,7 @@ async fn run_loop(
             }
             _ = sleep_until(next_sync) => {
                 retry_not_before = None;
-                match sync_once(&database, config).await {
+                match sync_once(&database, config, &mut sync).await {
                     Ok(DaemonRound::Completed(outcome)) => {
                         backoff_seconds = 1;
                         awaiting_setup = false;
@@ -215,8 +216,12 @@ fn drain_wakes(socket: &UdpSocket, wake_buf: &mut [u8]) {
     while socket.try_recv_from(wake_buf).is_ok() {}
 }
 
-async fn sync_once(database: &Database, config: &AppConfig) -> Result<DaemonRound> {
-    let round = encrypted::daemon_round(database, config, DAEMON_ROUND_BUDGET).await?;
+async fn sync_once(
+    database: &Database,
+    config: &AppConfig,
+    sync: &mut encrypted::DaemonSync,
+) -> Result<DaemonRound> {
+    let round = sync.round(database, config, DAEMON_ROUND_BUDGET).await?;
     match &round {
         DaemonRound::Completed(outcome) => {
             println!(
