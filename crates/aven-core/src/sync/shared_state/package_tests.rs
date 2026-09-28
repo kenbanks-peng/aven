@@ -846,3 +846,41 @@ fn sorted_tables(capture: &super::super::SharedStateCapture) -> serde_json::Valu
     }
     tables
 }
+
+#[test]
+fn artifact_writer_encrypts_pieces_across_chunk_boundaries() {
+    let context = package_context();
+    let (stream, artifact_id, key) = ([0x31; 32], [0x32; 32], [0x33; 32]);
+    let writer = || ArtifactWriter::new(context, stream, artifact_id, 2, 1, &key).unwrap();
+    for total in [
+        0,
+        1,
+        CHUNK_PLAINTEXT_BYTES,
+        CHUNK_PLAINTEXT_BYTES + 1,
+        2 * CHUNK_PLAINTEXT_BYTES + 5,
+    ] {
+        let plaintext = (0..total).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        let mut streamed = writer();
+        streamed.begin(total).unwrap();
+        for piece in plaintext.chunks(65_537) {
+            streamed.write(piece).unwrap();
+        }
+        let artifact = streamed.finish().unwrap();
+        assert_eq!(
+            artifact.chunks.len(),
+            total.div_ceil(CHUNK_PLAINTEXT_BYTES).max(1)
+        );
+        let decrypted =
+            decrypt_artifact(&artifact, context, stream, artifact_id, 2, 1, &key, total).unwrap();
+        assert_eq!(decrypted, plaintext, "{total}");
+    }
+    let mut short = writer();
+    short.begin(10).unwrap();
+    short.write(&[0; 9]).unwrap();
+    assert!(short.finish().is_err());
+    let mut long = writer();
+    long.begin(10).unwrap();
+    assert!(long.write(&[0; 11]).is_err());
+    let mut undeclared = writer();
+    assert!(undeclared.write(&[0]).is_err());
+}

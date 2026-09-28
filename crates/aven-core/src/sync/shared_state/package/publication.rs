@@ -232,6 +232,26 @@ fn manifest_plaintext(d: &Descriptor, stats: &domain::Stats) -> Vec<u8> {
     out
 }
 
+/// Encrypts the domain encoding as it is produced.
+struct StateOut {
+    writer: crypto::ArtifactWriter,
+    len: usize,
+    failed: bool,
+}
+
+impl domain::Out for StateOut {
+    fn begin(&mut self, total: usize) {
+        self.failed |= self.writer.begin(total).is_err();
+    }
+    fn len(&self) -> usize {
+        self.len
+    }
+    fn put(&mut self, bytes: &[u8]) {
+        self.len += bytes.len();
+        self.failed = self.failed || self.writer.write(bytes).is_err();
+    }
+}
+
 /// Constructs tentative bytes only for the durable owner's first freeze.
 /// Failed preparation may be rebuilt; committed bytes must only be loaded.
 pub(super) fn build(
@@ -258,14 +278,17 @@ pub(super) fn build(
             object: objects.get(r.sha256.as_str()).copied(),
         })
         .collect::<Vec<_>>();
-    let (plaintext, stats) = domain::encode(&capture.capture.snapshot.tables, &mappings)?;
-    let plaintext = Zeroizing::new(plaintext);
     let state_key = crypto::derive_bootstrap_class_key(key, context, stream_id, bootstrap, 1)
         .map_err(|_| Error::Authentication)?;
-    let state =
-        crypto::encrypt_artifact(&plaintext, context, stream_id, bootstrap, 2, 1, &state_key)
-            .map_err(|_| Error::Authentication)?;
-    drop(plaintext);
+    let mut out = StateOut {
+        writer: crypto::ArtifactWriter::new(context, stream_id, bootstrap, 2, 1, &state_key)
+            .map_err(|_| Error::Authentication)?,
+        len: 0,
+        failed: false,
+    };
+    let stats = domain::encode_into(&mut out, &capture.capture.snapshot.tables, &mappings)?;
+    valid(!out.failed)?;
+    let state = out.writer.finish().map_err(|_| Error::Authentication)?;
     let objects = images
         .iter()
         .map(|image| {

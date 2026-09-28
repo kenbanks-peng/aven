@@ -327,11 +327,16 @@ fn payload<T: Serialize>(value: &T) -> Result<Vec<u8>> {
 
 /// Where [`encode_into`] writes the domain bytes.
 pub(super) trait Out {
+    /// Called once, before any bytes, with the exact encoded length.
+    fn begin(&mut self, total: usize);
     fn len(&self) -> usize;
     fn put(&mut self, bytes: &[u8]);
 }
 
 impl Out for Vec<u8> {
+    fn begin(&mut self, total: usize) {
+        self.reserve_exact(total);
+    }
     fn len(&self) -> usize {
         self.len()
     }
@@ -364,6 +369,9 @@ impl<'a> Matcher<'a> {
 }
 
 impl Out for Matcher<'_> {
+    fn begin(&mut self, total: usize) {
+        self.equal &= total == self.expected.len();
+    }
     fn len(&self) -> usize {
         self.written
     }
@@ -374,10 +382,18 @@ impl Out for Matcher<'_> {
     }
 }
 
-fn section<T: Serialize>(out: &mut impl Out, kind: usize, values: &[T]) -> Result<(u64, u64)> {
+/// Every section's sorted rows, gathered before any byte is written so the
+/// encoding's exact length is known up front.
+struct Sections {
+    total: u64,
+    rows: Vec<Vec<Vec<u8>>>,
+}
+
+fn section<T: Serialize>(sections: &mut Sections, kind: usize, values: &[T]) -> Result<()> {
+    valid(kind == sections.rows.len() + 1)?;
     bound(number(values.len())?, RECORD_LIMIT)?;
-    let mut rows = Vec::new();
-    let mut total = add(number(out.len())?, 10)?;
+    let mut rows = Vec::with_capacity(values.len());
+    let mut total = add(sections.total, 10)?;
     for value in values {
         let row = payload(value)?;
         total = add(total, add(8, number(row.len())?)?)?;
@@ -386,18 +402,20 @@ fn section<T: Serialize>(out: &mut impl Out, kind: usize, values: &[T]) -> Resul
     }
     rows.sort();
     valid(rows.windows(2).all(|pair| pair[0] < pair[1]))?;
+    sections.total = total;
+    sections.rows.push(rows);
+    Ok(())
+}
+
+fn write_section(out: &mut impl Out, kind: usize, rows: &[Vec<u8>]) -> Result<(u64, u64)> {
     let start = out.len();
     out.put(&(kind as u16).to_be_bytes());
     out.put(&number(rows.len())?.to_be_bytes());
     for row in rows {
-        bound(
-            add(number(out.len())?, add(8, number(row.len())?)?)?,
-            STATE_LIMIT,
-        )?;
         out.put(&number(row.len())?.to_be_bytes());
-        out.put(&row);
+        out.put(row);
     }
-    Ok((number(values.len())?, number(out.len() - start)?))
+    Ok((number(rows.len())?, number(out.len() - start)?))
 }
 
 fn read_section<T: Serialize + for<'de> Deserialize<'de>>(
@@ -424,6 +442,7 @@ fn read_section<T: Serialize + for<'de> Deserialize<'de>>(
     Ok((rows, (n, number(start - r.0.len())?)))
 }
 
+#[cfg(test)]
 pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(Vec<u8>, Stats)> {
     let mut out = Vec::new();
     let stats = encode_into(&mut out, t, mappings)?;
@@ -435,180 +454,181 @@ pub(super) fn encode_into(
     t: &local::ExportTables,
     mappings: &[Mapping],
 ) -> Result<Stats> {
-    out.put(b"AVBD");
-    out.put(&(super::DOMAIN_VERSION as u16).to_be_bytes());
-    let mut stats = [(0, 0); SECTIONS];
-    stats[0] = section(
-        out,
+    let mut sections = Sections {
+        total: 6,
+        rows: Vec::with_capacity(SECTIONS),
+    };
+    section(
+        &mut sections,
         1,
         &t.workspaces
             .iter()
             .map(WorkspaceRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[1] = section(
-        out,
+    section(
+        &mut sections,
         2,
         &t.projects.iter().map(ProjectRow::from).collect::<Vec<_>>(),
     )?;
-    stats[2] = section(
-        out,
+    section(
+        &mut sections,
         3,
         &t.project_id_aliases
             .iter()
             .map(ProjectIdAliasRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[3] = section(
-        out,
+    section(
+        &mut sections,
         4,
         &t.labels.iter().map(LabelRow::from).collect::<Vec<_>>(),
     )?;
-    stats[4] = section(
-        out,
+    section(
+        &mut sections,
         5,
         &t.metadata_fields
             .iter()
             .map(MetadataFieldRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[5] = section(
-        out,
+    section(
+        &mut sections,
         6,
         &t.metadata_field_id_aliases
             .iter()
             .map(MetadataFieldIdAliasRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[6] = section(
-        out,
+    section(
+        &mut sections,
         7,
         &t.tasks.iter().map(TaskRow::from).collect::<Vec<_>>(),
     )?;
-    stats[7] = section(
-        out,
+    section(
+        &mut sections,
         8,
         &t.task_metadata
             .iter()
             .map(TaskMetadataRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[8] = section(
-        out,
+    section(
+        &mut sections,
         9,
         &t.task_labels
             .iter()
             .map(TaskLabelRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[9] = section(
-        out,
+    section(
+        &mut sections,
         10,
         &t.notes.iter().map(NoteRow::from).collect::<Vec<_>>(),
     )?;
-    stats[10] = section(
-        out,
+    section(
+        &mut sections,
         11,
         &t.task_dependencies
             .iter()
             .map(TaskDependencyRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[11] = section(
-        out,
+    section(
+        &mut sections,
         12,
         &t.task_epic_links
             .iter()
             .map(TaskEpicLinkRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[12] = section(
-        out,
+    section(
+        &mut sections,
         13,
         &t.task_related_links
             .iter()
             .map(TaskRelatedLinkRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[13] = section(
-        out,
+    section(
+        &mut sections,
         14,
         &t.task_attachments
             .iter()
             .map(TaskAttachmentRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[14] = section(
-        out,
+    section(
+        &mut sections,
         15,
         &t.recurrence_series
             .iter()
             .map(RecurrenceSeriesRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[15] = section(
-        out,
+    section(
+        &mut sections,
         16,
         &t.recurrence_series_labels
             .iter()
             .map(RecurrenceSeriesLabelRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[16] = section(
-        out,
+    section(
+        &mut sections,
         17,
         &t.recurrence_series_metadata
             .iter()
             .map(RecurrenceSeriesMetadataRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[17] = section(
-        out,
+    section(
+        &mut sections,
         18,
         &t.recurrence_occurrences
             .iter()
             .map(RecurrenceOccurrenceRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[18] = section(
-        out,
+    section(
+        &mut sections,
         19,
         &t.recurrence_pause_intervals
             .iter()
             .map(RecurrencePauseIntervalRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[19] = section(
-        out,
+    section(
+        &mut sections,
         20,
         &t.changes.iter().map(ChangeRow::from).collect::<Vec<_>>(),
     )?;
-    stats[20] = section(
-        out,
+    section(
+        &mut sections,
         21,
         &t.shared_history_provenance
             .iter()
             .map(SharedHistoryProvenanceRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[21] = section(
-        out,
+    section(
+        &mut sections,
         22,
         &t.field_versions
             .iter()
             .map(FieldVersionRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[22] = section(
-        out,
+    section(
+        &mut sections,
         23,
         &t.conflicts
             .iter()
             .map(ConflictRow::from)
             .collect::<Vec<_>>(),
     )?;
-    stats[23] = section(
-        out,
+    section(
+        &mut sections,
         24,
         &t.blob_inventory
             .iter()
@@ -631,8 +651,17 @@ pub(super) fn encode_into(
             value: row.value.clone(),
         });
     }
-    stats[24] = section(out, 25, &baselines)?;
-    stats[25] = section(out, 26, mappings)?;
+    section(&mut sections, 25, &baselines)?;
+    section(&mut sections, 26, mappings)?;
+    valid(sections.rows.len() == SECTIONS)?;
+    out.begin(size(sections.total)?);
+    out.put(b"AVBD");
+    out.put(&(super::DOMAIN_VERSION as u16).to_be_bytes());
+    let mut stats = [(0, 0); SECTIONS];
+    for (index, rows) in sections.rows.iter().enumerate() {
+        stats[index] = write_section(out, index + 1, rows)?;
+    }
+    debug_assert_eq!(number(out.len())?, sections.total);
     bound(
         stats.iter().try_fold(0, |n, (count, _)| add(n, *count))?,
         RECORD_LIMIT,

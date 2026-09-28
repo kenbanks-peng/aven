@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
@@ -20,6 +20,7 @@ use crate::sync::codec;
 const CHUNK_PLAINTEXT_BYTES: usize = 1_048_576;
 const CHUNK_HEADER_BYTES: usize = 198;
 const CHUNK_RECORD_OVERHEAD: usize = 222;
+const TAG_BYTES: usize = 16;
 const MAX_STATE_CHUNKS: usize = 256;
 const MAX_IMAGE_PLAINTEXT_BYTES: usize = crate::attachments::validation::MAX_BLOB_BYTES;
 const MAX_PACKAGE_IMAGE_COUNT: usize = 1024;
@@ -428,60 +429,162 @@ pub(crate) fn encrypt_artifact(
     class: u8,
     key: &[u8; 32],
 ) -> Result<EncryptedArtifact<'static>> {
-    let chunk_count = plaintext.len().div_ceil(CHUNK_PLAINTEXT_BYTES).max(1);
-    let chunk_count_u32 = u32::try_from(chunk_count)?;
-    let total = u64::try_from(plaintext.len())?;
-    let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-invalid-key"))?;
-    let mut chunks = Vec::with_capacity(chunk_count);
-    for index in 0..chunk_count {
-        let start = index
-            .checked_mul(CHUNK_PLAINTEXT_BYTES)
-            .context("chunk offset overflow")?;
-        let end = plaintext.len().min(
-            start
-                .checked_add(CHUNK_PLAINTEXT_BYTES)
-                .context("chunk end overflow")?,
-        );
-        let chunk_plaintext = &plaintext[start..end];
-        let mut nonce = [0_u8; 24];
-        getrandom::fill(&mut nonce).context("error encrypted-local-shared-package-rng")?;
-        let header = chunk_header(
+    let mut writer = ArtifactWriter::new(context, stream_id, artifact_id, family, class, key)?;
+    writer.begin(plaintext.len())?;
+    writer.write(plaintext)?;
+    writer.finish()
+}
+
+/// Encrypts an artifact of known length as its plaintext arrives, directly
+/// into its chunk records, so the whole plaintext never has to exist at once.
+pub(crate) struct ArtifactWriter {
+    cipher: XChaCha20Poly1305,
+    context: LocalSharedStatePackageContext,
+    stream_id: [u8; 32],
+    artifact_id: [u8; 32],
+    family: u8,
+    class: u8,
+    total: Option<u64>,
+    count: usize,
+    chunks: Vec<EncryptedChunk<'static>>,
+    /// The open chunk: header and body length, then plaintext so far.
+    record: Vec<u8>,
+    body: usize,
+    chunk_len: usize,
+    nonce: [u8; 24],
+}
+
+impl ArtifactWriter {
+    pub(crate) fn new(
+        context: LocalSharedStatePackageContext,
+        stream_id: [u8; 32],
+        artifact_id: [u8; 32],
+        family: u8,
+        class: u8,
+        key: &[u8; 32],
+    ) -> Result<Self> {
+        let cipher = XChaCha20Poly1305::new_from_slice(key)
+            .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-invalid-key"))?;
+        Ok(Self {
+            cipher,
             context,
             stream_id,
             artifact_id,
             family,
             class,
+            total: None,
+            count: 0,
+            chunks: Vec::new(),
+            record: Vec::new(),
+            body: 0,
+            chunk_len: 0,
+            nonce: [0; 24],
+        })
+    }
+
+    /// Declares the plaintext length, once, before any plaintext.
+    pub(crate) fn begin(&mut self, total: usize) -> Result<()> {
+        ensure!(
+            self.total.is_none(),
+            "error encrypted-local-shared-package-artifact-length"
+        );
+        self.count = total.div_ceil(CHUNK_PLAINTEXT_BYTES).max(1);
+        u32::try_from(self.count)?;
+        self.chunks.reserve_exact(self.count);
+        self.total = Some(u64::try_from(total)?);
+        Ok(())
+    }
+
+    pub(crate) fn write(&mut self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            if self.record.is_empty() {
+                self.start_chunk()?;
+            }
+            let room = self.chunk_len - (self.record.len() - self.body);
+            let taken = room.min(bytes.len());
+            self.record.extend_from_slice(&bytes[..taken]);
+            bytes = &bytes[taken..];
+            if self.record.len() - self.body == self.chunk_len {
+                self.seal_chunk()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(mut self) -> Result<EncryptedArtifact<'static>> {
+        let total = self
+            .total
+            .context("error encrypted-local-shared-package-artifact-length")?;
+        if total == 0 {
+            self.start_chunk()?;
+            self.seal_chunk()?;
+        }
+        ensure!(
+            self.record.is_empty() && self.chunks.len() == self.count,
+            "error encrypted-local-shared-package-artifact-length"
+        );
+        let chunks = std::mem::take(&mut self.chunks);
+        Ok(EncryptedArtifact {
+            total_plaintext_bytes: total,
+            aggregate_commitment: aggregate_commitment(&chunks),
+            chunks,
+        })
+    }
+
+    fn start_chunk(&mut self) -> Result<()> {
+        let total = self
+            .total
+            .context("error encrypted-local-shared-package-artifact-length")?;
+        let index = self.chunks.len();
+        ensure!(
+            index < self.count,
+            "error encrypted-local-shared-package-artifact-length"
+        );
+        self.chunk_len = expected_chunk_plaintext_len(index, self.count, usize::try_from(total)?)?;
+        getrandom::fill(&mut self.nonce).context("error encrypted-local-shared-package-rng")?;
+        let header = chunk_header(
+            self.context,
+            self.stream_id,
+            self.artifact_id,
+            self.family,
+            self.class,
             u32::try_from(index)?,
-            chunk_count_u32,
+            u32::try_from(self.count)?,
             total,
-            nonce,
+            self.nonce,
         )?;
-        let nonce_value = XNonce::try_from(nonce.as_slice())
+        self.record = Vec::with_capacity(CHUNK_RECORD_OVERHEAD + self.chunk_len);
+        codec::bytes(&mut self.record, &header);
+        self.record
+            .extend_from_slice(&u32::try_from(self.chunk_len + TAG_BYTES)?.to_be_bytes());
+        self.body = self.record.len();
+        Ok(())
+    }
+
+    /// Encrypts the open chunk in place and appends its tag.
+    fn seal_chunk(&mut self) -> Result<()> {
+        let nonce = XNonce::try_from(self.nonce.as_slice())
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-nonce-size"))?;
-        let ciphertext = cipher
-            .encrypt(
-                &nonce_value,
-                Payload {
-                    msg: chunk_plaintext,
-                    aad: &header,
-                },
-            )
+        let (head, body) = self.record.split_at_mut(self.body);
+        let tag = self
+            .cipher
+            .encrypt_inout_detached(&nonce, &head[4..4 + CHUNK_HEADER_BYTES], body.into())
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-encryption"))?;
-        let mut record = Vec::with_capacity(CHUNK_RECORD_OVERHEAD + chunk_plaintext.len());
-        codec::bytes(&mut record, &header);
-        codec::bytes(&mut record, &ciphertext);
-        chunks.push(EncryptedChunk {
+        let mut record = std::mem::take(&mut self.record);
+        record.extend_from_slice(&tag);
+        self.chunks.push(EncryptedChunk {
             record_commitment: codec::hash(&record),
             record: record.into(),
         });
+        Ok(())
     }
-    let aggregate_commitment = aggregate_commitment(&chunks);
-    Ok(EncryptedArtifact {
-        total_plaintext_bytes: total,
-        aggregate_commitment,
-        chunks,
-    })
+}
+
+impl Drop for ArtifactWriter {
+    fn drop(&mut self) {
+        // An unsealed chunk still holds plaintext.
+        self.record.zeroize();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -532,13 +635,16 @@ pub(crate) fn decrypt_artifact(
         )?;
         let nonce_value = XNonce::try_from(nonce.as_slice())
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-nonce-size"))?;
-        let decrypted = cipher
-            .decrypt(
+        // Decrypts in place at the end of the plaintext.
+        let (ciphertext, tag) = ciphertext.split_at(ciphertext.len() - TAG_BYTES);
+        let start = plaintext.len();
+        plaintext.extend_from_slice(ciphertext);
+        cipher
+            .decrypt_inout_detached(
                 &nonce_value,
-                Payload {
-                    msg: ciphertext,
-                    aad: header,
-                },
+                header,
+                (&mut plaintext[start..]).into(),
+                tag.try_into()?,
             )
             .map_err(|_| anyhow::anyhow!("error encrypted-local-shared-package-authentication"))?;
         let expected = expected_chunk_plaintext_len(
@@ -547,10 +653,9 @@ pub(crate) fn decrypt_artifact(
             usize::try_from(artifact.total_plaintext_bytes)?,
         )?;
         ensure!(
-            decrypted.len() == expected,
+            plaintext.len() - start == expected,
             "error encrypted-local-shared-package-chunk-size-mismatch"
         );
-        plaintext.extend_from_slice(&decrypted);
     }
     ensure!(
         plaintext.len() == usize::try_from(artifact.total_plaintext_bytes)?,
