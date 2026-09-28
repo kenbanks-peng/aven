@@ -745,3 +745,34 @@ async fn metadata_join_authentication_does_not_relax_complete_seed_validation() 
     tampered.manifest[0][210] ^= 1;
     assert!(download::decrypt(&tampered, &package_key()).is_err());
 }
+
+#[tokio::test]
+async fn streaming_self_check_agrees_with_decoding_validator() {
+    let (_dir, _database, capture, _, package) = specimen().await;
+    let (_other_dir, _other_database, other_capture, _, other_package) = specimen().await;
+    let key = package_key();
+    let wrong_key = LocalSharedStatePackageKey::new([9; 32]);
+    let mut flipped = package.clone();
+    let last = flipped.state[0].len() - 1;
+    flipped.state[0][last] ^= 1;
+    let cases: [(
+        &Package,
+        &NeverDispatchedLocalSharedCapture,
+        &LocalSharedStatePackageKey,
+        [u8; 32],
+        bool,
+    ); 6] = [
+        (&package, &capture, &key, [0x64; 32], true),
+        (&other_package, &other_capture, &key, [0x64; 32], true),
+        (&package, &capture, &wrong_key, [0x64; 32], false),
+        (&package, &capture, &key, [0; 32], false),
+        (&package, &other_capture, &key, [0x64; 32], false),
+        (&flipped, &capture, &key, [0x64; 32], false),
+    ];
+    for (package, capture, key, membership, valid) in cases {
+        let streaming = validate_against_capture(package, capture, key, membership);
+        let decoding = validate_against_capture_decoding(package, capture, key, membership);
+        assert_eq!(streaming.is_ok(), valid);
+        assert_eq!(decoding.is_ok(), valid);
+    }
+}

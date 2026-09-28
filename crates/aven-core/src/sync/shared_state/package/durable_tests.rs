@@ -30,7 +30,7 @@ async fn frozen_upload_survives_edits_source_loss_and_reopen() {
         .await
         .unwrap();
     let exact = frozen.upload_package();
-    assert_eq!(frozen.descriptor(), exact.descriptor);
+    assert_eq!(frozen.upload().descriptor.as_slice(), exact.descriptor);
     let stream = decode_context_id(capture.stream_id(), "stream").unwrap();
     assert_eq!(
         publication::validate_keyless(&exact).unwrap().image_count,
@@ -307,7 +307,7 @@ async fn corrupt_or_missing_frozen_components_never_trigger_replacement() {
         .unwrap();
         assert_eq!(
             commitment,
-            crate::sync::codec::hash(frozen.descriptor()),
+            crate::sync::codec::hash(frozen.upload().descriptor.as_slice()),
             "{name}"
         );
         let pins: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_pins")
@@ -453,7 +453,8 @@ async fn process_freeze_worker() {
         &package_key(),
         [7; 32],
     )
-    .unwrap();
+    .unwrap()
+    .0;
     std::fs::write(root.join("fingerprint"), fingerprint(&package)).unwrap();
     let mut conn = database.acquire_writer().await.unwrap();
     let mut tx = db::begin_immediate(&mut conn).await.unwrap();

@@ -204,14 +204,6 @@ impl Descriptor {
     }
 }
 
-fn artifact_records(artifact: &crypto::EncryptedArtifact) -> Vec<Vec<u8>> {
-    artifact
-        .chunks
-        .iter()
-        .map(|chunk| chunk.record.clone())
-        .collect()
-}
-
 fn state_catalog(state: &Artifact) -> Result<Vec<u8>> {
     let mut row = vec![1];
     state.write(&mut row)?;
@@ -245,10 +237,10 @@ fn manifest_plaintext(d: &Descriptor, stats: &domain::Stats) -> Vec<u8> {
 pub(super) fn build(
     capture: &NeverDispatchedLocalSharedCapture,
     context: crypto::LocalSharedStatePackageContext,
-    images: &[crypto::EncryptedImage],
+    images: Vec<crypto::EncryptedImage>,
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
-) -> Result<Package> {
+) -> Result<(Package, AttachmentIndex)> {
     let stream_id =
         crypto::decode_context_id(capture.stream_id(), "stream").map_err(|_| Error::Invalid)?;
     let bootstrap = crypto::decode_context_id(capture.candidate_id(), "candidate")
@@ -338,22 +330,22 @@ pub(super) fn build(
     .map_err(|_| Error::Authentication)?;
     d.manifest = Artifact::from_encrypted(&manifest)?;
     let mut image_records = images
-        .iter()
+        .into_iter()
         .map(|i| ImageRecords {
             object_id: i.object_id,
-            records: artifact_records(&i.artifact),
+            records: i.artifact.into_records(),
         })
         .collect::<Vec<_>>();
     image_records.sort_by_key(|i| i.object_id);
     let package = Package {
         descriptor: d.encode()?,
         catalogs,
-        state: artifact_records(&state),
-        manifest: artifact_records(&manifest),
+        state: state.into_records(),
+        manifest: manifest.into_records(),
         images: image_records,
     };
-    validate_against_capture(&package, capture, key, membership_predecessor)?;
-    Ok(package)
+    let index = authenticate_capture(&package, capture, key, membership_predecessor)?;
+    Ok((package, index))
 }
 
 /// Authenticates all domain, manifest and image bytes under the supplied key and
@@ -572,6 +564,126 @@ pub fn validate_against_capture(
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
 ) -> Result<()> {
+    authenticate_capture(package, capture, key, membership_predecessor).map(drop)
+}
+
+/// The one keyed pass over a frozen package. The decrypted state must equal
+/// the canonical encoding of the capture under the package's own private
+/// mappings, so the state is never decoded into a second copy of the tables.
+/// Images are decrypted and hashed one at a time.
+pub(crate) fn authenticate_capture(
+    package: &Package,
+    capture: &NeverDispatchedLocalSharedCapture,
+    key: &LocalSharedStatePackageKey,
+    membership_predecessor: [u8; 32],
+) -> Result<AttachmentIndex> {
+    #[cfg(test)]
+    crate::sync::shared_state::counters::keyed_pass();
+    let d = Descriptor::decode(&package.descriptor)?;
+    valid(
+        d.membership == membership_predecessor
+            && capture.stream_id() == hex::encode(d.stream)
+            && capture.candidate_id() == hex::encode(d.bootstrap),
+    )?;
+    validate_keyless(package)?;
+    let metadata = download::MetadataView::from(package);
+    let (_, images) = validate_metadata(&metadata)?;
+    let state = decode_state_catalog(&metadata.catalogs[0])?;
+    let state_key = crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 1)
+        .map_err(|_| Error::Authentication)?;
+    let plaintext = Zeroizing::new(
+        crypto::decrypt_artifact(
+            &state.encrypted(metadata.state),
+            d.context(),
+            d.stream,
+            d.bootstrap,
+            2,
+            1,
+            &state_key,
+            size(STATE_LIMIT)?,
+        )
+        .map_err(|_| Error::Authentication)?,
+    );
+    let mappings = domain::decode_mappings(&plaintext)?;
+    let tables = &capture.capture.snapshot.tables;
+    let (expected, stats) = domain::encode(tables, &mappings)?;
+    valid(*plaintext == expected)?;
+    drop(expected);
+    drop(plaintext);
+    let manifest_key =
+        crypto::derive_bootstrap_class_key(key, d.context(), d.stream, d.bootstrap, 2)
+            .map_err(|_| Error::Authentication)?;
+    let manifest = Zeroizing::new(
+        crypto::decrypt_artifact(
+            &d.manifest.encrypted(metadata.manifest),
+            d.context(),
+            d.stream,
+            d.bootstrap,
+            2,
+            2,
+            &manifest_key,
+            size(CHUNK)?,
+        )
+        .map_err(|_| Error::Authentication)?,
+    );
+    valid(*manifest == manifest_plaintext(&d, &stats))?;
+    valid(projection::prefix(tables)? == catalog::prefix_decode(&metadata.catalogs[1], d.prefix)?)?;
+    let expected_images = projection::images(
+        tables,
+        &mappings,
+        Images {
+            objects: images.objects.clone(),
+            parents: Vec::new(),
+            references: Vec::new(),
+        },
+    )?;
+    valid(images == expected_images)?;
+    valid(mappings.len() == capture.images.len())?;
+    let captured_images = capture
+        .images
+        .iter()
+        .map(|r| (r.sha256.as_str(), r.classification.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    for mapping in &mappings {
+        valid(
+            captured_images.get(mapping.sha256.as_str()).copied()
+                == Some(mapping.classification.as_str()),
+        )?;
+    }
+    for (object, records) in images.objects.iter().zip(&package.images) {
+        let mapping = mappings
+            .iter()
+            .find(|m| m.object == Some(object.id))
+            .ok_or(Error::Invalid)?;
+        let image_key = crypto::derive_image_key(key, d.context(), object.id)
+            .map_err(|_| Error::Authentication)?;
+        let bytes = Zeroizing::new(
+            crypto::decrypt_artifact(
+                &object.artifact.encrypted(&records.records),
+                d.context(),
+                d.stream,
+                object.id,
+                1,
+                0,
+                &image_key,
+                size(IMAGE_LIMIT)?,
+            )
+            .map_err(|_| Error::Authentication)?,
+        );
+        valid(hex::encode(crate::sync::codec::hash(&bytes)) == mapping.sha256)?;
+    }
+    index_from_mappings(&metadata, &mappings).map_err(|_| Error::Invalid)
+}
+
+/// The decoding validator [`authenticate_capture`] replaced, kept so tests can
+/// show both agree.
+#[cfg(test)]
+pub(crate) fn validate_against_capture_decoding(
+    package: &Package,
+    capture: &NeverDispatchedLocalSharedCapture,
+    key: &LocalSharedStatePackageKey,
+    membership_predecessor: [u8; 32],
+) -> Result<()> {
     let d = Descriptor::decode(&package.descriptor)?;
     valid(
         d.membership == membership_predecessor
@@ -625,6 +737,7 @@ pub(crate) fn replace_prefix_catalog(package: &mut Package, count: u64) {
     recommit_catalog(package, 1);
 }
 
+#[derive(Clone)]
 pub(crate) struct AttachmentIndex {
     pub context: crypto::LocalSharedStatePackageContext,
     pub stream: [u8; 32],
@@ -633,6 +746,7 @@ pub(crate) struct AttachmentIndex {
 }
 
 /// The caller receives mappings only after complete public/private authentication.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn attachment_index(
     package: &Package,
     key: &LocalSharedStatePackageKey,

@@ -259,6 +259,7 @@ pub async fn run_setup(
     };
     let _guard = coordination::acquire(database).await?;
     let bootstrap = bootstrap::Client::new(&invitation.server, link.clone())?;
+    let mut proof = None;
     // A sealed publication intent means the claim and capture are complete.
     if database.seed_publication_intent_bytes().await?.is_none() {
         progress(Stage::PreparingData.into());
@@ -317,13 +318,15 @@ pub async fn run_setup(
                 .await?;
         }
         let _timer = bootstrap::StageTimer::start("package");
-        store
-            .package_seed_capture(database, &blob_dir, invitation.setup_id)
-            .await?;
+        proof = Some(
+            store
+                .package_seed_capture_validated(database, &blob_dir, invitation.setup_id)
+                .await?,
+        );
     }
     progress(Stage::UploadingData.into());
     bootstrap
-        .resume_reporting(&store, database, &|done, total| {
+        .resume_validated(&store, database, proof, &|done, total| {
             progress(Progress {
                 stage: Stage::UploadingData,
                 amount: Some(Amount::Bytes {

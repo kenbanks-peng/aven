@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::NeverDispatchedLocalSharedCapture;
+use super::validated::ValidatedSeed;
 use crate::data_safety::export_types::AvenExport;
 use crate::db::{self, Database};
 use crate::sync::codec;
@@ -101,14 +102,18 @@ impl fmt::Debug for EncryptedLocalSharedStatePackage {
 }
 
 impl EncryptedLocalSharedStatePackage {
-    pub(crate) fn descriptor(&self) -> &[u8] {
-        &self.upload.descriptor
-    }
-
     /// Copies the exact frozen descriptor, catalogs and encrypted records.
     /// Returning these bytes does not make this local package dispatchable.
     pub fn upload_package(&self) -> publication::Package {
         self.upload.clone()
+    }
+
+    pub(crate) fn upload(&self) -> &publication::Package {
+        &self.upload
+    }
+
+    pub(crate) fn into_upload(self) -> publication::Package {
+        self.upload
     }
 
     pub fn candidate_id(&self) -> &str {
@@ -116,24 +121,35 @@ impl EncryptedLocalSharedStatePackage {
     }
 }
 
+/// Encrypted records that are either freshly owned or borrowed from a package.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EncryptedArtifact {
+pub(crate) struct EncryptedArtifact<'a> {
     total_plaintext_bytes: u64,
     aggregate_commitment: [u8; 32],
-    pub(crate) chunks: Vec<EncryptedChunk>,
+    pub(crate) chunks: Vec<EncryptedChunk<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EncryptedChunk {
+pub(crate) struct EncryptedChunk<'a> {
     record_commitment: [u8; 32],
-    pub(crate) record: Vec<u8>,
+    pub(crate) record: std::borrow::Cow<'a, [u8]>,
+}
+
+impl EncryptedArtifact<'_> {
+    /// Moves the records out without copying owned bytes.
+    pub(crate) fn into_records(self) -> Vec<Vec<u8>> {
+        self.chunks
+            .into_iter()
+            .map(|chunk| chunk.record.into_owned())
+            .collect()
+    }
 }
 
 /// One freshly encrypted selected image, before the package is assembled.
 pub(super) struct EncryptedImage {
     pub(super) sha256: String,
     pub(super) object_id: [u8; 32],
-    pub(super) artifact: EncryptedArtifact,
+    pub(super) artifact: EncryptedArtifact<'static>,
 }
 
 struct SelectedImagePlaintext {
@@ -174,6 +190,21 @@ impl Database {
         key: &LocalSharedStatePackageKey,
         membership_predecessor: [u8; 32],
     ) -> Result<EncryptedLocalSharedStatePackage> {
+        Ok(self
+            .package_and_validate(blob_dir, context, key, membership_predecessor)
+            .await?
+            .0)
+    }
+
+    /// [`Self::package_local_shared_state_never_dispatched`], also returning
+    /// the proof made by its single keyed pass.
+    pub(crate) async fn package_and_validate(
+        &self,
+        blob_dir: &Path,
+        context: LocalSharedStatePackageContext,
+        key: &LocalSharedStatePackageKey,
+        membership_predecessor: [u8; 32],
+    ) -> Result<(EncryptedLocalSharedStatePackage, ValidatedSeed)> {
         let (capture, selected) = loop {
             let capture = self
                 .resume_local_shared_state_never_dispatched()
@@ -192,9 +223,9 @@ impl Database {
             .fetch_all(&mut *tx)
             .await?;
             if let Some(package) = load_package(&mut tx, &candidate_id).await? {
-                tx.commit().await?;
-                validate_frozen(&package, &capture, context, key, membership_predecessor)?;
-                return Ok(package);
+                return self
+                    .validate_frozen(tx, package, capture, context, key, membership_predecessor)
+                    .await;
             }
             tx.commit().await?;
             drop(conn);
@@ -211,7 +242,9 @@ impl Database {
             mark_capture_images_unavailable(self, &candidate_id, &missing).await?;
         };
         let candidate_id = capture.candidate_id().to_string();
-        let package = encrypt_package(&capture, context, &selected, key, membership_predecessor)?;
+        let (package, attachments) =
+            encrypt_package(&capture, context, &selected, key, membership_predecessor)?;
+        drop(selected);
 
         let mut conn = self.acquire_writer().await?;
         let mut tx = db::begin_immediate(&mut conn).await?;
@@ -233,9 +266,9 @@ impl Database {
         )
         .await?;
         if let Some(existing) = load_package(&mut tx, &candidate_id).await? {
-            tx.commit().await?;
-            validate_frozen(&existing, &capture, context, key, membership_predecessor)?;
-            return Ok(existing);
+            return self
+                .validate_frozen(tx, existing, capture, context, key, membership_predecessor)
+                .await;
         }
         persist_package(&mut tx, &package).await?;
         let stored = load_package(&mut tx, &candidate_id)
@@ -245,8 +278,38 @@ impl Database {
             stored == package,
             "error encrypted-local-shared-package-write-mismatch"
         );
+        drop(stored);
+        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments).await?;
         tx.commit().await?;
-        Ok(package)
+        Ok((package, proof))
+    }
+
+    /// Checks a frozen package against the caller's expected context and the
+    /// independent capture before it is returned. The identity is read under
+    /// `tx`; the keyed pass runs after it commits.
+    async fn validate_frozen(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+        package: EncryptedLocalSharedStatePackage,
+        capture: NeverDispatchedLocalSharedCapture,
+        context: LocalSharedStatePackageContext,
+        key: &LocalSharedStatePackageKey,
+        membership_predecessor: [u8; 32],
+    ) -> Result<(EncryptedLocalSharedStatePackage, ValidatedSeed)> {
+        ensure!(
+            publication::context_and_membership(&package.upload)?
+                == (context, membership_predecessor),
+            "error encrypted-local-shared-package-context-mismatch"
+        );
+        let attachments = publication::authenticate_capture(
+            &package.upload,
+            &capture,
+            key,
+            membership_predecessor,
+        )?;
+        let proof = ValidatedSeed::from_pass(&mut tx, capture, &package, attachments).await?;
+        tx.commit().await?;
+        Ok((package, proof))
     }
 
     /// Authenticates, decrypts, validates, and atomically installs a package.
@@ -269,7 +332,10 @@ fn encrypt_package(
     selected_images: &[SelectedImagePlaintext],
     key: &LocalSharedStatePackageKey,
     membership_predecessor: [u8; 32],
-) -> Result<EncryptedLocalSharedStatePackage> {
+) -> Result<(
+    EncryptedLocalSharedStatePackage,
+    publication::AttachmentIndex,
+)> {
     let stream_id = decode_context_id(capture.stream_id(), "stream")?;
     let mut images = Vec::with_capacity(selected_images.len());
     for image in selected_images {
@@ -290,27 +356,15 @@ fn encrypt_package(
             artifact,
         });
     }
-    Ok(EncryptedLocalSharedStatePackage {
-        candidate_id: capture.candidate_id().to_string(),
-        upload: publication::build(capture, context, &images, key, membership_predecessor)?,
-    })
-}
-
-/// Checks a frozen package against the caller's expected context and the
-/// independent capture before it is returned.
-fn validate_frozen(
-    package: &EncryptedLocalSharedStatePackage,
-    capture: &NeverDispatchedLocalSharedCapture,
-    context: LocalSharedStatePackageContext,
-    key: &LocalSharedStatePackageKey,
-    membership_predecessor: [u8; 32],
-) -> Result<()> {
-    ensure!(
-        publication::context_and_membership(&package.upload)? == (context, membership_predecessor),
-        "error encrypted-local-shared-package-context-mismatch"
-    );
-    publication::validate_against_capture(&package.upload, capture, key, membership_predecessor)?;
-    Ok(())
+    let (upload, attachments) =
+        publication::build(capture, context, images, key, membership_predecessor)?;
+    Ok((
+        EncryptedLocalSharedStatePackage {
+            candidate_id: capture.candidate_id().to_string(),
+            upload,
+        },
+        attachments,
+    ))
 }
 
 fn derive_bootstrap_class_key(
@@ -362,7 +416,7 @@ pub(crate) fn encrypt_artifact(
     family: u8,
     class: u8,
     key: &[u8; 32],
-) -> Result<EncryptedArtifact> {
+) -> Result<EncryptedArtifact<'static>> {
     let chunk_count = plaintext.len().div_ceil(CHUNK_PLAINTEXT_BYTES).max(1);
     let chunk_count_u32 = u32::try_from(chunk_count)?;
     let total = u64::try_from(plaintext.len())?;
@@ -408,7 +462,7 @@ pub(crate) fn encrypt_artifact(
         codec::bytes(&mut record, &ciphertext);
         chunks.push(EncryptedChunk {
             record_commitment: codec::hash(&record),
-            record,
+            record: record.into(),
         });
     }
     let aggregate_commitment = aggregate_commitment(&chunks);
@@ -421,7 +475,7 @@ pub(crate) fn encrypt_artifact(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn decrypt_artifact(
-    artifact: &EncryptedArtifact,
+    artifact: &EncryptedArtifact<'_>,
     context: LocalSharedStatePackageContext,
     stream_id: [u8; 32],
     artifact_id: [u8; 32],
@@ -606,7 +660,7 @@ fn split_record(record: &[u8]) -> Result<(&[u8], &[u8])> {
     Ok((&record[4..body_len_offset], &record[body_start..]))
 }
 
-fn aggregate_commitment(chunks: &[EncryptedChunk]) -> [u8; 32] {
+fn aggregate_commitment(chunks: &[EncryptedChunk<'_>]) -> [u8; 32] {
     let mut digest = Sha256::new();
     for chunk in chunks {
         digest.update(&chunk.record);

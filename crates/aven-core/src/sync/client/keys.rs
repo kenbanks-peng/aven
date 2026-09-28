@@ -271,6 +271,24 @@ impl ProtectedLocalKeyStore {
         blob_dir: &Path,
         membership_predecessor: [u8; 32],
     ) -> Result<EncryptedLocalSharedStatePackage, anyhow::Error> {
+        Ok(self
+            .package_local_capture_validated(database, blob_dir, membership_predecessor)
+            .await?
+            .0)
+    }
+
+    pub(crate) async fn package_local_capture_validated(
+        &self,
+        database: &Database,
+        blob_dir: &Path,
+        membership_predecessor: [u8; 32],
+    ) -> Result<
+        (
+            EncryptedLocalSharedStatePackage,
+            crate::sync::shared_state::validated::ValidatedSeed,
+        ),
+        anyhow::Error,
+    > {
         self.validate_database(database).await?;
         let protected = if database
             .has_local_shared_state_package_never_dispatched()
@@ -282,7 +300,7 @@ impl ProtectedLocalKeyStore {
             self.load_or_create()?
         };
         database
-            .package_local_shared_state_never_dispatched(
+            .package_and_validate(
                 blob_dir,
                 protected.context(),
                 protected.package_key(),

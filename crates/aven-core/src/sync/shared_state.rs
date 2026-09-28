@@ -12,6 +12,7 @@ use anyhow::{Context, Result, ensure};
 pub mod adoption;
 pub(crate) mod package;
 mod peer_install;
+pub(crate) mod validated;
 
 pub use package::publication as bootstrap_format;
 
@@ -40,7 +41,6 @@ pub(crate) mod counters {
     }
 
     /// Returns and resets (keyed passes, snapshot parses).
-    #[allow(dead_code)]
     pub(crate) fn take() -> (u32, u32) {
         (
             KEYED_PASSES.with(|c| c.replace(0)),
@@ -68,6 +68,8 @@ pub struct NeverDispatchedLocalSharedCapture {
     stream_id: String,
     capture: SharedStateCapture,
     images: Vec<PersistedCaptureImage>,
+    /// SHA-256 of the exact stored `snapshot_json` this value was decoded from.
+    snapshot_digest: [u8; 32],
 }
 
 impl NeverDispatchedLocalSharedCapture {
@@ -288,6 +290,7 @@ impl Database {
                 snapshot: persisted.snapshot,
             },
             images: persisted.images,
+            snapshot_digest: crate::sync::codec::hash(snapshot_json.as_bytes()),
         })
     }
 
@@ -661,6 +664,7 @@ async fn load_persisted_local_capture(
         stream_id,
         capture,
         images: persisted.images,
+        snapshot_digest: crate::sync::codec::hash(snapshot_json.as_bytes()),
     }))
 }
 

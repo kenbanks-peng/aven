@@ -1166,7 +1166,8 @@ async fn adoption_process_worker() {
                         &intent,
                         &seed,
                         package.package_key(),
-                        &outcome
+                        &outcome,
+                        &mut Default::default(),
                     )
                     .await
                     .unwrap()
@@ -1328,5 +1329,162 @@ async fn recurrence_generation_form_follows_seed_opt_in_through_capture_cancel()
     assert_eq!(
         generation(&database, "2100-09-21").await.0,
         identity.task_change_id
+    );
+}
+
+/// Client-side keyed passes for one resume from a new process: recover the
+/// intent, upload unless published, publish if needed, then adopt.
+async fn resume_passes(
+    database: &Database,
+    store: &ProtectedLocalKeyStore,
+    server: &Database,
+    proof: Option<crate::sync::shared_state::validated::ValidatedSeed>,
+    stop_before_publish: bool,
+) -> u32 {
+    use crate::sync::shared_state::{counters, validated::ProofCache};
+    let key = store.load_required().unwrap();
+    let mut proofs = ProofCache::new(proof);
+    let (seed, intent) = store
+        .seed_resume_intent(database, &mut proofs)
+        .await
+        .unwrap();
+    let published = server
+        .bootstrap_staging_status(
+            &crate::sync::bootstrap_staging::Authentication {
+                vault_id: seed.genesis().context().vault_id,
+                genesis_commitment: seed.genesis().commitment(),
+                bearer: seed.bearer(),
+            },
+            intent
+                .publication(seed.genesis())
+                .unwrap()
+                .binding()
+                .bootstrap_id,
+        )
+        .await
+        .ok()
+        .and_then(|status| match status {
+            crate::sync::bootstrap_staging::Status::Published(outcome) => Some(outcome),
+            _ => None,
+        });
+    let outcome = match published {
+        Some(outcome) => outcome,
+        None => {
+            let upload = store
+                .seed_upload(database, &intent, &mut proofs)
+                .await
+                .unwrap()
+                .unwrap();
+            if stop_before_publish {
+                return counters::take().0;
+            }
+            let passes = counters::take().0;
+            let outcome = publish_empty_package(server, &seed, &upload, key.package_key()).await;
+            counters::take();
+            let adopted = store
+                .adopt_seed_publication_with(database, &outcome, &mut proofs)
+                .await
+                .unwrap();
+            assert!(adopted);
+            return passes + counters::take().0;
+        }
+    };
+    let passes = counters::take().0;
+    store
+        .adopt_seed_publication_with(database, &outcome, &mut proofs)
+        .await
+        .unwrap();
+    passes + counters::take().0
+}
+
+#[tokio::test]
+async fn fresh_setup_authenticates_the_frozen_package_once() {
+    use crate::sync::shared_state::counters;
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(&root.path().join("client.sqlite"))
+        .await
+        .unwrap();
+    let store = isolated_store(&database, &root.path().join("keys")).await;
+    let server = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    store.prepare_seed_claim(&database, [9; 32]).await.unwrap();
+    store.prepare_seed_source(&database).await.unwrap();
+    database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    counters::take();
+    let proof = store
+        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .await
+        .unwrap();
+    let packaged = counters::take();
+    assert_eq!(packaged.0, 1);
+    let resumed = resume_passes(&database, &store, &server, Some(proof), false).await;
+    assert_eq!(packaged.0 + resumed, 1);
+}
+
+#[tokio::test]
+async fn each_resume_point_authenticates_the_frozen_package_at_most_once() {
+    use crate::sync::shared_state::{counters, validated::ProofCache};
+    let root = tempfile::tempdir().unwrap();
+    let database = Database::open(&root.path().join("client.sqlite"))
+        .await
+        .unwrap();
+    let store = isolated_store(&database, &root.path().join("keys")).await;
+    let server = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    store.prepare_seed_claim(&database, [9; 32]).await.unwrap();
+    store.prepare_seed_source(&database).await.unwrap();
+    database
+        .capture_local_shared_state_never_dispatched()
+        .await
+        .unwrap();
+    // Interrupted after freezing, before any intent.
+    store
+        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .await
+        .unwrap();
+    counters::take();
+    // Resume repackages (loading the frozen bytes) and prepares the intent.
+    let proof = store
+        .package_seed_capture_validated(&database, root.path(), [9; 32])
+        .await
+        .unwrap();
+    store
+        .seed_resume_intent(&database, &mut ProofCache::new(Some(proof)))
+        .await
+        .unwrap();
+    assert_eq!(counters::take().0, 1);
+    // Interrupted after sealing, then again after uploading.
+    assert_eq!(
+        resume_passes(&database, &store, &server, None, true).await,
+        1
+    );
+    // Interrupted after publication, before adoption.
+    let key = store.load_required().unwrap();
+    let mut proofs = ProofCache::default();
+    let (seed, intent) = store
+        .seed_resume_intent(&database, &mut proofs)
+        .await
+        .unwrap();
+    let upload = store
+        .seed_upload(&database, &intent, &mut proofs)
+        .await
+        .unwrap()
+        .unwrap();
+    publish_empty_package(&server, &seed, &upload, key.package_key()).await;
+    drop(proofs);
+    counters::take();
+    assert_eq!(
+        resume_passes(&database, &store, &server, None, false).await,
+        1
+    );
+    // Already adopted.
+    assert_eq!(
+        resume_passes(&database, &store, &server, None, false).await,
+        0
     );
 }

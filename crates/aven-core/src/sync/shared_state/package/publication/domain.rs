@@ -580,6 +580,29 @@ pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(V
     Ok((out, stats))
 }
 
+/// Reads only the private image mappings, framing past the domain sections
+/// without parsing their rows. Callers must still compare the complete bytes.
+pub(super) fn decode_mappings(input: &[u8]) -> Result<Vec<Mapping>> {
+    bound(number(input.len())?, STATE_LIMIT)?;
+    let mut r = Reader(input);
+    let mut remaining = RECORD_LIMIT;
+    valid(r.take(4)? == b"AVBD")?;
+    valid(u16::from_be_bytes(r.array()?) as u32 == super::DOMAIN_VERSION)?;
+    for kind in 1..SECTIONS {
+        valid(u16::from_be_bytes(r.array()?) == kind as u16)?;
+        let n = r.u64()?;
+        bound(n, remaining)?;
+        remaining -= n;
+        valid(n <= number(r.0.len())? / 8)?;
+        for _ in 0..n {
+            r.bytes(STATE_LIMIT)?;
+        }
+    }
+    let (mappings, _) = read_section::<Mapping>(&mut r, SECTIONS, &mut remaining)?;
+    r.end()?;
+    Ok(mappings)
+}
+
 pub(super) fn decode(input: &[u8]) -> Result<(local::ExportTables, Vec<Mapping>, Stats)> {
     bound(number(input.len())?, STATE_LIMIT)?;
     let mut r = Reader(input);

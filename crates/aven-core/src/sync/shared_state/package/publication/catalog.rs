@@ -19,7 +19,7 @@ pub(crate) struct Chunk {
 }
 
 impl Artifact {
-    pub(crate) fn from_encrypted(artifact: &EncryptedArtifact) -> Result<Self> {
+    pub(crate) fn from_encrypted(artifact: &EncryptedArtifact<'_>) -> Result<Self> {
         let chunks = artifact
             .chunks
             .iter()
@@ -138,7 +138,7 @@ impl Artifact {
         .map_err(|_| Error::Invalid)?;
         valid(nonce == chunk.nonce)
     }
-    pub(crate) fn encrypted(&self, records: &[Vec<u8>]) -> EncryptedArtifact {
+    pub(crate) fn encrypted<'a>(&self, records: &'a [Vec<u8>]) -> EncryptedArtifact<'a> {
         EncryptedArtifact {
             total_plaintext_bytes: self.total,
             aggregate_commitment: self.aggregate,
@@ -147,7 +147,7 @@ impl Artifact {
                 .zip(&self.chunks)
                 .map(|(record, chunk)| EncryptedChunk {
                     record_commitment: chunk.hash,
-                    record: record.clone(),
+                    record: record.as_slice().into(),
                 })
                 .collect(),
         }

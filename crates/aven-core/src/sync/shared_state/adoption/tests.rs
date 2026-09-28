@@ -465,3 +465,108 @@ async fn captured_history_adoption_refuses_prefix_count_mismatch() {
         .unwrap_err();
     assert!(error.to_string().contains("seed-prefix-count-mismatch"));
 }
+
+async fn fixture_proof(fixture: &Fixture) -> ProofCache {
+    let (_, database, _, seed, key, _) = fixture;
+    ProofCache::new(Some(
+        super::super::validated::ValidatedSeed::load(database, key, seed.genesis().commitment())
+            .await
+            .unwrap(),
+    ))
+}
+
+async fn intent_error_with(fixture: &Fixture, proofs: &mut ProofCache) -> String {
+    let (_, database, source, seed, key, _) = fixture;
+    format!(
+        "{:#}",
+        database
+            .prepare_seed_publication_intent_with(source, seed, key, proofs)
+            .await
+            .map(drop)
+            .unwrap_err()
+    )
+}
+
+#[tokio::test]
+async fn proof_detects_snapshot_rewrite_before_writer_use() {
+    let fixture = history_fixture().await;
+    let mut proofs = fixture_proof(&fixture).await;
+    // Semantically inert for the package, but not the bytes that were proved.
+    sql(
+        &fixture.1,
+        "UPDATE local_shared_capture_journal
+         SET snapshot_json = replace(snapshot_json, '\"exported_at\":\"', '\"exported_at\":\"0')",
+    )
+    .await;
+    let error = intent_error_with(&fixture, &mut proofs).await;
+    assert!(error.contains("seed-capture-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn proof_detects_rank_table_mutation_before_writer_use() {
+    let fixture = history_fixture().await;
+    let mut proofs = fixture_proof(&fixture).await;
+    sql(
+        &fixture.1,
+        "UPDATE local_shared_capture_changes SET source_server_seq = source_server_seq + 1000
+         WHERE source_server_seq IS NOT NULL",
+    )
+    .await;
+    let error = intent_error_with(&fixture, &mut proofs).await;
+    assert!(error.contains("seed-capture-changed"), "{error}");
+}
+
+#[tokio::test]
+async fn proof_requires_the_package_key() {
+    let fixture = history_fixture().await;
+    let wrong = LocalSharedStatePackageKey::new([1; 32]);
+    assert!(
+        super::super::validated::ValidatedSeed::load(
+            &fixture.1,
+            &wrong,
+            fixture.3.genesis().commitment()
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn proof_refuses_tampered_frozen_record_without_a_key() {
+    let fixture = history_fixture().await;
+    sql(
+        &fixture.1,
+        "UPDATE local_shared_capture_package_records SET record = zeroblob(length(record))
+         WHERE component = 'state'",
+    )
+    .await;
+    crate::sync::shared_state::counters::take();
+    let error = super::super::validated::ValidatedSeed::load(
+        &fixture.1,
+        &fixture.4,
+        fixture.3.genesis().commitment(),
+    )
+    .await
+    .err()
+    .map(|error| format!("{error:#}"))
+    .unwrap();
+    assert!(error.contains("frozen-records-invalid"), "{error}");
+    assert_eq!(crate::sync::shared_state::counters::take().0, 0);
+}
+
+#[tokio::test]
+async fn in_process_proof_prepares_intent_without_another_keyed_pass() {
+    let fixture = history_fixture().await;
+    let mut proofs = fixture_proof(&fixture).await;
+    crate::sync::shared_state::counters::take();
+    let (_, database, source, seed, key, _) = &fixture;
+    database
+        .prepare_seed_publication_intent_with(source, seed, key, &mut proofs)
+        .await
+        .unwrap();
+    database
+        .prepare_seed_publication_intent_with(source, seed, key, &mut proofs)
+        .await
+        .unwrap();
+    assert_eq!(crate::sync::shared_state::counters::take().0, 0);
+}

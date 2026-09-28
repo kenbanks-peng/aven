@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::exchange::{self, Link};
 use super::keys::ProtectedLocalKeyStore;
 use crate::db::Database;
+use crate::sync::shared_state::validated::{ProofCache, ValidatedSeed};
 use crate::sync::{
     base64_bytes, bootstrap_staging as staging,
     seed_claim::{ClaimAuthentication, ClaimResult, Genesis, PublicationOutcome, Secret},
@@ -257,7 +258,20 @@ impl Client {
         database: &Database,
         uploaded: &(dyn Fn(u64, u64) + Sync),
     ) -> Result<bool> {
-        let (seed, intent, package) = store.seed_http_inputs(database).await?;
+        self.resume_validated(store, database, None, uploaded).await
+    }
+
+    /// [`Self::resume_reporting`], reusing a proof the caller already made
+    /// so the frozen package is not authenticated again.
+    pub(crate) async fn resume_validated(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        database: &Database,
+        proof: Option<ValidatedSeed>,
+        uploaded: &(dyn Fn(u64, u64) + Sync),
+    ) -> Result<bool> {
+        let mut proofs = ProofCache::new(proof);
+        let (seed, intent) = store.seed_resume_intent(database, &mut proofs).await?;
         let publication = intent.publication(seed.genesis())?;
         let binding = publication.binding();
         let status = self
@@ -272,9 +286,11 @@ impl Client {
         let record = match status {
             Reply::Published(record) => record,
             Reply::Missing | Reply::Staging(_) => {
+                let package = store
+                    .seed_upload(database, &intent, &mut proofs)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("error bootstrap-outcome-missing"))?;
                 let _timer = StageTimer::start("upload");
-                let package =
-                    package.ok_or_else(|| anyhow::anyhow!("error bootstrap-outcome-missing"))?;
                 let components = components(&package);
                 let budget = staging::Budget {
                     bytes: components
@@ -380,7 +396,9 @@ impl Client {
             "error bootstrap-outcome-mismatch"
         );
         let _timer = StageTimer::start("adopt");
-        store.adopt_seed_publication(database, &outcome).await
+        store
+            .adopt_seed_publication_with(database, &outcome, &mut proofs)
+            .await
     }
 }
 

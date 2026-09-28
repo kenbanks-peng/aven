@@ -4,20 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 
-use super::{NeverDispatchedLocalSharedCapture, load_persisted_local_capture, package};
+use super::validated::ProofCache;
+use super::{NeverDispatchedLocalSharedCapture, package};
 use crate::db::{self, Database};
 use crate::sync::LocalSharedStatePackageKey;
 use crate::sync::seed_claim::{Genesis, Publication, PublicationOutcome, SeedAuthority};
-
-fn same_capture(
-    a: &NeverDispatchedLocalSharedCapture,
-    b: &NeverDispatchedLocalSharedCapture,
-) -> Result<bool> {
-    Ok(a.candidate_id == b.candidate_id
-        && a.stream_id == b.stream_id
-        && a.images == b.images
-        && serde_json::to_vec(&a.capture.snapshot)? == serde_json::to_vec(&b.capture.snapshot)?)
-}
 
 /// Host-persisted source identity, independent of replaceable SQLite state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,30 +248,6 @@ async fn validate_history(
         "error seed-history-invalid"
     );
 
-    let capture = load_persisted_local_capture(conn)
-        .await?
-        .context("error seed-capture-missing")?;
-    let mut frozen = capture
-        .capture
-        .snapshot
-        .tables
-        .changes
-        .iter()
-        .collect::<Vec<_>>();
-    frozen.sort_by(|a, b| a.change_id.cmp(&b.change_id));
-    ensure!(
-        frozen.len() == expected.len(),
-        "error seed-captured-history-map-mismatch"
-    );
-    for (source_row, frozen_row) in expected.iter().zip(&frozen) {
-        ensure!(
-            source_row.matches(frozen_row, false)?,
-            "error seed-captured-history-map-mismatch"
-        );
-    }
-    drop(frozen);
-    drop(capture);
-
     let captured: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM local_shared_capture_changes WHERE candidate_id = ?",
     )
@@ -373,12 +340,56 @@ async fn validate_history(
     .await?;
     ensure!(!uncaptured, "error seed-uncaptured-accepted-history");
 
+    Ok(history_digest(&history, &stored_provenance))
+}
+
+pub(super) fn history_digest(history: &str, provenance: &str) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(b"aven-local-source-history-v1");
     digest.update((history.len() as u64).to_be_bytes());
     digest.update(history.as_bytes());
-    digest.update(stored_provenance.as_bytes());
-    Ok(digest.finalize().into())
+    digest.update(provenance.as_bytes());
+    digest.finalize().into()
+}
+
+/// Checks the stored source history map against the frozen capture, ignoring
+/// original server sequences, and returns the history commitment.
+pub(super) async fn check_frozen_history(
+    conn: &mut SqliteConnection,
+    capture: &NeverDispatchedLocalSharedCapture,
+) -> Result<[u8; 32]> {
+    let (history, provenance): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT source_history, source_provenance
+         FROM local_shared_capture_journal WHERE candidate_id = ?",
+    )
+    .bind(capture.candidate_id())
+    .fetch_optional(&mut *conn)
+    .await?
+    .context("error seed-capture-missing")?;
+    let (Some(history), Some(provenance)) = (history, provenance) else {
+        anyhow::bail!("error seed-capture-incompatible recapture-never-dispatched");
+    };
+    let expected: Vec<SourceChange<'_>> =
+        serde_json::from_str(&history).context("error seed-history-invalid")?;
+    let mut frozen = capture
+        .capture
+        .snapshot
+        .tables
+        .changes
+        .iter()
+        .collect::<Vec<_>>();
+    frozen.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+    ensure!(
+        frozen.len() == expected.len(),
+        "error seed-captured-history-map-mismatch"
+    );
+    for (source_row, frozen_row) in expected.iter().zip(&frozen) {
+        ensure!(
+            source_row.matches(frozen_row, false)?,
+            "error seed-captured-history-map-mismatch"
+        );
+    }
+    Ok(history_digest(&history, &provenance))
 }
 
 /// Records captured provenance and moves captured rows to their prefix
@@ -452,13 +463,19 @@ async fn adopt_captured_history(
 impl Database {
     /// Loads exact upload bytes only for a sealed, protected publication intent.
     /// Adopted installations need only their retained intent and remote outcome.
-    pub async fn seed_publication_upload(
+    pub(crate) async fn seed_publication_upload(
         &self,
         source: &SeedSourceAuthority,
         intent: &SeedPublicationIntent,
         seed: &SeedAuthority,
         key: &LocalSharedStatePackageKey,
+        proofs: &mut ProofCache,
     ) -> Result<Option<crate::sync::bootstrap_format::Package>> {
+        let proof = match self.seed_publication_intent_bytes().await? {
+            Some((_, state)) if state == "adopted" => None,
+            // Failures surface only where the writer would have validated.
+            _ => Some(proofs.get(self, key, seed.genesis().commitment()).await),
+        };
         let mut conn = self.acquire_writer().await?;
         let mut tx = db::begin_immediate(&mut conn).await?;
         source_matches(&mut tx, source).await?;
@@ -480,55 +497,24 @@ impl Database {
             validate_history(&mut tx, &intent.data.candidate, source).await? == intent.data.history,
             "error seed-history-commitment-mismatch"
         );
-        let capture = load_persisted_local_capture(&mut tx)
-            .await?
-            .context("error seed-capture-missing")?;
+        let proof = proof.context("error seed-intent-changed")??;
+        proof.identity().assert_matches(&mut tx).await?;
+        ensure!(
+            proof.identity().history() == intent.data.history
+                && proof.descriptor() == intent.data.descriptor,
+            "error seed-package-mismatch"
+        );
         let package = package::load_package(&mut tx, &intent.data.candidate)
             .await?
             .context("error seed-package-missing")?;
-        let upload = package.upload_package();
+        tx.commit().await?;
+        let upload = package.into_upload();
         ensure!(
-            upload.descriptor == intent.data.descriptor,
+            upload.descriptor == intent.data.descriptor
+                && upload.catalogs == proof.metadata().catalogs,
             "error seed-package-mismatch"
         );
-        tx.commit().await?;
-        drop(conn);
-        // Decryption validates the snapshot read above without holding the writer.
-        package::publication::validate_against_capture(
-            &upload,
-            &capture,
-            key,
-            seed.genesis().commitment(),
-        )?;
         Ok(Some(upload))
-    }
-
-    /// Loads the never-dispatched capture with its frozen package and
-    /// authenticates one against the other on a reader, so the full-package
-    /// decrypt never holds the writer. Writers reload both and compare.
-    async fn validated_frozen_capture(
-        &self,
-        key: &LocalSharedStatePackageKey,
-        seed: &SeedAuthority,
-    ) -> Result<(
-        NeverDispatchedLocalSharedCapture,
-        package::EncryptedLocalSharedStatePackage,
-    )> {
-        let mut conn = self.acquire_reader().await?;
-        let capture = load_persisted_local_capture(&mut conn)
-            .await?
-            .context("error seed-capture-missing")?;
-        let package = package::load_package(&mut conn, capture.candidate_id())
-            .await?
-            .context("error seed-package-missing")?;
-        drop(conn);
-        package::publication::validate_against_capture(
-            &package.upload_package(),
-            &capture,
-            key,
-            seed.genesis().commitment(),
-        )?;
-        Ok((capture, package))
     }
 
     pub async fn seed_source_pin(&self) -> Result<Option<Vec<u8>>> {
@@ -592,20 +578,21 @@ impl Database {
         seed: &SeedAuthority,
         key: &LocalSharedStatePackageKey,
     ) -> Result<SeedPublicationIntent> {
-        // Failures surface only where the writer would have validated.
-        let prepared = if self.seed_publication_intent_bytes().await?.is_none() {
-            Some(
-                async {
-                    let (capture, package) = self.validated_frozen_capture(key, seed).await?;
-                    // The package was just authenticated under `key` against the capture.
-                    let publication =
-                        seed.sign_authenticated_publication(package.descriptor(), key)?;
-                    anyhow::Ok((capture, package, publication))
-                }
-                .await,
-            )
-        } else {
-            None
+        self.prepare_seed_publication_intent_with(source, seed, key, &mut ProofCache::default())
+            .await
+    }
+
+    pub(crate) async fn prepare_seed_publication_intent_with(
+        &self,
+        source: &SeedSourceAuthority,
+        seed: &SeedAuthority,
+        key: &LocalSharedStatePackageKey,
+        proofs: &mut ProofCache,
+    ) -> Result<SeedPublicationIntent> {
+        let proof = match self.seed_publication_intent_bytes().await? {
+            Some((_, state)) if state == "adopted" => None,
+            // Failures surface only where the writer would have validated.
+            _ => Some(proofs.get(self, key, seed.genesis().commitment()).await),
         };
         let mut conn = self.acquire_writer().await?;
         let mut tx = db::begin_immediate(&mut conn).await?;
@@ -634,48 +621,35 @@ impl Database {
                             == validate_history(&mut tx, &intent.data.candidate, source).await?,
                     "error seed-intent-source-changed"
                 );
-                let package = package::load_package(&mut tx, &intent.data.candidate)
-                    .await?
-                    .context("error seed-package-missing")?;
+                let proof = proof.context("error seed-intent-changed")??;
+                proof.identity().assert_matches(&mut tx).await?;
                 ensure!(
-                    package.descriptor() == intent.data.descriptor,
+                    proof.identity().candidate() == intent.data.candidate
+                        && proof.identity().history() == intent.data.history
+                        && proof.descriptor() == intent.data.descriptor,
                     "error seed-package-mismatch"
                 );
-                let capture = load_persisted_local_capture(&mut tx)
-                    .await?
-                    .context("error seed-capture-missing")?;
                 tx.commit().await?;
-                drop(conn);
-                package::publication::validate_against_capture(
-                    &package.upload_package(),
-                    &capture,
-                    key,
-                    seed.genesis().commitment(),
-                )?;
             }
             return Ok(intent);
         }
         ensure_no_intent(&mut tx).await?;
-        let capture = load_persisted_local_capture(&mut tx)
-            .await?
-            .context("error seed-capture-missing")?;
-        let history = validate_history(&mut tx, capture.candidate_id(), source).await?;
-        let package = package::load_package(&mut tx, capture.candidate_id())
-            .await?
-            .context("error seed-package-missing")?;
-        let (validated_capture, validated, publication) =
-            prepared.context("error seed-intent-changed")??;
+        let proof = proof.context("error seed-intent-changed")??;
+        let candidate = proof.identity().candidate().to_string();
+        let history = validate_history(&mut tx, &candidate, source).await?;
+        proof.identity().assert_matches(&mut tx).await?;
         ensure!(
-            validated == package && same_capture(&validated_capture, &capture)?,
+            history == proof.identity().history(),
             "error seed-capture-changed"
         );
-        let upload = package.upload_package();
+        // The package was authenticated under `key` against the capture.
+        let publication = seed.sign_authenticated_publication(proof.descriptor(), key)?;
         let data = IntentData {
             source: source.0.clone(),
             client,
             generation: generation(&mut tx).await?,
-            candidate: capture.candidate_id().to_string(),
-            descriptor: upload.descriptor,
+            candidate,
+            descriptor: proof.descriptor().to_vec(),
             publication: publication.record().to_vec(),
             history,
         };
@@ -722,13 +696,14 @@ impl Database {
 
     /// Atomically adopts the original seed's history, never its old domain image.
     /// Returns false for an already committed matching adoption without rewinding.
-    pub async fn adopt_seed_publication(
+    pub(crate) async fn adopt_seed_publication(
         &self,
         source: &SeedSourceAuthority,
         intent: &SeedPublicationIntent,
         seed: &SeedAuthority,
         key: &LocalSharedStatePackageKey,
         outcome: &PublicationOutcome,
+        proofs: &mut ProofCache,
     ) -> Result<bool> {
         let verified =
             SeedPublicationIntent::from_protected_storage(&intent.bytes, source, seed.genesis())?;
@@ -747,7 +722,7 @@ impl Database {
         let validated = match self.seed_publication_intent_bytes().await? {
             Some((_, state)) if state == "adopted" => None,
             // Failures surface only where the writer would have validated.
-            _ => Some(self.validated_frozen_capture(key, seed).await),
+            _ => Some(proofs.get(self, key, seed.genesis().commitment()).await),
         };
         let mut conn = self.acquire_writer().await?;
         let mut tx = db::begin_immediate(&mut conn).await?;
@@ -801,20 +776,13 @@ impl Database {
             validate_history(&mut tx, &intent.data.candidate, source).await? == intent.data.history,
             "error seed-history-commitment-mismatch"
         );
-        let capture = load_persisted_local_capture(&mut tx)
-            .await?
-            .context("error seed-capture-missing")?;
-        let package = package::load_package(&mut tx, &intent.data.candidate)
-            .await?
-            .context("error seed-package-missing")?;
+        let proof = validated.context("error seed-intent-changed")??;
+        proof.identity().assert_matches(&mut tx).await?;
         ensure!(
-            package.descriptor() == intent.data.descriptor,
+            proof.identity().candidate() == intent.data.candidate
+                && proof.identity().history() == intent.data.history
+                && proof.descriptor() == intent.data.descriptor,
             "error seed-package-mismatch"
-        );
-        let (validated_capture, validated) = validated.context("error seed-intent-changed")??;
-        ensure!(
-            validated == package && same_capture(&validated_capture, &capture)?,
-            "error seed-capture-changed"
         );
         adopt_captured_history(&mut tx, &intent.data.candidate, binding.prefix_count).await?;
         crate::epic_membership::recover(&mut tx, true).await?;
@@ -828,16 +796,17 @@ impl Database {
             &association,
             next,
             i64::try_from(binding.prefix_count)?,
-            &capture.capture.snapshot.tables.task_dependencies,
+            &proof.capture().capture.snapshot.tables.task_dependencies,
         )
         .await?;
-        crate::sync::encrypted_tail::attachments::client::initialize(
+        crate::sync::encrypted_tail::attachments::client::initialize_index(
             &mut tx,
             &association,
             next,
             i64::try_from(binding.prefix_count)?,
-            &package.upload_package(),
-            key,
+            &binding.descriptor_commitment,
+            proof.attachments().clone(),
+            true,
         )
         .await?;
         db::set_meta(&mut tx, "sync_generation", &next.to_string()).await?;

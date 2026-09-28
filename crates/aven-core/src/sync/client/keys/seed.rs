@@ -72,6 +72,20 @@ impl ProtectedLocalKeyStore {
             .await
     }
 
+    /// [`Self::package_seed_capture`], keeping only the validation proof.
+    pub(crate) async fn package_seed_capture_validated(
+        &self,
+        database: &Database,
+        blob_dir: &Path,
+        setup_id: [u8; 32],
+    ) -> anyhow::Result<crate::sync::shared_state::validated::ValidatedSeed> {
+        let seed = self.prepare_seed_claim(database, setup_id).await?;
+        Ok(self
+            .package_local_capture_validated(database, blob_dir, seed.genesis().commitment())
+            .await?
+            .1)
+    }
+
     /// Removes only the provisional seed authority for an exact, unfenced
     /// claim. Package keys remain available for ordinary local data.
     #[cfg(test)]

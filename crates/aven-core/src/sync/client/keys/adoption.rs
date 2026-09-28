@@ -2,6 +2,7 @@
 use super::*;
 use crate::db::installation::InstallationGuard;
 use crate::sync::seed_claim::{PublicationOutcome, SeedAuthority};
+use crate::sync::shared_state::validated::ProofCache;
 use crate::sync::{SeedPublicationIntent, SeedSourceAuthority};
 use anyhow::Context;
 
@@ -15,7 +16,36 @@ impl ProtectedLocalKeyStore {
         SeedPublicationIntent,
         Option<crate::sync::bootstrap_format::Package>,
     )> {
-        let intent = self.prepare_seed_adoption_intent(database).await?;
+        let mut proofs = ProofCache::default();
+        let (seed, intent) = self.seed_resume_intent(database, &mut proofs).await?;
+        let upload = self.seed_upload(database, &intent, &mut proofs).await?;
+        Ok((seed, intent, upload))
+    }
+
+    /// Recovers protected seed authority and the sealed publication intent.
+    pub(crate) async fn seed_resume_intent(
+        &self,
+        database: &Database,
+        proofs: &mut ProofCache,
+    ) -> anyhow::Result<(SeedAuthority, SeedPublicationIntent)> {
+        let intent = self
+            .prepare_seed_adoption_intent_with(database, proofs)
+            .await?;
+        let package = self.load_required()?;
+        let seed = {
+            let _guard = self.lock()?;
+            self.required_seed(&package)?
+        };
+        Ok((seed, intent))
+    }
+
+    /// Loads exact upload bytes for a sealed intent, or `None` once adopted.
+    pub(crate) async fn seed_upload(
+        &self,
+        database: &Database,
+        intent: &SeedPublicationIntent,
+        proofs: &mut ProofCache,
+    ) -> anyhow::Result<Option<crate::sync::bootstrap_format::Package>> {
         let _installation = InstallationGuard::acquire(database.path())?;
         self.validate_database(database).await?;
         let package = self.load_required()?;
@@ -28,10 +58,9 @@ impl ProtectedLocalKeyStore {
             &seed,
         )?;
         let _timer = super::super::bootstrap::StageTimer::start("load_upload");
-        let upload = database
-            .seed_publication_upload(&source, &intent, &seed, package.package_key())
-            .await?;
-        Ok((seed, intent, upload))
+        database
+            .seed_publication_upload(&source, intent, &seed, package.package_key(), proofs)
+            .await
     }
 
     /// Nonsecret digest record that detects loss of secret item `kind`.
@@ -181,6 +210,15 @@ impl ProtectedLocalKeyStore {
         &self,
         database: &Database,
     ) -> anyhow::Result<SeedPublicationIntent> {
+        self.prepare_seed_adoption_intent_with(database, &mut ProofCache::default())
+            .await
+    }
+
+    pub(crate) async fn prepare_seed_adoption_intent_with(
+        &self,
+        database: &Database,
+        proofs: &mut ProofCache,
+    ) -> anyhow::Result<SeedPublicationIntent> {
         let _installation = InstallationGuard::acquire(database.path())?;
         self.validate_database(database).await?;
         let package = self.load_required()?;
@@ -206,7 +244,7 @@ impl ProtectedLocalKeyStore {
         );
         let timer = super::super::bootstrap::StageTimer::start("prepare_intent");
         let intent = database
-            .prepare_seed_publication_intent(&source, &seed, package.package_key())
+            .prepare_seed_publication_intent_with(&source, &seed, package.package_key(), proofs)
             .await?;
         match protected {
             Some(bytes) => anyhow::ensure!(
@@ -241,6 +279,16 @@ impl ProtectedLocalKeyStore {
         database: &Database,
         outcome: &PublicationOutcome,
     ) -> anyhow::Result<bool> {
+        self.adopt_seed_publication_with(database, outcome, &mut ProofCache::default())
+            .await
+    }
+
+    pub(crate) async fn adopt_seed_publication_with(
+        &self,
+        database: &Database,
+        outcome: &PublicationOutcome,
+        proofs: &mut ProofCache,
+    ) -> anyhow::Result<bool> {
         let _installation = InstallationGuard::acquire(database.path())?;
         self.validate_database(database).await?;
         let package = self.load_required()?;
@@ -260,7 +308,14 @@ impl ProtectedLocalKeyStore {
             seed.genesis(),
         )?;
         let adopted = database
-            .adopt_seed_publication(&source, &intent, &seed, package.package_key(), outcome)
+            .adopt_seed_publication(
+                &source,
+                &intent,
+                &seed,
+                package.package_key(),
+                outcome,
+                proofs,
+            )
             .await?;
         database
             .cleanup_adopted_seed_capture(&source, &intent)

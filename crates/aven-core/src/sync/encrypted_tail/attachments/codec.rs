@@ -91,7 +91,7 @@ impl Descriptor {
             object,
             artifact: Artifact::from_encrypted(&encrypted)?,
         };
-        let records = encrypted.chunks.into_iter().map(|c| c.record).collect();
+        let records = encrypted.into_records();
         Ok((descriptor, records))
     }
     /// The owned source is hashed in full before any saved nonce is used.

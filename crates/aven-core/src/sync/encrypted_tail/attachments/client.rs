@@ -2,7 +2,7 @@ use super::super::{Accepted, Authority, Downloads, codec, domain::Projection, ha
 use super::codec::Descriptor;
 use crate::{
     db::{self, Database, begin_immediate},
-    sync::{LocalSharedStatePackageKey, bootstrap_format, wire::ChangeWire},
+    sync::{bootstrap_format, wire::ChangeWire},
 };
 use anyhow::{Context as _, Result, ensure};
 use sqlx::SqliteConnection;
@@ -44,13 +44,14 @@ const DOWNLOAD_CANDIDATES: &str = "
       AND (o.verified=0 OR NOT EXISTS(
           SELECT 1 FROM blob_inventory b WHERE b.sha256=o.sha256 AND b.available=1))";
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn initialize(
     conn: &mut SqliteConnection,
     association: &str,
     generation: i64,
     prefix: i64,
     package: &bootstrap_format::Package,
-    key: &LocalSharedStatePackageKey,
+    key: &crate::sync::LocalSharedStatePackageKey,
 ) -> Result<()> {
     let index = bootstrap_format::attachment_index(package, key)?;
     initialize_index(
