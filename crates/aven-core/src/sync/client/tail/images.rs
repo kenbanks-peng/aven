@@ -151,7 +151,9 @@ impl Client {
             self.round_once(&drain.tail, db, blob_dir, &mut progress)
                 .await,
             async {
-                self.enrollment()?.refresh(store, db).await?;
+                self.enrollment()?
+                    .refresh_and_finish_pending_removal(store, db)
+                    .await?;
                 drain.tail = validated_tail_inputs(store, db, &self.locator).await?;
                 progress.preflight_local_seq = None;
                 anyhow::Ok(())

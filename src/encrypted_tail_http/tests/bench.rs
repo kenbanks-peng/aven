@@ -172,6 +172,26 @@ async fn inflate_attachment_rows(db: &Database, rows: usize, base_reference: &st
     );
 }
 
+#[tokio::test]
+async fn idle_drain_makes_only_the_tail_request() {
+    let f = fixture_with(FixtureOptions {
+        count_http: true,
+        ..Default::default()
+    })
+    .await;
+    converge(&f).await;
+    let before = HTTP_REQUESTS.load(Relaxed);
+
+    let round = Client::new(&f.origin)
+        .unwrap()
+        .round(&f.seed_store, &f.seed, f.root.path())
+        .await
+        .unwrap();
+
+    assert!(round.metadata_caught_up);
+    assert_eq!(HTTP_REQUESTS.load(Relaxed) - before, 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "benchmark"]
 async fn bench_push_and_pull_many_changes_and_images() {

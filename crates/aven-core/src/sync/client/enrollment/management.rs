@@ -40,6 +40,16 @@ impl Client {
         Box::pin(self.manage(store, db, None, None)).await?;
         Ok(())
     }
+    pub(crate) async fn refresh_and_finish_pending_removal(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+    ) -> Result<()> {
+        let mut inputs = store.active_inputs(db, &self.locator).await?;
+        self.refresh_inputs(store, db, &mut inputs).await?;
+        Box::pin(self.manage_inputs(store, db, inputs, None, None)).await?;
+        Ok(())
+    }
     async fn management_preparation(
         &self,
         store: &ProtectedLocalKeyStore,
@@ -142,7 +152,26 @@ impl Client {
         withdraw: Option<[u8; 32]>,
     ) -> Result<RemovalStatus> {
         let mut inputs = store.active_inputs(db, &self.locator).await?;
+        if target.is_none()
+            && withdraw.is_none()
+            && store
+                .management_intent(db, &inputs, None, None)
+                .await?
+                .is_none()
+        {
+            return Ok(RemovalStatus::Complete);
+        }
         self.refresh_inputs(store, db, &mut inputs).await?;
+        Box::pin(self.manage_inputs(store, db, inputs, target, withdraw)).await
+    }
+    async fn manage_inputs(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+        mut inputs: ActiveInputs,
+        target: Option<[u8; 32]>,
+        withdraw: Option<[u8; 32]>,
+    ) -> Result<RemovalStatus> {
         let Some(intent) = store
             .management_intent(db, &inputs, target, withdraw)
             .await?
