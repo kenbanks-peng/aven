@@ -1,10 +1,20 @@
 use super::editors::{MultilineInputState, PickerState, TagComboboxState};
+use crate::recurrence_input::{RecurrenceClock, RecurrenceDraft};
 use crate::tui::authoring::{
     AddTaskPriorityChoice, AddTaskStatusChoice, AddTaskStep, PendingTaskAttachmentSummary,
     automatic_add_task_status, derived_add_task_status,
 };
 use crate::tui::overlay::text_input::LineEdit;
-use chrono::{DateTime, Utc};
+use aven_core::recurrence::RecurrenceSchedule;
+
+const RECURRENCE_PREVIEW_COUNT: usize = 3;
+
+fn recurrence_preview(schedule: &RecurrenceSchedule, clock: RecurrenceClock) -> Vec<String> {
+    crate::recurrence_input::upcoming_slots(schedule, clock.now, RECURRENCE_PREVIEW_COUNT)
+        .into_iter()
+        .map(|date| date.format("%a %b %-d %Y").to_string())
+        .collect()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScheduleEditorMode {
@@ -34,13 +44,28 @@ pub(crate) struct ScheduleEditorState {
     pub(crate) repeat_due: String,
     pub(crate) repeat_start_on: LineEdit,
     pub(crate) time_zone: String,
-    pub(crate) template_locked: bool,
+    pub(crate) template_schedule: Option<RecurrenceSchedule>,
     pub(crate) preview: Vec<String>,
     pub(crate) error: Option<String>,
     pub(crate) validation_requested: bool,
 }
 
 impl ScheduleEditorState {
+    pub(crate) fn template_locked(&self) -> bool {
+        self.template_schedule.is_some()
+    }
+
+    fn recurrence_draft(&self) -> RecurrenceDraft<'_> {
+        RecurrenceDraft {
+            template: self.template_schedule.as_ref(),
+            rule: &self.repeat_rule.text,
+            repeat_at: &self.repeat_at.text,
+            repeat_due: &self.repeat_due,
+            time_zone: &self.time_zone,
+            start_on: &self.repeat_start_on.text,
+        }
+    }
+
     pub(crate) fn fields(&self) -> &'static [ScheduleEditorField] {
         match self.mode {
             ScheduleEditorMode::Once => &[
@@ -48,7 +73,7 @@ impl ScheduleEditorState {
                 ScheduleEditorField::Available,
                 ScheduleEditorField::Due,
             ],
-            ScheduleEditorMode::Repeat if self.template_locked => &[
+            ScheduleEditorMode::Repeat if self.template_locked() => &[
                 ScheduleEditorField::Mode,
                 ScheduleEditorField::Time,
                 ScheduleEditorField::DuePolicy,
@@ -77,7 +102,7 @@ impl ScheduleEditorState {
     }
 
     pub(crate) fn cycle_mode(&mut self, _reverse: bool) {
-        if self.template_locked {
+        if self.template_locked() {
             return;
         }
         self.mode = match self.mode {
@@ -90,6 +115,10 @@ impl ScheduleEditorState {
     }
 
     pub(crate) fn refresh(&mut self) {
+        self.refresh_at(RecurrenceClock::system());
+    }
+
+    pub(crate) fn refresh_at(&mut self, clock: RecurrenceClock) {
         self.preview.clear();
         let error = match self.mode {
             ScheduleEditorMode::Once => {
@@ -109,42 +138,14 @@ impl ScheduleEditorState {
                     .err()
                     .map(|error| format!("{error:#}"))
             }
-            ScheduleEditorMode::Repeat => {
-                let repeat_at = Some(self.repeat_at.text.trim()).filter(|value| !value.is_empty());
-                let starts_on =
-                    Some(self.repeat_start_on.text.trim()).filter(|value| !value.is_empty());
-                match crate::recurrence_input::canonical_rule_input(&self.repeat_rule.text)
-                    .and_then(|rule| {
-                        let Some(rule) = rule else {
-                            anyhow::bail!(crate::recurrence_input::rule_guidance());
-                        };
-                        crate::commands::recurrence_schedule(
-                            &rule,
-                            repeat_at,
-                            Some(&self.repeat_due),
-                            Some(self.time_zone.trim()).filter(|value| !value.is_empty()),
-                            starts_on,
-                        )
-                    }) {
-                    Ok(schedule) => {
-                        let zone = schedule
-                            .timezone
-                            .as_str()
-                            .parse::<chrono_tz::Tz>()
-                            .expect("validated recurrence time zone parses");
-                        let from = schedule
-                            .start_on
-                            .max(Utc::now().with_timezone(&zone).date_naive());
-                        self.preview = schedule
-                            .slots_on_or_after(from)
-                            .take(3)
-                            .map(|date| date.format("%a %b %-d %Y").to_string())
-                            .collect();
-                        None
-                    }
-                    Err(error) => Some(format!("{error:#}")),
+            ScheduleEditorMode::Repeat => match self.recurrence_draft().schedule(clock) {
+                Ok(Some(schedule)) => {
+                    self.preview = recurrence_preview(&schedule, clock);
+                    None
                 }
-            }
+                Ok(None) => Some(crate::recurrence_input::rule_guidance().to_string()),
+                Err(error) => Some(format!("{error:#}")),
+            },
         };
         self.error = self.validation_requested.then_some(error).flatten();
     }
@@ -246,7 +247,7 @@ impl AddTaskState {
             repeat_due: self.repeat_due.clone(),
             repeat_start_on: self.repeat_start_on.clone(),
             time_zone: self.time_zone.clone(),
-            template_locked: self.template_schedule.is_some(),
+            template_schedule: self.template_schedule.clone(),
             preview: self.recurrence_preview.clone(),
             validation_requested: self.recurrence_error.is_some(),
             error: self.recurrence_error.clone(),
@@ -311,7 +312,7 @@ impl AddTaskState {
 
     pub(crate) fn apply_schedule_editor(&mut self, editor: ScheduleEditorState) {
         match editor.mode {
-            ScheduleEditorMode::Once if !editor.template_locked => {
+            ScheduleEditorMode::Once if !editor.template_locked() => {
                 self.available_at = editor.available_at;
                 self.due_on = editor.due_on;
                 self.repeat_rule = LineEdit::blank();
@@ -446,69 +447,32 @@ impl AddTaskState {
         crate::recurrence_input::canonical_rule_input(&self.repeat_rule.text)
     }
 
-    pub(crate) fn recurrence_schedule(
-        &self,
-    ) -> anyhow::Result<Option<aven_core::recurrence::RecurrenceSchedule>> {
-        if !self.recurrence_enabled() {
-            return Ok(None);
+    fn recurrence_draft(&self) -> RecurrenceDraft<'_> {
+        RecurrenceDraft {
+            template: self.template_schedule.as_ref(),
+            rule: &self.repeat_rule.text,
+            repeat_at: &self.repeat_at.text,
+            repeat_due: &self.repeat_due,
+            time_zone: &self.time_zone,
+            start_on: &self.repeat_start_on.text,
         }
-        let repeat_at = Some(self.repeat_at.text.trim()).filter(|value| !value.is_empty());
-        let start_on = Some(self.repeat_start_on.text.trim()).filter(|value| !value.is_empty());
-        if let Some(template) = self.template_schedule.as_ref() {
-            let mutable = crate::commands::recurrence_schedule(
-                "daily",
-                repeat_at,
-                Some(&self.repeat_due),
-                Some(template.timezone.as_str()),
-                Some(&template.start_on.to_string()),
-            )?;
-            return Ok(Some(aven_core::recurrence::RecurrenceSchedule::new(
-                template.rule,
-                template.timezone.clone(),
-                template.start_on,
-                mutable.available_local_time,
-                mutable.due_policy,
-            )));
-        }
-        let Some(rule) = self.recurrence_rule_input()? else {
-            return Ok(None);
-        };
-        crate::commands::recurrence_schedule(
-            &rule,
-            repeat_at,
-            Some(&self.repeat_due),
-            Some(self.time_zone.trim()).filter(|value| !value.is_empty()),
-            start_on,
-        )
-        .map(Some)
+    }
+
+    pub(crate) fn recurrence_schedule(&self) -> anyhow::Result<Option<RecurrenceSchedule>> {
+        self.recurrence_draft().schedule(RecurrenceClock::system())
     }
 
     pub(crate) fn refresh_recurrence_preview(&mut self) {
-        self.refresh_recurrence_preview_at(Utc::now());
+        self.refresh_recurrence_preview_at(RecurrenceClock::system());
     }
 
-    pub(crate) fn refresh_recurrence_preview_at(&mut self, now: DateTime<Utc>) {
+    pub(crate) fn refresh_recurrence_preview_at(&mut self, clock: RecurrenceClock) {
         self.recurrence_preview.clear();
         self.recurrence_error = None;
-        let Some(schedule) = (match self.recurrence_schedule() {
-            Ok(schedule) => schedule,
-            Err(error) => {
-                self.recurrence_error = Some(format!("{error:#}"));
-                return;
-            }
-        }) else {
-            return;
-        };
-        let zone = schedule
-            .timezone
-            .as_str()
-            .parse::<chrono_tz::Tz>()
-            .expect("core-validated time zone parses with chrono-tz");
-        let from = schedule.start_on.max(now.with_timezone(&zone).date_naive());
-        self.recurrence_preview = schedule
-            .slots_on_or_after(from)
-            .take(3)
-            .map(|date| date.format("%a %b %-d %Y").to_string())
-            .collect();
+        match self.recurrence_draft().schedule(clock) {
+            Ok(Some(schedule)) => self.recurrence_preview = recurrence_preview(&schedule, clock),
+            Ok(None) => {}
+            Err(error) => self.recurrence_error = Some(format!("{error:#}")),
+        }
     }
 }

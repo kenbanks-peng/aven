@@ -686,7 +686,7 @@ fn schedule_editor_lines(editor: &ScheduleEditorState) -> Vec<Line<'static>> {
                 "Repeat",
                 &editor.repeat_rule.text,
                 editor.repeat_rule.cursor,
-                editor.focus == ScheduleEditorField::Repeat && !editor.template_locked,
+                editor.focus == ScheduleEditorField::Repeat && !editor.template_locked(),
                 "daily or every Friday",
             ));
             lines.push(schedule_editor_input_line(
@@ -719,7 +719,7 @@ fn schedule_editor_lines(editor: &ScheduleEditorState) -> Vec<Line<'static>> {
                 "Starts",
                 &editor.repeat_start_on.text,
                 editor.repeat_start_on.cursor,
-                editor.focus == ScheduleEditorField::Starts && !editor.template_locked,
+                editor.focus == ScheduleEditorField::Starts && !editor.template_locked(),
                 "YYYY-MM-DD",
             ));
             if !editor.preview.is_empty() {

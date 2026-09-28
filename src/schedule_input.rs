@@ -46,12 +46,13 @@ pub(crate) fn parse_schedule_input(input: &str) -> Result<ParsedScheduleInput> {
             });
         let rule = crate::recurrence_input::canonical_rule_input(rule_input)?
             .ok_or_else(|| anyhow::anyhow!(crate::recurrence_input::rule_guidance()))?;
-        crate::commands::recurrence_schedule(
+        crate::recurrence_input::recurrence_schedule(
             &rule,
             (!available_time.is_empty()).then_some(available_time),
             Some(&due_policy),
             None,
             (!starts_on.is_empty()).then_some(starts_on.as_str()),
+            crate::recurrence_input::RecurrenceClock::system(),
         )?;
         return Ok(ParsedScheduleInput::Recurring {
             rule: rule_input.to_string(),

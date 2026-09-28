@@ -319,12 +319,13 @@ pub(crate) async fn parsed_output_to_result_with_database(
                 }
                 return Ok(None);
             };
-            crate::commands::recurrence_schedule(
+            crate::recurrence_input::recurrence_schedule(
                 &rule,
                 recurrence_options[0],
                 recurrence_options[1],
                 recurrence_options[2],
                 recurrence_options[3],
+                crate::recurrence_input::RecurrenceClock::system(),
             )
             .map(Some)
         })
