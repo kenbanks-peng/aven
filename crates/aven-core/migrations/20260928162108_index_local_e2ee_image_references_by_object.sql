@@ -1,0 +1,2 @@
+CREATE INDEX local_e2ee_image_references_object
+ON local_e2ee_image_references(object);

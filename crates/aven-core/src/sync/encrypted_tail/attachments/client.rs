@@ -43,6 +43,36 @@ const DOWNLOAD_CANDIDATES: &str = "
     WHERE a.deleted=0 AND t.deleted=0
       AND (o.verified=0 OR NOT EXISTS(
           SELECT 1 FROM blob_inventory b WHERE b.sha256=o.sha256 AND b.available=1))";
+const DOWNLOAD_ACTIVE_REFERENCE: &str = "
+    FROM local_e2ee_image_references r
+    JOIN task_attachments a ON a.workspace_id=r.workspace AND a.attachment_id=r.reference
+    JOIN tasks t ON t.workspace_id=a.workspace_id AND t.id=a.task_id
+    WHERE r.object=o.object AND a.deleted=0 AND t.deleted=0";
+
+async fn select_download_candidate(
+    conn: &mut SqliteConnection,
+    after: Option<&[u8]>,
+) -> Result<Option<(String, Vec<u8>, Vec<u8>, String)>> {
+    let lower_bound = if after.is_some() {
+        "AND o.object>?"
+    } else {
+        ""
+    };
+    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT (SELECT r.workspace {DOWNLOAD_ACTIVE_REFERENCE} LIMIT 1),
+                o.object,o.descriptor,o.sha256
+         FROM local_e2ee_image_objects o
+         WHERE (o.verified=0 OR NOT EXISTS(
+             SELECT 1 FROM blob_inventory b WHERE b.sha256=o.sha256 AND b.available=1))
+           AND EXISTS(SELECT 1 {DOWNLOAD_ACTIVE_REFERENCE})
+           {lower_bound}
+         ORDER BY o.object LIMIT 1"
+    )));
+    if let Some(after) = after {
+        query = query.bind(after);
+    }
+    query.fetch_optional(conn).await.map_err(Into::into)
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn initialize(
@@ -452,16 +482,14 @@ impl Database {
         )
         .context("error encrypted-image-download-cursor")?;
         valid(after.is_empty() || after.len() == 32)?;
-        let row: Option<(String, Vec<u8>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT r.workspace,o.descriptor,o.sha256 {DOWNLOAD_CANDIDATES}
-             GROUP BY o.object ORDER BY (o.object<=?),o.object LIMIT 1"
-        )))
-        .bind(after)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let row = match select_download_candidate(&mut tx, Some(&after)).await? {
+            Some(row) => Some(row),
+            None => select_download_candidate(&mut tx, None).await?,
+        };
         let result = row
-            .map(|(workspace, bytes, sha256)| -> Result<_> {
+            .map(|(workspace, object, bytes, sha256)| -> Result<_> {
                 let d = Descriptor::decode(&bytes)?;
+                valid(object.as_slice() == d.object)?;
                 Ok(Download {
                     workspace,
                     object: d.object,
@@ -637,6 +665,103 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Connection;
+
+    fn object(index: u32) -> Vec<u8> {
+        let mut object = vec![0; 32];
+        object[28..].copy_from_slice(&index.to_be_bytes());
+        object
+    }
+
+    #[tokio::test]
+    async fn download_selection_uses_keyset_order_and_wraps() {
+        let mut conn = SqliteConnection::connect(":memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE local_e2ee_image_objects(
+                 object BLOB PRIMARY KEY, descriptor BLOB, sha256 TEXT,
+                 verified INTEGER, origin TEXT);
+             CREATE TABLE local_e2ee_image_references(
+                 workspace TEXT, reference TEXT, parent TEXT, object BLOB,
+                 origin TEXT, deleted INTEGER, PRIMARY KEY(workspace,reference));
+             CREATE INDEX local_e2ee_image_references_object
+                 ON local_e2ee_image_references(object);
+             CREATE TABLE task_attachments(
+                 workspace_id TEXT, attachment_id TEXT, task_id TEXT, deleted INTEGER,
+                 PRIMARY KEY(workspace_id,attachment_id));
+             CREATE TABLE tasks(
+                 workspace_id TEXT, id TEXT, deleted INTEGER,
+                 PRIMARY KEY(workspace_id,id));
+             CREATE TABLE blob_inventory(sha256 TEXT PRIMARY KEY, available INTEGER);
+             INSERT INTO tasks VALUES('workspace','task',0);",
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+        let mut tx = conn.begin().await.unwrap();
+        for index in 0..4096_u32 {
+            let object = object(index);
+            let reference = format!("reference-{index:04}");
+            sqlx::query("INSERT INTO local_e2ee_image_objects VALUES(?,X'00',?,0,'test')")
+                .bind(&object)
+                .bind(format!("sha-{index}"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO local_e2ee_image_references VALUES('workspace',?,'task',?,'test',0)",
+            )
+            .bind(&reference)
+            .bind(&object)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO task_attachments VALUES('workspace',?,'task',0)")
+                .bind(reference)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+
+        let selected = select_download_candidate(&mut conn, Some(&object(2047)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.1, object(2048));
+        assert!(
+            select_download_candidate(&mut conn, Some(&object(4095)))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let wrapped = select_download_candidate(&mut conn, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wrapped.1, object(0));
+
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT o.object
+             FROM local_e2ee_image_objects o
+             WHERE o.object>? AND EXISTS(
+                 SELECT 1 FROM local_e2ee_image_references r
+                 WHERE r.object=o.object)
+             ORDER BY o.object LIMIT 1",
+        )
+        .bind(object(2047))
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter().any(|row| row.3.contains("object>?")),
+            "{plan:?}"
+        );
+        assert!(
+            !plan.iter().any(|row| row.3.contains("TEMP B-TREE")),
+            "{plan:?}"
+        );
+    }
+
     #[tokio::test]
     async fn valid_image_aead_does_not_make_invalid_plaintext_available() {
         let root = tempfile::tempdir().unwrap();
