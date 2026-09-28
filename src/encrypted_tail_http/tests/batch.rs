@@ -2,6 +2,8 @@ use super::*;
 use aven_core::sync::encrypted_tail::{BatchOperation, BatchRecord, BatchReply};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+mod adversarial;
+
 #[derive(Default)]
 struct Traffic {
     legacy: bool,
