@@ -1,16 +1,13 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use aven_core::db::Database;
 use aven_core::operations::{RecurrenceTemplateUpdate, UpdateRecurrenceTemplateParams};
 use aven_core::query::{
     RecurrenceCounts, RecurrenceHistoryEntry, RecurrenceHistoryKind, RecurrenceHistoryPage,
     RecurrenceSeriesDetail, RecurrenceSeriesSummary,
 };
-use aven_core::recurrence::{
-    RecurrenceDuePolicy, RecurrenceOutcome, RecurrenceRule, RecurrenceSchedule, TimeZoneId,
-    WeekdaySet,
-};
+use aven_core::recurrence::{RecurrenceDuePolicy, RecurrenceOutcome};
 use aven_core::types::RecurrenceSeries;
-use chrono::{Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::NaiveTime;
 use serde::Serialize;
 
 use crate::cli::{
@@ -38,132 +35,6 @@ pub(crate) async fn cmd_recur(
         RecurSubcommand::Resume(args) => resume(database, workspace, args).await,
         RecurSubcommand::Stop(args) => stop(database, workspace, args).await,
     }
-}
-
-pub(crate) fn recurrence_schedule(
-    rule: &str,
-    repeat_at: Option<&str>,
-    repeat_due: Option<&str>,
-    time_zone: Option<&str>,
-    start_on: Option<&str>,
-) -> Result<RecurrenceSchedule> {
-    let timezone = time_zone.map_or_else(local_timezone, parse_timezone)?;
-    let zone = timezone
-        .as_str()
-        .parse::<chrono_tz::Tz>()
-        .expect("core-validated time zone parses with chrono-tz");
-    let start_on = start_on.map_or_else(
-        || Ok(Utc::now().with_timezone(&zone).date_naive()),
-        parse_date,
-    )?;
-    let rule = parse_rule(rule, start_on)?;
-    let available_local_time = repeat_at.map(parse_repeat_time).transpose()?.flatten();
-    let due_policy = parse_due_policy(repeat_due.unwrap_or("same-day"))?;
-    Ok(RecurrenceSchedule::new(
-        rule,
-        timezone,
-        start_on,
-        available_local_time,
-        due_policy,
-    ))
-}
-
-fn local_timezone() -> Result<TimeZoneId> {
-    let value = iana_time_zone::get_timezone().context(
-        "error local-time-zone-unavailable hint=\"pass --time-zone with an IANA zone such as Europe/Stockholm\"",
-    )?;
-    parse_timezone(&value)
-}
-
-fn parse_timezone(value: &str) -> Result<TimeZoneId> {
-    value.parse().map_err(Into::into)
-}
-
-fn parse_date(value: &str) -> Result<NaiveDate> {
-    NaiveDate::parse_from_str(value, "%Y-%m-%d").with_context(|| {
-        format!(
-            "error invalid-recurrence-date value={value:?} hint=\"use a real calendar date in YYYY-MM-DD form\""
-        )
-    })
-}
-
-fn parse_repeat_time(value: &str) -> Result<Option<NaiveTime>> {
-    if value == "none" {
-        return Ok(None);
-    }
-    if value.len() != 5 || value.as_bytes().get(2) != Some(&b':') {
-        bail!("error invalid-repeat-at value={value:?} hint=\"use HH:MM or none\"");
-    }
-    NaiveTime::parse_from_str(value, "%H:%M")
-        .map(Some)
-        .with_context(|| {
-            format!("error invalid-repeat-at value={value:?} hint=\"use a valid 24-hour time such as 09:00\"")
-        })
-}
-
-fn parse_due_policy(value: &str) -> Result<RecurrenceDuePolicy> {
-    match value {
-        "same-day" => Ok(RecurrenceDuePolicy::SameDay),
-        "none" => Ok(RecurrenceDuePolicy::None),
-        _ => bail!("error invalid-repeat-due value={value:?} hint=\"use same-day or none\""),
-    }
-}
-
-fn parse_rule(value: &str, start_on: NaiveDate) -> Result<RecurrenceRule> {
-    match value {
-        "daily" => return Ok(RecurrenceRule::daily()),
-        "weekdays" => return Ok(RecurrenceRule::weekdays()),
-        "weekly" => return Ok(RecurrenceRule::weekly(start_on.weekday())),
-        "fortnightly" => {
-            return RecurrenceRule::every_n_weeks_on(2, [start_on.weekday()]).map_err(Into::into);
-        }
-        "monthly" => return Ok(RecurrenceRule::monthly()),
-        "yearly" => return Ok(RecurrenceRule::yearly()),
-        _ => {}
-    }
-    if let Some(days) = value.strip_prefix("weekly on ") {
-        let weekdays = days.parse::<WeekdaySet>().map_err(anyhow::Error::msg)?;
-        return RecurrenceRule::weekly_on(weekdays.iter()).map_err(Into::into);
-    }
-    let words = value.split(' ').collect::<Vec<_>>();
-    if let ["every", interval, unit] = words.as_slice() {
-        let interval = parse_positive_interval(interval, unit)?;
-        return match *unit {
-            "days" => RecurrenceRule::every_n_days(interval).map_err(Into::into),
-            "weeks" => {
-                RecurrenceRule::every_n_weeks_on(interval, [start_on.weekday()]).map_err(Into::into)
-            }
-            "months" => RecurrenceRule::every_n_months(interval).map_err(Into::into),
-            "years" => RecurrenceRule::every_n_years(interval).map_err(Into::into),
-            _ => invalid_rule(value),
-        };
-    }
-    if let ["every", interval, "weeks", "on", days] = words.as_slice() {
-        let interval = parse_positive_interval(interval, "weeks")?;
-        let weekdays = days.parse::<WeekdaySet>().map_err(anyhow::Error::msg)?;
-        return RecurrenceRule::every_n_weeks_on(interval, weekdays.iter()).map_err(Into::into);
-    }
-    invalid_rule(value)
-}
-
-fn invalid_rule<T>(value: &str) -> Result<T> {
-    bail!(
-        "error invalid-repeat-rule value={value:?} hint=\"use daily, every N days, weekdays, weekly, fortnightly, monthly, every N months, yearly, every N years, weekly on mon,wed,fri, every N weeks, or every N weeks on mon,thu\""
-    )
-}
-
-fn parse_positive_interval(value: &str, unit: &str) -> Result<u32> {
-    let interval = value.parse::<u32>().with_context(|| {
-        format!(
-            "error invalid-repeat-interval value={value:?} hint=\"use a positive whole number of {unit}\""
-        )
-    })?;
-    if interval == 0 {
-        bail!(
-            "error invalid-repeat-interval value={value:?} hint=\"use a positive whole number of {unit}\""
-        );
-    }
-    Ok(interval)
 }
 
 async fn list(database: &Database, workspace: &Workspace, args: RecurListArgs) -> Result<()> {
@@ -301,12 +172,12 @@ async fn edit(database: &Database, workspace: &Workspace, args: RecurEditArgs) -
     let available_local_time = args
         .repeat_at
         .as_deref()
-        .map(parse_repeat_time)
+        .map(crate::recurrence_input::parse_repeat_time)
         .transpose()?;
     let due_policy = args
         .repeat_due
         .as_deref()
-        .map(parse_due_policy)
+        .map(crate::recurrence_input::parse_due_policy)
         .transpose()?;
     let metadata = super::tasks::parse_metadata_args(&args.metadata)?;
     let outcome = database
@@ -708,59 +579,5 @@ fn history_page_json(item: &RecurrenceHistoryPage) -> HistoryPageJson {
         limit: item.limit,
         total: item.total,
         has_more: item.has_more,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_the_fixed_rule_grammar() {
-        let monday = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
-        for rule in [
-            "daily",
-            "every 1 days",
-            "every 3 days",
-            "weekdays",
-            "weekly",
-            "fortnightly",
-            "monthly",
-            "every 1 months",
-            "every 3 months",
-            "yearly",
-            "every 1 years",
-            "every 2 years",
-            "weekly on mon,wed,fri",
-            "every 2 weeks",
-            "every 2 weeks on tue",
-            "every 3 weeks on mon,thu",
-        ] {
-            assert!(parse_rule(rule, monday).is_ok(), "{rule}");
-        }
-        assert_eq!(
-            parse_rule("fortnightly", monday).unwrap(),
-            RecurrenceRule::every_n_weeks_on(2, [chrono::Weekday::Mon]).unwrap()
-        );
-        assert_eq!(
-            parse_rule("every 3 weeks", monday).unwrap(),
-            RecurrenceRule::every_n_weeks_on(3, [chrono::Weekday::Mon]).unwrap()
-        );
-        for rule in [
-            "every 0 days",
-            "every 0 weeks",
-            "every 0 months",
-            "every 0 years",
-            "every -1 days",
-            "every nope months",
-            "every 4294967296 years",
-            "every 3 days on mon",
-            "weekly on monday",
-            "weekly on fri,mon",
-            "every two weeks on tue",
-            "daily ",
-        ] {
-            assert!(parse_rule(rule, monday).is_err(), "{rule}");
-        }
     }
 }

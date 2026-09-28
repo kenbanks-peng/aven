@@ -219,7 +219,7 @@ fn schedule_editor(mode: ScheduleEditorMode) -> ScheduleEditorState {
         repeat_due: "same-day".to_string(),
         repeat_start_on: LineEdit::new("2026-08-03".to_string()),
         time_zone: "UTC".to_string(),
-        template_locked: false,
+        template_schedule: None,
         preview: vec!["Fri Aug 7".to_string(), "Fri Aug 14".to_string()],
         error: None,
         validation_requested: false,

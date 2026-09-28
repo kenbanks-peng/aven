@@ -95,12 +95,13 @@ pub(crate) async fn cmd_add(
         }
         let project =
             resolve_add_project(database, workspace, args.project.as_deref(), routing).await?;
-        let schedule = super::recurrence_schedule(
+        let schedule = crate::recurrence_input::recurrence_schedule(
             rule,
             args.repeat_at.as_deref(),
             args.repeat_due.as_deref(),
             args.time_zone.as_deref(),
             args.repeat_start_on.as_deref(),
+            crate::recurrence_input::RecurrenceClock::system(),
         )?;
         let outcome = database
             .create_recurrence_series(
