@@ -7,6 +7,32 @@ use crate::{
 use anyhow::{Context as _, Result, ensure};
 use sqlx::SqliteConnection;
 use std::path::Path;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+#[cfg(any(test, feature = "test-support"))]
+use std::time::Instant;
+
+#[cfg(any(test, feature = "test-support"))]
+static INTEGRITY_SCAN_CALLS: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(test, feature = "test-support"))]
+static INTEGRITY_SCAN_NANOS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn integrity_scan_metrics() -> (u64, u64) {
+    (
+        INTEGRITY_SCAN_CALLS.load(Relaxed),
+        INTEGRITY_SCAN_NANOS.load(Relaxed),
+    )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_integrity_scan(start: Instant) {
+    INTEGRITY_SCAN_CALLS.fetch_add(1, Relaxed);
+    INTEGRITY_SCAN_NANOS.fetch_add(
+        u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        Relaxed,
+    );
+}
 
 const DOWNLOAD_CURSOR: &str = "e2ee_image_download_after";
 const DOWNLOAD_CANDIDATES: &str = "
@@ -80,7 +106,15 @@ pub(crate) async fn validate(
     let ok:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM local_e2ee_image_initialization WHERE singleton=1 AND association=? AND prefix_count=? AND descriptor=? AND association=(SELECT value FROM meta WHERE key='e2ee_association') AND sync_generation=CAST((SELECT value FROM meta WHERE key='sync_generation') AS INTEGER))").bind(association).bind(prefix).bind(descriptor.as_slice()).fetch_one(&mut *conn).await?;
     ensure!(ok, "error encrypted-image-reinitialization-required");
     super::super::client::initial_image_watermark(conn).await?;
+    Ok(())
+}
+
+pub(crate) async fn validate_integrity(conn: &mut SqliteConnection) -> Result<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    let scan_start = Instant::now();
     let missing:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_attachments a WHERE NOT EXISTS(SELECT 1 FROM local_e2ee_image_references r WHERE r.workspace=a.workspace_id AND r.reference=a.attachment_id) AND NOT EXISTS(SELECT 1 FROM changes c WHERE c.change_id=a.created_by_change_id AND c.server_seq IS NULL))").fetch_one(conn).await?;
+    #[cfg(any(test, feature = "test-support"))]
+    record_integrity_scan(scan_start);
     ensure!(!missing, "error encrypted-image-reinitialization-required");
     Ok(())
 }

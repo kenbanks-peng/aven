@@ -58,6 +58,17 @@ impl DrainSnapshot {
     }
 }
 
+async fn validated_tail_inputs(
+    store: &ProtectedLocalKeyStore,
+    db: &Database,
+    locator: &str,
+) -> Result<TailSnapshot> {
+    let inputs = store.tail_inputs(db, locator).await?;
+    db.validate_encrypted_attachment_integrity(&inputs.authority)
+        .await?;
+    Ok(inputs)
+}
+
 #[derive(Default)]
 struct RoundProgress {
     pushes: usize,
@@ -108,7 +119,7 @@ impl Client {
             .await
             .err();
         Ok(DrainSnapshot {
-            tail: store.tail_inputs(db, &self.locator).await?,
+            tail: validated_tail_inputs(store, db, &self.locator).await?,
             withdrawal,
         })
     }
@@ -133,7 +144,7 @@ impl Client {
         drain: &mut DrainSnapshot,
     ) -> Result<Round> {
         if !drain.tail.is_current(db).await? {
-            drain.tail = store.tail_inputs(db, &self.locator).await?;
+            drain.tail = validated_tail_inputs(store, db, &self.locator).await?;
         }
         let mut progress = RoundProgress::default();
         retry_stale!(
@@ -141,7 +152,7 @@ impl Client {
                 .await,
             async {
                 self.enrollment()?.refresh(store, db).await?;
-                drain.tail = store.tail_inputs(db, &self.locator).await?;
+                drain.tail = validated_tail_inputs(store, db, &self.locator).await?;
                 progress.preflight_local_seq = None;
                 anyhow::Ok(())
             }
@@ -327,7 +338,7 @@ impl Client {
         workspace: &str,
         reference: &str,
     ) -> Result<()> {
-        let inputs = store.tail_inputs(db, &self.locator).await?;
+        let inputs = validated_tail_inputs(store, db, &self.locator).await?;
         let upload = db
             .repair_encrypted_image(&inputs.authority, blob_dir, workspace, reference)
             .await?;

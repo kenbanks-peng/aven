@@ -243,6 +243,20 @@ async fn apply_new_remote_change(
 }
 
 impl Database {
+    /// Validates attachment coverage before a drain can push or apply records.
+    /// Transaction-local checks continue to validate the active association.
+    pub(crate) async fn validate_encrypted_attachment_integrity(
+        &self,
+        authority: &Authority,
+    ) -> Result<()> {
+        let mut conn = self.acquire_reader().await?;
+        let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+        validate_binding_and_cursor(&mut tx, authority).await?;
+        super::attachments::client::validate_integrity(&mut tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// One validated read of local round state. Observation never freezes work
     /// or advances the download selector.
     pub async fn encrypted_round_state(&self, authority: &Authority) -> Result<RoundState> {

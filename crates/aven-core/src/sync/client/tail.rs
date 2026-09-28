@@ -290,6 +290,8 @@ impl Client {
         db: &Database,
     ) -> Result<bool> {
         let inputs = store.tail_inputs(db, &self.locator).await?;
+        db.validate_encrypted_attachment_integrity(&inputs.authority)
+            .await?;
         self.pull(&inputs.authority, &inputs.bearer, db).await
     }
     async fn pull(&self, a: &tail::Authority, bearer: &Secret, db: &Database) -> Result<bool> {

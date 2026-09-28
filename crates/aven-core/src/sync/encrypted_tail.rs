@@ -194,6 +194,11 @@ pub(crate) fn valid(ok: bool) -> Result<()> {
 mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
+pub fn attachment_integrity_scan_metrics() -> (u64, u64) {
+    attachments::client::integrity_scan_metrics()
+}
+
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn open_record(authority: &Authority, record: &[u8]) -> Result<super::wire::ChangeWire> {
     codec::open(authority, record)
 }

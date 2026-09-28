@@ -96,6 +96,64 @@ fn complete(upload: &image::Upload, t: &Ticket) -> Op {
 }
 
 #[tokio::test]
+async fn missing_registered_attachment_stops_drain_before_push_or_apply() {
+    let f = fixture().await;
+    converge(&f).await;
+    let reference = add_image(&f).await;
+    converge(&f).await;
+    let workspace = f.peer.list_workspaces().await.unwrap().remove(0);
+    let local = f
+        .peer
+        .create_task(&workspace, draft("must not push"))
+        .await
+        .unwrap()
+        .task;
+    let remote = f
+        .seed
+        .create_task(&workspace, draft("must not apply"))
+        .await
+        .unwrap()
+        .task;
+    drain(&Client::new(&f.origin).unwrap(), &f.seed_store, &f.seed).await;
+    sqlx::query("DELETE FROM local_e2ee_image_references WHERE reference=?")
+        .bind(&reference)
+        .execute(&mut *aven_core::test_support::acquire(&f.peer).await.unwrap())
+        .await
+        .unwrap();
+    let cursor = f.peer.meta("sync_cursor").await.unwrap();
+    let server_records = scalar(&f.server, "SELECT count(*) FROM server_e2ee_tail").await;
+    let error = Client::new(&f.origin)
+        .unwrap()
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("reinitialization-required"),
+        "{error:#}"
+    );
+    assert_eq!(f.peer.meta("sync_cursor").await.unwrap(), cursor);
+    assert_eq!(
+        scalar(&f.server, "SELECT count(*) FROM server_e2ee_tail").await,
+        server_records
+    );
+    let mut conn = aven_core::test_support::acquire(&f.peer).await.unwrap();
+    let local_pending: bool = sqlx::query_scalar(
+        "SELECT server_seq IS NULL FROM changes WHERE entity_id=? ORDER BY local_seq DESC LIMIT 1",
+    )
+    .bind(local.id.as_str())
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let remote_present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?)")
+        .bind(remote.id.as_str())
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert!(local_pending);
+    assert!(!remote_present);
+}
+
+#[tokio::test]
 async fn incomplete_ref_ticket_ownership_expiry_and_exact_retry() {
     let f = fixture().await;
     converge(&f).await;
