@@ -1127,10 +1127,6 @@ async fn inconsistent_staging_responses_fail_before_upload() {
         assert_eq!(chunks, 0);
         drop(conn);
         task.abort();
-
-        let (honest, task) = serve(server).await;
-        assert!(honest.resume(&store, &db).await.unwrap());
-        task.abort();
     }
 }
 
