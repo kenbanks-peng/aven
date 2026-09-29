@@ -56,7 +56,7 @@ aven show APP-7KQ9 --full
 ## Update tasks and leave handoff context
 
 ```sh
-aven edit APP-7KQ9 --status active
+aven edit APP-7KQ9 --status active --agent claude
 aven edit APP-7KQ9 --title "Clearer title" --priority medium
 aven note APP-7KQ9 --stdin <<'EOF'
 Implemented the parser and documented the remaining edge case.
@@ -65,6 +65,11 @@ aven edit APP-7KQ9 --status done
 ```
 
 - Mark work `active` when starting it and `done` only when the work is complete.
+- Identify the coding agent that is doing the work with
+  `aven edit <TASK> --agent <AGENT>`. Use `claude` (Claude Code), `codex` (Codex),
+  `copilot` (GitHub Copilot), or `pi` (Pi) for a dedicated TUI icon. Other agent
+  names, such as `opencode` or `cursor`, are accepted and use a generic icon.
+  You can combine `--agent` with the status update as shown above.
 - Notes are append-style durable context for decisions, blockers, partial
   progress, and review findings. Keep scratch work elsewhere.
 - Inspect dependency and conflict context before changing status or task order.

@@ -24,6 +24,7 @@ fn skill_install_targets_explicit_agent() {
     let installed = fs::read_to_string(skill_path).unwrap();
     let printed = ok(skill_command(&home, ["skill"]));
     assert!(installed.ends_with(&printed));
+    contains_all(&printed, &["aven edit <TASK> --agent <AGENT>"]);
     contains_all(
         &installed,
         &[
@@ -31,7 +32,8 @@ fn skill_install_targets_explicit_agent() {
             "Do not create tasks unless the user asks",
             "aven list --ready",
             "aven context APP-7KQ9",
-            "aven edit APP-7KQ9 --status active",
+            "aven edit APP-7KQ9 --status active --agent claude",
+            "aven edit <TASK> --agent <AGENT>",
         ],
     );
     assert!(!home.join(".codex/skills/aven/SKILL.md").exists());
@@ -58,7 +60,8 @@ fn skill_install_targets_pi_idempotently() {
             "---\nname: aven\ndescription: Use aven to find tasks, update status, and leave durable handoff context.\n---",
             "# Aven CLI Primer",
             "aven list --ready",
-            "aven edit APP-7KQ9 --status active",
+            "aven edit APP-7KQ9 --status active --agent claude",
+            "aven edit <TASK> --agent <AGENT>",
         ],
     );
 
