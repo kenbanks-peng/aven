@@ -22,8 +22,8 @@ use crate::query::{
     MAX_RECURRENCE_HISTORY_LIMIT, RecurrenceCounts as InternalRecurrenceCounts,
     RecurrenceHistoryEntry as InternalRecurrenceHistoryEntry,
     RecurrenceSeriesDetail as InternalRecurrenceSeriesDetail,
-    RecurrenceSeriesSummary as InternalRecurrenceSeriesSummary, SortDirection, TaskFilters,
-    TaskListItem, TaskQueryMode, TaskSearchQuery, TaskSort,
+    RecurrenceSeriesSummary as InternalRecurrenceSeriesSummary, SortDirection,
+    TaskAvailabilityFilter, TaskFilters, TaskListItem, TaskQueryMode, TaskSearchQuery, TaskSort,
 };
 pub use crate::query::{RecurrenceHistoryKind, SearchMatchedField};
 pub use crate::queue::{QueueBand, QueueDateKind, QueueReason};
@@ -847,6 +847,7 @@ impl Store {
                 workspace_id,
                 TaskFilters {
                     hide_done: true,
+                    availability: TaskAvailabilityFilter::Available,
                     ..TaskFilters::default()
                 },
                 TaskQueryMode::RankedQueue,
