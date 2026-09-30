@@ -354,7 +354,8 @@ fn home_lines(body: &mut Body, view: &SyncDialogView<'_>, width: usize) {
             Style::new().fg(FG_MUTED),
             width,
         ));
-        lines.extend(paragraph(
+        lines.extend(wrapped_row(
+            "Recovery",
             crate::sync::encrypted::SINGLE_DEVICE_HINT,
             Style::new().fg(FG_MUTED),
             width,

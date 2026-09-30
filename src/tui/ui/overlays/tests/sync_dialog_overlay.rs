@@ -4,7 +4,7 @@ use crate::tui::overlay::{AutomaticSyncService, InvitationKind, SecretText, Sync
 use crate::tui::sync_operations::{
     DrainSummary, OperationFailure, OperationKind, OperationResult, RunningOperation, SyncActivity,
 };
-use crate::tui::theme::FG_MUTED;
+use crate::tui::theme::{FG_DIM, FG_MUTED};
 
 #[test]
 fn idle_sync_renders_compact_summary_and_actions() {
@@ -23,33 +23,49 @@ fn idle_sync_renders_compact_summary_and_actions() {
 }
 
 #[test]
-fn single_device_hint_is_muted_and_wraps() {
+fn single_device_hint_is_a_muted_recovery_field_that_wraps() {
     let state = SyncDialogState::default();
     let status = TuiSyncStatus {
         devices: Some(1),
+        pending_changes: 2,
         ..sync_status()
     };
     let view = sync_view(&state, status);
     for width in [36, 60] {
         let lines = sync_dialog_lines_for_test_width(&view, width);
-        let row = lines
+        let devices = lines
             .iter()
             .position(|line| line.to_string().starts_with("Devices"))
             .expect("single device row");
-        assert!(lines[row].to_string().ends_with('1'));
+        let recovery = lines
+            .iter()
+            .position(|line| line.to_string().starts_with("Recovery"))
+            .expect("recovery row");
+        let pending = lines
+            .iter()
+            .position(|line| line.to_string().starts_with("Pending"))
+            .expect("pending row");
+        assert!(lines[devices].to_string().ends_with('1'));
+        assert_eq!(recovery, devices + 1);
+        assert!(pending > recovery);
+
         let mut hint = Vec::new();
-        for line in &lines[row + 1..] {
-            let text = line.to_string();
-            if text.is_empty() {
-                break;
-            }
+        for line in &lines[recovery..pending] {
             assert!(line.width() <= width);
+            assert_eq!(line.spans[0].style.fg, Some(FG_DIM));
             assert!(
-                line.spans
+                line.spans[1..]
                     .iter()
                     .all(|span| span.style.fg == Some(FG_MUTED))
             );
-            hint.push(text);
+            hint.push(
+                line.spans[1..]
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                    .trim()
+                    .to_string(),
+            );
         }
         assert!(hint.len() > 1);
         assert_eq!(hint.join(" "), crate::sync::encrypted::SINGLE_DEVICE_HINT);
