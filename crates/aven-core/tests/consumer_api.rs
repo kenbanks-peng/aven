@@ -754,6 +754,23 @@ async fn consumer_api_queue_report_ranks_open_tasks_and_reads_last_success() {
             .unwrap();
     }
 
+    store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                metadata: Vec::new(),
+                title: "deferred".to_string(),
+                description: String::new(),
+                project: "Core".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::High,
+                available_at: Some("2999-01-01T00:00:00Z".to_string()),
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+
     let report = store.queue_report(&workspace.id).await.unwrap();
     assert_eq!(
         report.tasks.iter().map(|row| row.band).collect::<Vec<_>>(),
