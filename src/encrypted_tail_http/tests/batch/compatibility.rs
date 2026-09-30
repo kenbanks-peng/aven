@@ -33,7 +33,7 @@ async fn ambiguous_features_refusal_does_not_authorize_singleton_fallback() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("outcome-unknown"));
-    let requests = state.requests.lock().unwrap();
+    let requests = state.requests.lock().unwrap().clone();
     assert_eq!(
         requests
             .iter()
@@ -46,7 +46,6 @@ async fn ambiguous_features_refusal_does_not_authorize_singleton_fallback() {
             .iter()
             .any(|(_, body)| body["operation"].get("Append").is_some())
     );
-    drop(requests);
     assert_eq!(
         scalar(&f.peer, "SELECT count(*) FROM local_e2ee_outbox").await,
         0

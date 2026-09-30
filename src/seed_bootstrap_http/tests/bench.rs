@@ -445,7 +445,9 @@ async fn large_image_setup() {
         return;
     }
 
-    assert!(!cfg!(debug_assertions), "use --release for measurements");
+    if cfg!(debug_assertions) {
+        panic!("use --release for measurements");
+    }
     let mib: u64 = std::env::var("AVEN_SETUP_MIB")
         .map(|value| value.parse().unwrap())
         .unwrap_or(255);

@@ -120,7 +120,7 @@ async fn negotiated_batch_pushes_a_small_multi_record_group() {
     instrument(&mut f, state.clone()).await;
     edits(&f, 3).await;
     drain(&Client::new(&f.origin).unwrap(), &f.peer_store, &f.peer).await;
-    let traffic = state.requests.lock().unwrap();
+    let traffic = state.requests.lock().unwrap().clone();
     assert_eq!(
         traffic
             .iter()
@@ -177,7 +177,7 @@ async fn lost_batch_response_resolves_every_id_without_resending() {
     );
     let reopened = Database::open(f.peer.path()).await.unwrap();
     drain(&client, &f.peer_store, &reopened).await;
-    let requests = state.requests.lock().unwrap();
+    let requests = state.requests.lock().unwrap().clone();
     let batches: Vec<_> = requests
         .iter()
         .filter(|(p, _)| p == aven_core::sync::client::tail::BATCH_PATH)

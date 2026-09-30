@@ -6,19 +6,23 @@ use axum::{
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+type ParentRow = (String, String, bool, bool, Option<String>);
+type ImageRow = (
+    Vec<u8>,
+    Option<Vec<u8>>,
+    i64,
+    Option<i64>,
+    Vec<u8>,
+    Option<String>,
+    bool,
+);
+type ReferenceRow = (String, String, String, bool, Option<Vec<u8>>);
+
 #[derive(Debug, PartialEq, Eq)]
 struct ProjectionRows {
-    parents: Vec<(String, String, bool, bool, Option<String>)>,
-    images: Vec<(
-        Vec<u8>,
-        Option<Vec<u8>>,
-        i64,
-        Option<i64>,
-        Vec<u8>,
-        Option<String>,
-        bool,
-    )>,
-    references: Vec<(String, String, String, bool, Option<Vec<u8>>)>,
+    parents: Vec<ParentRow>,
+    images: Vec<ImageRow>,
+    references: Vec<ReferenceRow>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
