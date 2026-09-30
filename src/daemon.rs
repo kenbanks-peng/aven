@@ -32,6 +32,9 @@ const DAEMON_INCOMPLETE_RESCHEDULE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BinaryFingerprint {
+    /// Path the daemon was started through, resolved again on every check so
+    /// a package manager repointing a symlink counts as a change.
+    launch_path: PathBuf,
     path: PathBuf,
     len: u64,
     modified_ns: Option<u128>,
@@ -184,16 +187,27 @@ fn daemon_error(error: &anyhow::Error) -> String {
 }
 
 fn current_binary_fingerprint() -> Result<BinaryFingerprint> {
-    let path = std::env::current_exe().context("resolve current executable")?;
-    binary_fingerprint(&path)
+    let current = std::env::current_exe().context("resolve current executable")?;
+    let launch_path = std::env::args_os()
+        .next()
+        .map(PathBuf::from)
+        .filter(|argv0| argv0.is_absolute() && same_file(argv0, &current))
+        .unwrap_or(current);
+    binary_fingerprint(&launch_path)
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    matches!((left.canonicalize(), right.canonicalize()), (Ok(left), Ok(right)) if left == right)
 }
 
 fn binary_changed(initial: &BinaryFingerprint) -> Result<bool> {
-    Ok(binary_fingerprint(&initial.path)? != *initial)
+    Ok(binary_fingerprint(&initial.launch_path)? != *initial)
 }
 
-fn binary_fingerprint(path: &Path) -> Result<BinaryFingerprint> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+fn binary_fingerprint(launch_path: &Path) -> Result<BinaryFingerprint> {
+    let path = launch_path
+        .canonicalize()
+        .unwrap_or_else(|_| launch_path.to_path_buf());
     let metadata = std::fs::metadata(&path)
         .with_context(|| format!("read executable metadata {}", path.display()))?;
     let modified_ns = metadata
@@ -202,6 +216,7 @@ fn binary_fingerprint(path: &Path) -> Result<BinaryFingerprint> {
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos());
     Ok(BinaryFingerprint {
+        launch_path: launch_path.to_path_buf(),
         path,
         len: metadata.len(),
         modified_ns,
@@ -346,6 +361,25 @@ mod tests {
         let initial = binary_fingerprint(&path).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         std::fs::write(&path, "two-two").unwrap();
+        assert!(binary_changed(&initial).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_fingerprint_changes_when_launch_symlink_is_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("0.1.0");
+        let new = dir.path().join("0.2.0");
+        std::fs::write(&old, "same").unwrap();
+        std::fs::write(&new, "same").unwrap();
+        let link = dir.path().join("aven");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        let initial = binary_fingerprint(&link).unwrap();
+        assert!(!binary_changed(&initial).unwrap());
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert!(old.exists());
         assert!(binary_changed(&initial).unwrap());
     }
 }
