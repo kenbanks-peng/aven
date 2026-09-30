@@ -250,11 +250,14 @@ an explicit policy decision; do not silently relax baseline import validation.
 6. **Prove the actual feature in both modes.** Use the checks below, including a
    real released-server process. Test-only future operation names demonstrate the
    mechanism, not compatibility of a newly implemented production feature.
-7. **Coordinate publication.** Before publishing the protocol-changing server,
-   compatible readers must be publicly available on every supported platform.
-   Warn operators that the server cutover can pause older clients' sync while
-   retaining their local work. External mobile-store availability must be checked
-   separately from this workspace's builds.
+7. **Coordinate publication.** The encrypted server cannot see or gate
+   operations, and a client stops syncing at the first record it cannot
+   interpret. Ship in two releases: first a release on every supported platform
+   that reads the new operation or field but does not produce it, then a later
+   release that produces it. External mobile-store availability of the reading
+   release must be checked separately from this workspace's builds. Warn users
+   that devices left on older releases pause sync, retaining their local work,
+   until updated.
 
 The baseline vocabulary test currently compares all production operation names
 and domain values with the frozen protocol-18 contract. At the first extension,
