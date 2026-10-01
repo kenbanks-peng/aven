@@ -122,7 +122,14 @@ In the TUI, open the Sync dialog with `:sync`, `C s`, or a click on the sync
 indicator in the header, and choose **Set up sync**.
 
 If setup is interrupted, run the same command again, or choose **Resume
-setup**, to continue.
+setup**, to continue. Resume with an invitation from the same server storage.
+If that storage or its invitation is permanently gone, abandon the unfinished
+setup while keeping local data, then start again:
+
+```sh
+aven sync reset --force
+aven sync setup
+```
 
 ## Add a device
 

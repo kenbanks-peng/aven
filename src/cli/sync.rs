@@ -349,14 +349,20 @@ Afterwards the database is a local database that never synced: `aven sync
 setup` can start a new sync from it, and `aven sync join` still needs an empty
 database. Changes made here and not yet uploaded don't reach the old sync.
 
-Reset is refused while setup, joining or an invitation is unfinished. It asks
-for confirmation; use --yes when standard input is not a terminal."#;
+Reset is refused while joining or an invitation is unfinished. An unfinished
+setup can be abandoned with --force when its original server storage or
+invitation is no longer available. This may orphan a server that accepted the
+setup. Reset asks for confirmation; use --yes when standard input is not a
+terminal."#;
 
 #[derive(Args)]
 pub(crate) struct ResetArgs {
     /// Skip the confirmation prompt
     #[arg(long)]
     pub(crate) yes: bool,
+    /// Abandon an unfinished setup that cannot be resumed
+    #[arg(long)]
+    pub(crate) force: bool,
     /// Emit the result as JSON
     #[arg(long)]
     pub(crate) json: bool,

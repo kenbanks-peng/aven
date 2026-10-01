@@ -187,15 +187,24 @@ pub(crate) fn explain(
             next_step: "Check the server above, then rerun `aven sync join` with --yes.",
         });
     }
+    if has("sync-reset-setup-in-progress") {
+        return Some(Explanation {
+            code: "sync-reset-setup-in-progress",
+            message: "Setup is unfinished, so reset stopped to protect its keys.",
+            next_step: "Resume with `aven sync setup`. If the original setup can no longer be resumed, run `aven sync reset --force`.",
+        });
+    }
     if has("sync-setup-invitation-mismatch") {
         return Some(Explanation {
             code: "sync-setup-invitation-mismatch",
             message: "This invitation belongs to a different setup.",
             next_step: match surface {
                 ErrorSurface::Cli => {
-                    "Rerun `aven sync setup` with the invitation that started this setup."
+                    "Use the invitation that started this setup. If its server storage is gone, run `aven sync reset --force`."
                 }
-                ErrorSurface::Tui => "Resume with the invitation that started this setup.",
+                ErrorSurface::Tui => {
+                    "Use the original invitation, or run `aven sync reset --force` in the CLI if its server storage is gone."
+                }
             },
         });
     }

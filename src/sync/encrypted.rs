@@ -541,6 +541,17 @@ struct ResetReport {
 }
 
 pub(crate) async fn reset(database: &Database, config: &AppConfig, args: ResetArgs) -> Result<()> {
+    let phase = local_phase(database).await?;
+    if phase == LocalPhase::SetupIncomplete && !args.force {
+        bail!(
+            "error sync-reset-setup-in-progress hint=\"finish setup by rerunning `aven sync setup`; if the original setup can no longer be resumed, run `aven sync reset --force`\""
+        );
+    }
+    let abandoning_setup = args.force && phase == LocalPhase::SetupIncomplete;
+    if abandoning_setup {
+        eprintln!("Warning: abandoning an unfinished setup may orphan a server that accepted it.");
+        eprintln!("Only continue when the original setup can no longer be resumed.");
+    }
     if !args.yes {
         eprintln!("Reset sync for {}", database.path().display());
         eprintln!("  Deletes this database's sync state and protected sync keys.");
@@ -550,17 +561,22 @@ pub(crate) async fn reset(database: &Database, config: &AppConfig, args: ResetAr
     }
     confirm_action(
         args.yes,
-        "Reset sync for this database?",
+        if abandoning_setup {
+            "Abandon the unfinished setup and reset sync?"
+        } else {
+            "Reset sync for this database?"
+        },
         "error sync-reset-confirmation-required hint=\"rerun with --yes to confirm\"",
         "error sync-reset-canceled",
     )?;
-    let (state, message) = match engine::reset(database, &DesktopHost::foreground(config)).await? {
-        engine::Reset::Reset => ("reset", "Sync reset. This database is now local only."),
-        engine::Reset::NotSetUp => (
-            "not-set-up",
-            "Sync wasn't set up for this database. It is local only.",
-        ),
-    };
+    let (state, message) =
+        match engine::reset(database, &DesktopHost::foreground(config), args.force).await? {
+            engine::Reset::Reset => ("reset", "Sync reset. This database is now local only."),
+            engine::Reset::NotSetUp => (
+                "not-set-up",
+                "Sync wasn't set up for this database. It is local only.",
+            ),
+        };
     if args.json {
         return print_json_pretty(&ResetReport { version: 1, state });
     }

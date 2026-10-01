@@ -940,7 +940,7 @@ from a backup as in [Recover from device loss](/sync/#recover-from-device-loss).
 Stop syncing this database and keep its data as a local database.
 
 ```sh
-aven sync reset [--yes] [--json]
+aven sync reset [--force] [--yes] [--json]
 ```
 
 Deletes this database's sync state, its unsent sync queue, and its protected
@@ -952,11 +952,18 @@ that never synced do not reach the previous sync.
 Afterwards the database behaves as if it never synced: `aven sync setup` can
 start a new sync from it, and `aven sync join` still needs an empty database.
 Reset asks for confirmation; `--yes` is required when standard input is not a
-terminal. It is refused with `sync-reset-setup-in-progress`,
-`sync-reset-join-in-progress`, or `sync-reset-invitation-open` while setup,
-joining, or an unexpired invitation is unfinished. JSON output reports `state`
-as `reset`, or `not-set-up` when the database did not take part in sync. The
-TUI has no reset action. See [Rebuilding sync](/sync/#rebuilding-sync).
+terminal. It is refused with `sync-reset-join-in-progress` or
+`sync-reset-invitation-open` while joining or an unexpired invitation is
+unfinished.
+
+An unfinished setup is also refused by default because its server may have
+accepted the claim even when the client did not receive the response. If the
+original setup invitation or server storage is gone and setup cannot resume,
+`--force` abandons it after an additional warning. This can orphan a server
+that accepted the setup, but keeps local tasks, images, and history. JSON output
+reports `state` as `reset`, or `not-set-up` when the database did not take part
+in sync. The TUI has no reset action. See
+[Rebuilding sync](/sync/#rebuilding-sync).
 
 #### `aven sync status`
 

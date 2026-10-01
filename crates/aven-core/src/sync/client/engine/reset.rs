@@ -10,7 +10,7 @@ use crate::db::installation::InstallationGuard;
 use crate::sync::client::coordination;
 use crate::sync::client::host::{ClientHost, key_store};
 
-const SETUP_IN_PROGRESS: &str = "error sync-reset-setup-in-progress hint=\"finish setup by rerunning `aven sync setup` before resetting\"";
+const SETUP_IN_PROGRESS: &str = "error sync-reset-setup-in-progress hint=\"finish setup by rerunning `aven sync setup`; if the original setup can no longer be resumed, run `aven sync reset --force`\"";
 const JOIN_IN_PROGRESS: &str = "error sync-reset-join-in-progress hint=\"finish joining by rerunning `aven sync join` before resetting\"";
 const INVITATION_OPEN: &str = "error sync-reset-invitation-open hint=\"wait for the other device to join, or run `aven sync invite --cancel`, before resetting\"";
 
@@ -27,12 +27,19 @@ pub enum Reset {
 /// Makes `database` a local database that never synced: sync state, the
 /// outbox and this database's protected keys are deleted, while tasks, images
 /// and history stay. Setup and join then apply as for a new database.
-/// Refused while setup, joining or an unexpired invitation is unfinished.
-pub async fn reset(database: &Database, host: &dyn ClientHost) -> Result<Reset> {
+/// Refused while joining or an unexpired invitation is unfinished. An
+/// unfinished setup requires explicit permission because abandoning one may
+/// orphan server state when its claim succeeded but its response was lost.
+pub async fn reset(
+    database: &Database,
+    host: &dyn ClientHost,
+    force_incomplete_setup: bool,
+) -> Result<Reset> {
     let _guard = coordination::acquire(database).await?;
     let phase = local_phase(database).await?;
     match phase {
-        LocalPhase::SetupIncomplete => bail!(SETUP_IN_PROGRESS),
+        LocalPhase::SetupIncomplete if !force_incomplete_setup => bail!(SETUP_IN_PROGRESS),
+        LocalPhase::SetupIncomplete => {}
         LocalPhase::JoinIncomplete => bail!(JOIN_IN_PROGRESS),
         LocalPhase::SetUp if invitation_open(database, host).await => bail!(INVITATION_OPEN),
         LocalPhase::SetUp | LocalPhase::NotSetUp => {}
@@ -50,8 +57,8 @@ pub async fn reset(database: &Database, host: &dyn ClientHost) -> Result<Reset> 
         installation.unfence()?;
     }
     Ok(match phase {
-        LocalPhase::SetUp => Reset::Reset,
-        _ => Reset::NotSetUp,
+        LocalPhase::SetupIncomplete | LocalPhase::SetUp => Reset::Reset,
+        LocalPhase::JoinIncomplete | LocalPhase::NotSetUp => Reset::NotSetUp,
     })
 }
 
@@ -161,7 +168,10 @@ mod tests {
         };
         assert!(key_files() > 0);
 
-        assert_eq!(reset(&database, &host).await.unwrap(), Reset::NotSetUp);
+        assert_eq!(
+            reset(&database, &host, false).await.unwrap(),
+            Reset::NotSetUp
+        );
 
         assert_eq!(count(&database, "SELECT COUNT(*) FROM tasks").await, 1);
         assert!(count(&database, "SELECT COUNT(*) FROM changes").await > 0);
@@ -188,7 +198,10 @@ mod tests {
             .unwrap();
 
         // Rerunning is harmless.
-        assert_eq!(reset(&database, &host).await.unwrap(), Reset::NotSetUp);
+        assert_eq!(
+            reset(&database, &host, false).await.unwrap(),
+            Reset::NotSetUp
+        );
         assert_eq!(count(&database, "SELECT COUNT(*) FROM tasks").await, 1);
     }
 }

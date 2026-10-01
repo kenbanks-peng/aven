@@ -115,6 +115,63 @@ async fn device_stuck_on_a_bad_record_rebuilds_sync_after_reset() {
     assert_eq!(titles(b).await, titles(&c).await);
 }
 
+#[tokio::test]
+async fn force_reset_abandons_an_unresumable_setup() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let operator = Installation::new(root, "operator");
+    let device = Installation::new(root, "device");
+    device.ok(&["add", "Kept after abandoned setup"]).await;
+
+    let server_data = root.join("lost-server.sqlite");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let setup = line_with(
+        &operator
+            .ok(&[
+                "server",
+                "setup",
+                "--data",
+                &server_data.display().to_string(),
+                "--url",
+                &format!("http://127.0.0.1:{port}"),
+            ])
+            .await,
+        "aven-setup:",
+    );
+    let error = failure(
+        &device
+            .run_with_input(&["sync", "setup", "--yes"], &setup)
+            .await,
+    );
+    assert!(error.contains("sync-setup-outcome-unknown"), "{error}");
+    assert_eq!(status(&device).await["state"], "setup-incomplete");
+
+    let error = failure(&device.run(&["sync", "reset", "--yes"]).await);
+    assert!(error.contains("sync-reset-setup-in-progress"), "{error}");
+    assert!(error.contains("sync reset --force"), "{error}");
+
+    let error = failure(&device.run(&["sync", "reset", "--force"]).await);
+    assert!(error.contains("may orphan a server"), "{error}");
+    assert!(
+        error.contains("sync-reset-confirmation-required"),
+        "{error}"
+    );
+
+    let report: serde_json::Value = serde_json::from_str(
+        &device
+            .ok(&["sync", "reset", "--force", "--yes", "--json"])
+            .await,
+    )
+    .unwrap();
+    assert_eq!(report["state"], "reset");
+    assert_eq!(status(&device).await["state"], "not-set-up");
+    assert_eq!(titles(&device).await, ["Kept after abandoned setup"]);
+}
+
 /// Reset is refused while another device may still complete an invitation.
 #[tokio::test]
 async fn reset_waits_for_an_open_invitation() {
