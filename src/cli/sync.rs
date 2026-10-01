@@ -179,6 +179,9 @@ pub(crate) struct ServerSetupArgs {
     /// HTTP or HTTPS origin that devices use to reach the server
     #[arg(long)]
     pub(crate) url: String,
+    /// Print only the setup invitation
+    #[arg(long)]
+    pub(crate) invitation_only: bool,
 }
 
 pub(super) const SERVER_SETUP_HELP: &str = r#"The setup invitation lets one device claim this server and set up sync from

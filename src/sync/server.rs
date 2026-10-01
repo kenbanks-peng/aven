@@ -80,21 +80,30 @@ async fn setup_server(args: ServerSetupArgs) -> Result<()> {
         setup_id,
         secret,
     };
-    println!("{}", invitation.encode()?.as_str());
-    eprintln!("Anyone with this invitation can claim this server. It expires in one hour.");
-    eprintln!("Run `aven sync setup` on the device whose data should start the sync.");
-    eprintln!("Server storage: {}", data.display());
+    let invitation = invitation.encode()?;
+    if args.invitation_only {
+        println!("{}", invitation.as_str());
+        return Ok(());
+    }
+
+    println!("================ SETUP INVITATION ================");
+    println!("{}", invitation.as_str());
+    println!("==================================================");
+    println!("Keep this invitation private. It expires in one hour.");
+    println!("Anyone with it can claim this server.");
+    println!("Run `aven sync setup` on the device whose data should start the sync.");
+    println!("Server storage: {}", data.display());
     let data_arg = if explicit_data {
         format!(" --data {}", data.display())
     } else {
         String::new()
     };
-    eprintln!(
+    println!(
         "Then start the server: aven server{data_arg} --bind 127.0.0.1:{}",
         suggested_port(&args.url)
     );
     if args.url.starts_with("http://") && !origin_is_loopback(&args.url) {
-        eprintln!("For direct VPN HTTP, bind the server's VPN address.");
+        println!("For direct VPN HTTP, bind the server's VPN address.");
     }
     Ok(())
 }

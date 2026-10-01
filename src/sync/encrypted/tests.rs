@@ -346,20 +346,40 @@ async fn server_setup_accepts_http_over_vpn_origin() {
     let operator = Installation::new(temp.path(), "operator");
     let data = temp.path().join("server.sqlite");
     let origin = "http://100.100.20.30:47831";
-    let invitation = line_with(
-        &operator
-            .ok(&[
-                "server",
-                "setup",
-                "--data",
-                &data.display().to_string(),
-                "--url",
-                origin,
-            ])
-            .await,
-        "aven-setup:",
-    );
+    let output = operator
+        .run(&[
+            "server",
+            "setup",
+            "--data",
+            &data.display().to_string(),
+            "--url",
+            origin,
+        ])
+        .await;
+    let stdout = success(&output, &["server", "setup"]);
+    let invitation = line_with(&stdout, "aven-setup:");
     assert_eq!(SetupInvitation::decode(&invitation).unwrap().server, origin);
+
+    assert!(stdout.contains("================ SETUP INVITATION ================"));
+    assert!(stdout.contains("Keep this invitation private. It expires in one hour."));
+    assert!(output.stderr.is_empty());
+
+    let invitation_only_data = temp.path().join("invitation-only.sqlite");
+    let output = operator
+        .run(&[
+            "server",
+            "setup",
+            "--data",
+            &invitation_only_data.display().to_string(),
+            "--url",
+            origin,
+            "--invitation-only",
+        ])
+        .await;
+    let stdout = success(&output, &["server", "setup", "--invitation-only"]);
+    assert_eq!(stdout.lines().count(), 1);
+    assert!(stdout.starts_with("aven-setup:"));
+    assert!(output.stderr.is_empty());
 }
 
 #[tokio::test]

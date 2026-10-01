@@ -988,7 +988,7 @@ Serve end-to-end encrypted sync from storage prepared by `aven server setup`.
 
 ```sh
 aven server [--data <path>] [--bind <address>] [--unsafe-public-bind]
-aven server setup [--data <path>] --url <url>
+aven server setup [--data <path>] --url <url> [--invitation-only]
 ```
 
 | Option | Description |
@@ -997,10 +997,12 @@ aven server setup [--data <path>] --url <url>
 | `--bind <ip:port>` | Listen address. Defaults to `127.0.0.1:3746`. Loopback, private, and VPN addresses are accepted directly. |
 | `--unsafe-public-bind` | Allow binding a public or wildcard address. Prints a warning because payload encryption does not protect credentials or setup invitations. |
 | `--url <url>` | For `setup`: the HTTP or HTTPS origin devices use to reach the server, with no path, query, or credentials, and at most 255 bytes. |
+| `--invitation-only` | For `setup`: print only the invitation, without operator instructions. |
 
-`server setup` stores an expiring setup verifier, prints a setup invitation for
-`aven sync setup`, and prints the storage path and a starting `aven server --bind ...`
-command to standard error. The suggested bind uses an HTTP URL's port; HTTPS
+`server setup` stores an expiring setup verifier, then prints a setup invitation
+for `aven sync setup`, the storage path, and a starting `aven server --bind ...`
+command together on standard output. Use `--invitation-only` when a script needs
+the invitation without the operator instructions. The suggested bind uses an HTTP URL's port; HTTPS
 uses port 3746 for the service behind its proxy. For direct VPN HTTP, replace
 the loopback bind with the server's VPN address. Running setup again before a
 device claims the server replaces the invitation. The server does not terminate
