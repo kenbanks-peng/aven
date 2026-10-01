@@ -414,7 +414,7 @@ mod tests {
             .find(|command| command.name == "add-device")
             .expect("add-device command");
 
-        assert_eq!(command.aliases, &["pair", "pair-mobile"]);
+        assert!(command.aliases.is_empty());
         assert_eq!(command.action, Action::AddDevice);
         assert_eq!(command.target_policy(), CommandTargetPolicy::None);
         assert_eq!(command.scope_policy(), CommandScopePolicy::ListOnly);

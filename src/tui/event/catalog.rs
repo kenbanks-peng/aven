@@ -357,10 +357,9 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
         &[],
         Action::ShowChangelog,
     ),
-    BuiltInCommand::implemented_with_aliases(
+    BuiltInCommand::implemented(
         "add-device",
-        &["pair", "pair-mobile"],
-        "invite another device to sync with a QR code",
+        "pair a phone or another computer to sync with a QR code",
         "General",
         &[],
         Action::AddDevice,
