@@ -15,7 +15,9 @@ use tokio::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-use super::{InvitationLabels, SetupInvitation};
+use super::{
+    InvitationLabels, SetupInvitation, sample_invitations, setup_invitation_clipboard_text,
+};
 
 const WORKER: &str = "sync::encrypted::tests::cli_worker";
 
@@ -1107,6 +1109,18 @@ async fn cli_forged_setup_refusals_keep_committed_claim_recoverable() {
     assert_eq!(status(&a).await["state"], "ready");
 
     relay_task.abort();
+}
+
+#[test]
+fn setup_uses_only_valid_setup_invitations_from_clipboard() {
+    let (setup, device) = sample_invitations("https://sync.example.net");
+
+    let selected =
+        setup_invitation_clipboard_text(Some(format!("  {}\n", setup.as_str()))).unwrap();
+    assert_eq!(selected.trim(), setup.as_str());
+    assert!(setup_invitation_clipboard_text(Some(device.to_string())).is_none());
+    assert!(setup_invitation_clipboard_text(Some("unrelated clipboard text".into())).is_none());
+    assert!(setup_invitation_clipboard_text(None).is_none());
 }
 
 #[test]

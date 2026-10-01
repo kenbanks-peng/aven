@@ -854,11 +854,13 @@ Start sync from this database with the invitation printed by `aven server setup`
 aven sync setup [--yes]
 ```
 
-Paste the invitation, or pipe it to standard input. Setup previews the database,
-checks its image files, and lists missing images that will be published as
-unavailable. It asks for confirmation; `--yes` is required when standard input
-is not a terminal. Every other device starts from this data. Afterwards the
-database can still create backups, but restore and import are refused there.
+On macOS, interactive setup automatically uses a valid `aven-setup:` invitation
+from the clipboard. Otherwise, paste the invitation or pipe it to standard
+input. Setup previews the database, checks its image files, and lists missing
+images that will be published as unavailable. It asks for confirmation; `--yes`
+is required when standard input is not a terminal. Every other device starts
+from this data. Afterwards the database can still create backups, but restore
+and import are refused there.
 Rerun the command to resume an interrupted setup whose server outcome was
 unknown. A definite rejection before setup is frozen leaves the database
 local-only.

@@ -106,15 +106,17 @@ be up; if the server fails at boot, systemd retries it every five seconds.
 
 ## Set up sync from one device
 
-On the device whose data should start the sync, run setup and paste the setup
-invitation:
+On the device whose data should start the sync, copy the setup invitation and
+run:
 
 ```sh
 aven sync setup
 ```
 
-Setup shows the server and what this database will publish, then asks for
-confirmation. Every other device starts from this data.
+On macOS, interactive setup automatically uses a valid `aven-setup:` invitation
+from the clipboard. Otherwise, paste the invitation at the prompt. Setup shows
+the server and what this database will publish, then asks for confirmation.
+Every other device starts from this data.
 
 In the TUI, open the Sync dialog with `:sync`, `C s`, or a click on the sync
 indicator in the header, and choose **Set up sync**.

@@ -5,6 +5,7 @@ use aven_core::{
 };
 mod attachments;
 mod cli;
+mod clipboard;
 mod command_metadata;
 mod commands;
 mod config;

@@ -412,6 +412,22 @@ fn read_invitation(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(text)
 }
 
+fn setup_invitation_clipboard_text(text: Option<String>) -> Option<Zeroizing<String>> {
+    let text = Zeroizing::new(text?);
+    SetupInvitation::decode(&text).is_ok().then_some(text)
+}
+
+fn read_setup_invitation() -> Result<Zeroizing<String>> {
+    if std::io::stdin().is_terminal()
+        && let Some(text) =
+            setup_invitation_clipboard_text(crate::clipboard::read_text().unwrap_or_default())
+    {
+        eprintln!("Using setup invitation from clipboard.");
+        return Ok(text);
+    }
+    read_invitation("Setup invitation: ")
+}
+
 #[cfg(unix)]
 struct TerminalEchoGuard(libc::termios);
 
@@ -492,7 +508,7 @@ async fn print_setup_preview(database: &Database, config: &AppConfig, server: &s
 
 pub(crate) async fn setup(database: &Database, config: &AppConfig, args: SetupArgs) -> Result<()> {
     ensure_setup_available(database, config).await?;
-    let text = read_invitation("Setup invitation: ")?;
+    let text = read_setup_invitation()?;
     let invitation = SetupInvitation::decode(&text).map_err(|error| {
         if DeviceInvitation::decode(&text).is_ok() {
             error.context("error sync-setup-invitation-device")
