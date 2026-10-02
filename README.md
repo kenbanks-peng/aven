@@ -60,6 +60,10 @@ Inspired by Taskwarrior. See [aven and Taskwarrior](https://aventasks.dev/taskwa
 
 - *"This is by far the best TUI application I've come across in months."* -
   [Edke on GitHub](https://github.com/raine/aven/issues/5#issuecomment-5048980472)
+- *"I am really impressed by the functionality at this early stage. Became a
+  default tool for me already and serves also as shared memory and persistent
+  learnings for my agents."* -
+  [André Schemaitat on LinkedIn](https://www.linkedin.com/posts/schemaitat_tool-recommendation-for-local-task-management-share-7486060060650016768-5WRG/)
 - *"I'm having a blast using the TUI, UX is perfect."* -
   [xe6 on GitHub](https://github.com/raine/aven/pull/19#issuecomment-5455250814)
 - *"It's a genuinely beautiful TUI and a really promising task manager."* -
