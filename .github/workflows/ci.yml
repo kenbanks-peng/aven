@@ -18,8 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.0
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install prebuilt tools

@@ -36,8 +36,9 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.commit_sha }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.99.0
           targets: ${{ env.TARGET }}
       - uses: Swatinem/rust-cache@v2
         with:
