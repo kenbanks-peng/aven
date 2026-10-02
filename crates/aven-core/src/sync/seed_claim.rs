@@ -453,7 +453,7 @@ impl fmt::Display for ClaimRefusal {
 
 impl std::error::Error for ClaimRefusal {}
 
-/// Server setup refused storage that already holds sync history.
+/// Server storage must not contain local domain data or sync history.
 #[derive(Debug)]
 pub struct StorageNotEmpty;
 

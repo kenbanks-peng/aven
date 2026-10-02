@@ -767,7 +767,11 @@ async fn forged_high_water(
 
 #[tokio::test]
 async fn forged_high_water_beyond_tail_ranks_is_refused_before_signing() {
-    for (high_water, valid) in [(MAX_CUTOFF, true), (MAX_CUTOFF + 1, false)] {
+    for (high_water, valid) in [
+        (MAX_CUTOFF, true),
+        (i64::MAX as u64, false),
+        (i64::MAX as u64 + 1, false),
+    ] {
         let f = fixture().await;
         let evidence = f
             .seed_store

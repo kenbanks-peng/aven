@@ -552,6 +552,91 @@ async fn issued_server_setup_expires_and_refuses_used_storage() {
 }
 
 #[tokio::test]
+async fn server_setup_refuses_historyless_domain_data_without_modifying_it() {
+    for kind in ["task", "label", "workspace", "renamed-default"] {
+        let root = tempfile::tempdir().unwrap();
+        let source = Database::open(&root.path().join("source.sqlite"))
+            .await
+            .unwrap();
+        let workspace = source.list_workspaces().await.unwrap().remove(0);
+        match kind {
+            "task" => {
+                source
+                    .create_task(
+                        &workspace,
+                        crate::operations::TaskDraft {
+                            title: "private historyless task".into(),
+                            description: "private description".into(),
+                            project: Some("app".into()),
+                            status: "todo".into(),
+                            priority: "none".into(),
+                            source: crate::choices::TaskSource::Cli,
+                            labels: vec![],
+                            metadata: vec![],
+                            available_at: None,
+                            due_on: None,
+                            is_epic: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            "label" => {
+                source
+                    .create_label(&workspace, "private label")
+                    .await
+                    .unwrap();
+            }
+            "workspace" => {
+                source.create_workspace("private workspace").await.unwrap();
+            }
+            _ => {
+                source
+                    .rename_workspace("default", "private workspace")
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut export = source
+            .export_data("2026-10-02T00:00:00Z".into())
+            .await
+            .unwrap();
+        export.tables.changes.clear();
+        export.tables.field_versions.clear();
+        let target = Database::open(&root.path().join("target.sqlite"))
+            .await
+            .unwrap();
+        target.validate_import_data(&export).await.unwrap();
+        target.import_data(&export).await.unwrap();
+        let before =
+            serde_json::to_value(target.export_data("fixed".into()).await.unwrap()).unwrap();
+        let error = target
+            .issue_e2ee_server_setup(&operator_secret(), array("setup"), 300)
+            .await
+            .unwrap_err();
+        assert!(error.is::<StorageNotEmpty>(), "{kind}: {error:#}");
+        assert!(!target.is_e2ee_server_storage().await.unwrap());
+        let after =
+            serde_json::to_value(target.export_data("fixed".into()).await.unwrap()).unwrap();
+        assert_eq!(before, after, "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn marked_server_storage_refuses_local_domain_contamination() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    operator(&db).await;
+    assert!(db.is_e2ee_server_storage().await.unwrap());
+    let workspace = db.list_workspaces().await.unwrap().remove(0);
+    db.create_label(&workspace, "private label").await.unwrap();
+    let error = db.is_e2ee_server_storage().await.unwrap_err();
+    assert!(error.is::<StorageNotEmpty>());
+}
+
+#[tokio::test]
 async fn persisted_setup_is_read_in_the_claim_transaction() {
     let root = tempfile::tempdir().unwrap();
     let seed = authority();

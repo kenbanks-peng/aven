@@ -10,6 +10,20 @@ use crate::db::{self, Database, begin_immediate};
 const SERVER_SETUP_KEY: &str = "e2ee_server_setup";
 const SEED_CLAIM_REFUSED: &str = "e2ee_seed_claim_refused";
 
+async fn ensure_empty_server_domain(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    crate::sync::shared_state::ensure_empty_domain(conn)
+        .await
+        .map_err(|error| error.context(super::StorageNotEmpty))?;
+    let customized_workspace: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM workspaces
+         WHERE name != 'default' OR key != 'default' OR archived != 0)",
+    )
+    .fetch_one(conn)
+    .await?;
+    ensure!(!customized_workspace, super::StorageNotEmpty);
+    Ok(())
+}
+
 impl Database {
     /// Admits one immutable sequence-zero claim under operator setup authority.
     /// The storage's unexpired issued verifier is read in this claim
@@ -207,7 +221,7 @@ impl Database {
     /// storage and returns its setup ID. An existing ID is kept, even after
     /// expiry, so a device whose genesis already binds it can claim with the
     /// reissued secret; the replaced verifier refuses earlier secrets. Claimed
-    /// storage and storage holding any task history cannot take a new verifier.
+    /// storage and storage holding local domain data cannot take a new verifier.
     pub async fn issue_e2ee_server_setup(
         &self,
         secret: &super::Secret,
@@ -220,10 +234,7 @@ impl Database {
             .fetch_one(&mut *tx)
             .await?;
         ensure!(!claimed, "error e2ee-server-already-claimed");
-        let history: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes)")
-            .fetch_one(&mut *tx)
-            .await?;
-        ensure!(!history, super::StorageNotEmpty);
+        ensure_empty_server_domain(&mut tx).await?;
         let id = match db::get_meta(&mut tx, SERVER_SETUP_KEY).await? {
             Some(value) => parse_server_setup(&value)?.0.id,
             None => fresh_id,
@@ -248,16 +259,17 @@ impl Database {
     }
 
     /// True once storage was prepared for, or claimed by, an encrypted vault.
+    /// Refuses marked server storage containing local domain data.
     pub async fn is_e2ee_server_storage(&self) -> Result<bool> {
-        if self.meta(SERVER_SETUP_KEY).await?.is_some() {
-            return Ok(true);
-        }
         let mut conn = self.acquire_reader().await?;
-        Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM server_seed_claim)")
-                .fetch_one(&mut *conn)
-                .await?,
-        )
+        let prepared = db::get_meta(&mut conn, SERVER_SETUP_KEY).await?.is_some();
+        let claimed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM server_seed_claim)")
+            .fetch_one(&mut *conn)
+            .await?;
+        if prepared || claimed {
+            ensure_empty_server_domain(&mut conn).await?;
+        }
+        Ok(prepared || claimed)
     }
 
     /// True when storage holds change rows. Encrypted server storage never

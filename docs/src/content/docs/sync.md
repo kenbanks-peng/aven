@@ -54,13 +54,14 @@ sync.example.com {
 }
 ```
 
-For nginx, allow the encrypted image and bootstrap chunks. Keep send and read
+For nginx, allow encrypted image chunks and bootstrap batches up to 4 MiB plus
+framing. Keep send and read
 timeouts longer than Aven's 35-second request deadline; the connection timeout
 can stay shorter:
 
 ```nginx
 location / {
-    client_max_body_size 2m;
+    client_max_body_size 8m;
     proxy_connect_timeout 10s;
     proxy_send_timeout 40s;
     proxy_read_timeout 40s;

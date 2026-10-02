@@ -566,7 +566,7 @@ fn protected_rotation_material_replays_exact_candidate_and_rejects_other_generat
 }
 
 #[test]
-fn rotation_cutoff_is_bounded_by_the_largest_tail_rank() {
+fn rotation_cutoff_leaves_a_representable_successor_tail_rank() {
     let f = fixture();
     let keys = f.membership.verify_initial_key(&f.key).unwrap();
     let freeze = Device::seed(&f.seed)
@@ -580,6 +580,8 @@ fn rotation_cutoff_is_bounded_by_the_largest_tail_rank() {
     );
     let (raw, next, _) = rotate_fixed(Device::seed(&f.seed), &pending, &keys, 100, MAX_CUTOFF);
     assert!(next.generation_allows(next.generations()[0].id, MAX_CUTOFF));
+    assert!(next.generation_allows(next.current_generation().id, i64::MAX as u64));
+    assert!(!next.generation_allows(next.current_generation().id, MAX_CUTOFF));
     assert!(
         pending
             .append(&[], &[], &resign(&f.seed.signing, &raw, |_, _, _| ()))
