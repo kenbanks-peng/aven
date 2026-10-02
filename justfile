@@ -135,6 +135,7 @@ check-package package:
 sqlx-prepare:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target
     db="$(pwd)/target/sqlx-prepare.sqlite"
     rm -f "$db"
     DATABASE_URL="sqlite://$db" cargo sqlx database create
@@ -145,6 +146,7 @@ sqlx-prepare:
 sqlx-check:
     #!/usr/bin/env bash
     set -euo pipefail
+    mkdir -p target
     db="$(pwd)/target/sqlx-check.sqlite"
     rm -f "$db"
     scripts/quiet-check sqlx-create env DATABASE_URL="sqlite://$db" cargo sqlx database create
