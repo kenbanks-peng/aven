@@ -9,8 +9,38 @@ const SEED_MARKER_BYTES: usize = 8 + 32;
 pub(super) const SEED_ITEM: &str = "seed";
 /// Nonsecret record that detects loss of the seed item.
 const SEED_MARKER_RECORD: &str = "seed-authority";
+const SEED_ORIGIN_ITEM: &str = "seed-origin";
+const SEED_ORIGIN_BYTES: usize = 44 + crate::sync::client::MAX_SERVER_BYTES;
 
 impl ProtectedLocalKeyStore {
+    /// Pins the canonical setup origin before any request can disclose credentials.
+    /// Existing seed authority without this binding cannot acquire one on resume.
+    pub(crate) async fn bind_seed_origin(
+        &self,
+        database: &Database,
+        server: &str,
+    ) -> anyhow::Result<()> {
+        self.validate_database(database).await?;
+        let origin = crate::sync::client::server_origin(server)?;
+        let established = database.local_seed_genesis_commitment().await?.is_some()
+            || database.seed_source_pin().await?.is_some()
+            || database.seed_publication_intent_bytes().await?.is_some();
+        self.prepare()?;
+        let _guard = self.lock()?;
+        if let Some(saved) = self.read_owned(SEED_ORIGIN_ITEM, SEED_ORIGIN_BYTES, false)? {
+            anyhow::ensure!(
+                saved.as_slice() == origin.as_bytes(),
+                "error sync-setup-server-mismatch hint=\"resume with an invitation from the original server; to abandon setup, run `aven sync reset --force`\""
+            );
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !established && !self.seed_authority_exists()?,
+            "error sync-setup-server-missing hint=\"the saved setup server is missing; abandon setup with `aven sync reset --force` before starting again\""
+        );
+        self.write_owned(SEED_ORIGIN_ITEM, SEED_ORIGIN_BYTES, origin.as_bytes())
+    }
+
     /// Persists private seed keys, bearer and exact validated genesis before use.
     /// Reuses package vault/generation/secret and refuses a changed setup binding.
     /// The public DB pin detects lost protected authority, never authorizes replacement.
@@ -44,7 +74,7 @@ impl ProtectedLocalKeyStore {
         };
         let seed = match (self.load_or_create_seed(&package, setup_id, pin), pin) {
             // A refused claim stays unconfirmed, so its authority is kept for
-            // an exact retry. Choosing another server's invitation abandons it.
+            // an exact retry. A different setup ID replaces the unfenced claim.
             (Err(error), Some(commitment))
                 if error.kind() == ProtectedLocalKeyStoreErrorKind::SetupMismatch
                     && database.local_seed_claim_refused().await? =>

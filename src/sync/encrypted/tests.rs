@@ -1087,6 +1087,32 @@ async fn cli_forged_setup_refusals_keep_committed_claim_recoverable() {
     );
     assert!(local.seed_source_pin().await.unwrap().is_none());
 
+    let wrong_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let wrong_url = format!("http://{}", wrong_listener.local_addr().unwrap());
+    let wrong_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = wrong_requests.clone();
+    let wrong_app = axum::Router::new().fallback(move || {
+        let count = count.clone();
+        async move {
+            count.fetch_add(1, Ordering::SeqCst);
+            axum::http::StatusCode::FORBIDDEN
+        }
+    });
+    let wrong_task = tokio::spawn(async move {
+        axum::serve(wrong_listener, wrong_app).await.unwrap();
+    });
+    let mut changed = SetupInvitation::decode(&setup).unwrap();
+    changed.server = wrong_url;
+    let changed_origin = changed.encode().unwrap();
+    let pin = local.local_seed_genesis_commitment().await.unwrap();
+    let error = failure(
+        &a.run_with_input(&["sync", "setup", "--yes"], changed_origin.as_str())
+            .await,
+    );
+    assert!(error.contains("sync-setup-server-mismatch"), "{error}");
+    assert_eq!(wrong_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(local.local_seed_genesis_commitment().await.unwrap(), pin);
+
     // The retry claims exactly; a forged status refusal then leaves the fenced
     // setup resumable instead of requiring recovery to a new path.
     relay.mode.store(FORGE_STATUS_CLAIMED, Ordering::SeqCst);
@@ -1096,6 +1122,23 @@ async fn cli_forged_setup_refusals_keep_committed_claim_recoverable() {
         "{error}"
     );
     assert_eq!(status(&a).await["state"], "setup-incomplete");
+    assert!(
+        local
+            .seed_publication_intent_bytes()
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Sealed-intent resume bypasses claim preparation, but not the origin check.
+    changed.setup_id = [99; 32];
+    let unrelated = changed.encode().unwrap();
+    let error = failure(
+        &a.run_with_input(&["sync", "setup"], unrelated.as_str())
+            .await,
+    );
+    assert!(error.contains("sync-setup-server-mismatch"), "{error}");
+    assert_eq!(wrong_requests.load(Ordering::SeqCst), 0);
+    assert_eq!(local.local_seed_genesis_commitment().await.unwrap(), pin);
 
     relay.mode.store(RELAY, Ordering::SeqCst);
     let stdout = success(
@@ -1108,6 +1151,7 @@ async fn cli_forged_setup_refusals_keep_committed_claim_recoverable() {
     );
     assert_eq!(status(&a).await["state"], "ready");
 
+    wrong_task.abort();
     relay_task.abort();
 }
 

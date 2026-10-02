@@ -14,6 +14,87 @@ fn package_path(store: &ProtectedLocalKeyStore) -> PathBuf {
 }
 
 #[tokio::test]
+async fn seed_origin_is_canonical_immutable_and_erased_by_reset() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(&root.path().join("db.sqlite"))
+        .await
+        .unwrap();
+    let keys = root.path().join("keys");
+    let store = isolated_store(&db, &keys).await;
+    store
+        .bind_seed_origin(&db, "https://SYNC.example:443/")
+        .await
+        .unwrap();
+    // A crash before seed creation still leaves the intended destination pinned.
+    let error = store
+        .bind_seed_origin(&db, "https://other.example")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("sync-setup-server-mismatch"));
+    store
+        .bind_seed_origin(&db, "https://sync.example")
+        .await
+        .unwrap();
+    store.prepare_seed_claim(&db, [9; 32]).await.unwrap();
+    let reopened = isolated_store(&db, &keys).await;
+    reopened
+        .bind_seed_origin(&db, "https://sync.example")
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .bind_seed_origin(&db, "https://other.example")
+            .await
+            .is_err()
+    );
+    db.clear_sync_state().await.unwrap();
+    reopened.erase().unwrap();
+    let reset = isolated_store(&db, &keys).await;
+    reset
+        .bind_seed_origin(&db, "https://other.example")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn existing_seed_cannot_acquire_a_missing_origin_binding() {
+    for lose_binding in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let db = Database::open(&root.path().join("db.sqlite"))
+            .await
+            .unwrap();
+        let keys = root.path().join("keys");
+        let store = isolated_store(&db, &keys).await;
+        if lose_binding {
+            store
+                .bind_seed_origin(&db, "https://sync.example")
+                .await
+                .unwrap();
+        }
+        let seed = store.prepare_seed_claim(&db, [9; 32]).await.unwrap();
+        if lose_binding {
+            fs::remove_file(store.file_path(SEED_ORIGIN_ITEM)).unwrap();
+            fs::remove_file(store.file_path("seed-origin-authority")).unwrap();
+        }
+        let reopened = isolated_store(&db, &keys).await;
+        let error = reopened
+            .bind_seed_origin(&db, "https://other.example")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("sync-setup-server-missing"));
+        assert!(!store.file_path(SEED_ORIGIN_ITEM).exists());
+        assert_eq!(
+            seed.protected_storage_bytes(),
+            reopened
+                .prepare_seed_claim(&db, [9; 32])
+                .await
+                .unwrap()
+                .protected_storage_bytes()
+        );
+    }
+}
+
+#[tokio::test]
 async fn seed_reopens_reuses_authority_and_repairs_absent_database_pin() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("db.sqlite");

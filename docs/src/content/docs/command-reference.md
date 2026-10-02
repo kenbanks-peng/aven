@@ -861,9 +861,12 @@ images that will be published as unavailable. It asks for confirmation; `--yes`
 is required when standard input is not a terminal. Every other device starts
 from this data. Afterwards the database can still create backups, but restore
 and import are refused there.
-Rerun the command to resume an interrupted setup whose server outcome was
-unknown. A definite rejection before setup is frozen leaves the database
-local-only.
+Rerun the command with an invitation from the same server to resume an
+interrupted setup whose server outcome was unknown. Setup remembers the server
+address before sending credentials and refuses to resume at a different address
+or without that saved address. To abandon setup and use another server, run
+`aven sync reset --force`. A definite rejection before setup is frozen leaves the
+database local-only.
 
 #### `aven sync invite`
 

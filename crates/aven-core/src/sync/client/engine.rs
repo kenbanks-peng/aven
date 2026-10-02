@@ -258,6 +258,7 @@ pub async fn run_setup(
         key_store(host, database).await?
     };
     let _guard = coordination::acquire(database).await?;
+    store.bind_seed_origin(database, &invitation.server).await?;
     let bootstrap = bootstrap::Client::new(&invitation.server, link.clone())?;
     let mut proof = None;
     // A sealed publication intent means the claim and capture are complete.
