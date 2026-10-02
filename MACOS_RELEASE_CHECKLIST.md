@@ -42,6 +42,25 @@ and `aven update` cannot consume Actions artifacts directly. Testing a local
 copy/rename or a local tap therefore leaves their production download/discovery
 paths open, as does bypassing version selection in an updater-internals test.
 
+To exercise the real direct updater's download, checksum, extraction, staged
+version check and rename code against signed CI bytes without changing any
+installed executable, extract the baseline binary and run:
+
+```sh
+AVEN_MACOS_QUALIFICATION_BASELINE="$PWD/baseline/aven" \
+AVEN_MACOS_QUALIFICATION_ARCHIVE="$PWD/candidate/aven-darwin-arm64.tar.gz" \
+  just _test --package aven --lib \
+  update::install::tests::signed_macos_artifact_round_trip \
+  --run-ignored ignored-only
+```
+
+This opt-in macOS test serves the candidate archive over loopback and updates a
+temporary target. It requires different baseline/candidate bytes and verifies
+that the installed candidate retains its Developer ID signature. It does not
+use Keychain or test GitHub discovery, update eligibility, or CLI dispatch.
+The ordinary `update::install::tests::` checks also cover successful replacement
+and preservation of the existing executable on checksum/version failures.
+
 ## Signing and packaged artifacts
 
 - The `macos-signing` GitHub environment must restrict deployments to `v*` tags
