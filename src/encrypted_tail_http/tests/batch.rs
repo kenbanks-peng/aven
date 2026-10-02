@@ -30,7 +30,7 @@ async fn intercept(
     if value["operation"].get("Lookup").is_some()
         && state
             .fail_lookup
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .ok()
             == Some(1)
     {
