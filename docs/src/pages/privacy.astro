@@ -38,35 +38,39 @@ import '../styles/privacy.css';
         <header class="privacy-heading">
           <p class="eyebrow">Your data</p>
           <h1>Privacy policy</h1>
-          <p class="privacy-updated">Last updated: <time datetime="2026-09-17">September 17, 2026</time></p>
-          <p class="privacy-intro">Your tasks stay on your devices and, if you choose to sync, on a server you control. We cannot see your tasks or activity, and Aven includes no analytics, advertising, or automatic crash reporting.</p>
+          <p class="privacy-updated">Last updated: <time datetime="2026-10-02">October 2, 2026</time></p>
+          <p class="privacy-intro">Your tasks stay on your devices and, if you choose to sync, on a server you control. We cannot see your tasks or activity, and Aven includes no analytics, advertising, or automatic crash-reporting SDK.</p>
         </header>
 
         <div class="privacy-content">
-          <p>This policy covers the Aven terminal app, CLI, and iPhone companion. Aven is provided by Zendit Oy, Finland ("we" or "us").</p>
+          <p>This policy covers the Aven terminal app, CLI, iPhone companion, and Android app. Aven is provided by Zendit Oy, Finland ("we" or "us").</p>
 
           <section aria-labelledby="local-data">
             <h2 id="local-data">Local storage</h2>
-            <p>Aven stores tasks, projects, labels, notes, schedules, and related data in a local database. Image attachments and app settings are also stored on your device. This data may be included in device or filesystem backups according to your backup settings.</p>
+            <p>Aven stores tasks, projects, labels, notes, schedules, and related data in a local database. Image attachments and app settings are also stored on your device. On desktop and iPhone, this data may be included in device or filesystem backups according to your backup settings.</p>
             <p>On iPhone, the server address and pairing credential are stored in the system Keychain. They are not synchronized through iCloud Keychain. Aven does not use iCloud to sync tasks.</p>
+            <p>On Android, tasks, attachments, and keys are kept in no-backup storage. Credentials are protected with the Android Keystore. App backup is disabled, and data-extraction rules exclude app data, including credentials, from cloud backup and device transfer.</p>
           </section>
 
           <section aria-labelledby="sync">
             <h2 id="sync">Sync to your own server</h2>
-            <p>Sync is optional. The iPhone companion connects to a user-operated sync server. Aven end-to-end encrypts task content, attachments, and changes before uploading them. The server also receives ciphertext, sync identifiers, authentication information, and connection metadata needed to operate sync.</p>
-            <p>We and our partners have no access to your sync server. Its operator controls access, logs, retention, and backups. The server stores encrypted Aven content and cannot decrypt it, but it can observe connection metadata and disrupt or delete stored data.</p>
-            <p>Use HTTPS or HTTP over a trusted VPN or private network. A VPN independently protects the HTTP connection. Plain HTTP on an untrusted network can expose credentials, invitations, identifiers, and traffic metadata even though Aven encrypts task and attachment content. Keep pairing invitations and credentials private.</p>
+            <p>Desktop sync is optional. The iPhone and Android apps connect to a user-operated sync server. What that server can read depends on the sync protocol used by your version of Aven.</p>
+            <p>Aven's encrypted sync protocol encrypts tasks, history, and images on each device before upload. The server stores ciphertext and cannot read task content, but still sees device identities, record sizes, counts and timing, and HTTP request metadata, including authentication information.</p>
+            <p>Older releases use plaintext sync with a shared server credential (<code>sync.auth_token</code>). With that protocol, the server can read task content, attachments, and changes. HTTPS protects the connection but does not make plaintext sync end-to-end encrypted.</p>
+            <p>We and our partners have no access to your sync server. Its operator controls access, logs, retention, and backups.</p>
+            <p>Use HTTPS or a trusted private network such as a VPN. Over plain HTTP, metadata and credentials are visible to network observers; with plaintext sync, task content is visible too. End-to-end encrypted task content remains encrypted even over HTTP. Keep pairing invitations and tokens private.</p>
           </section>
 
           <section aria-labelledby="images">
             <h2 id="images">Images and external links</h2>
-            <p>Synced image attachments are transferred through your configured server. Separately, Markdown descriptions and notes can contain images hosted on other websites. On iPhone, these remote images are not fetched until you tap to load them.</p>
+            <p>Synced image attachments are transferred through your configured server. Separately, Markdown descriptions and notes can contain images hosted on other websites. On iPhone and Android, these remote images are not fetched until you tap to load them.</p>
             <p>Loading a remote image contacts its host, which receives your IP address, the requested URL, and request metadata. An image URL may contain information that identifies you. The host's privacy policy applies. Links you choose to open are also subject to the destination's data handling.</p>
           </section>
 
           <section aria-labelledby="permissions">
             <h2 id="permissions">Camera and local network</h2>
             <p>The iPhone app can use the camera to scan a pairing QR code. Camera images are not saved or uploaded by this pairing flow; only the decoded invitation is used to connect. Local-network permission lets the app reach a sync server on your network. You can manage these permissions in iOS Settings.</p>
+            <p>The Android app uses the camera only to scan a pairing QR code. Camera images are not saved or uploaded; only the decoded invitation is used. You can also pair by pasting an invitation without camera access. Android uses the internet permission to connect to your server and does not request a separate local-network permission. You can manage permissions in Android Settings.</p>
           </section>
 
           <section aria-labelledby="integrations">
@@ -80,6 +84,7 @@ import '../styles/privacy.css';
             <p>Aven has no third-party crash-reporting SDK, advertising SDK, or usage analytics. Zendit Oy does not retrieve, view, export, query, or use Aven reports from Apple's crash feeds, App Analytics, MetricKit, or related APIs.</p>
             <p>Apple may collect OS diagnostics under your iOS settings and Apple's privacy policy. Aven does not provide an app-side switch to disable Apple's OS collection or change your diagnostic-sharing choice. Those Apple-controlled automatic feeds are not accessed by Aven or Zendit Oy. If you voluntarily locate and send an iOS <code>.ips</code> crash report through external support, we handle it only to provide support and fix bugs.</p>
             <p>An <code>.ips</code> crash report can include technical details, diagnostic messages, paths, and potentially sensitive context. It is not guaranteed to be free of personal information. You can manage diagnostic sharing in iOS Settings; Apple's privacy policy governs Apple's handling of diagnostics it collects.</p>
+            <p>Google may collect crash and application-not-responding (ANR) diagnostics according to your Android device settings and Google's privacy policy. Zendit Oy does not retrieve, view, export, query, or use Aven crash, ANR, or Android vitals reports from Google Play Console or related APIs. Aven does not provide an app-side switch to disable Google's collection or change your diagnostic-sharing choice. You can manage diagnostic sharing in Android Settings; Google's privacy policy governs Google's handling of diagnostics it collects.</p>
           </section>
 
           <section aria-labelledby="support">
@@ -90,8 +95,8 @@ import '../styles/privacy.css';
 
           <section aria-labelledby="deletion">
             <h2 id="deletion">Deleting your data</h2>
-            <p>On iPhone, <strong>Disconnect and erase</strong> removes the local pairing profile and task replica and may discard unsynced work. It does not delete server data or revoke the server credential. To remove server copies or revoke access, manage your server or contact its operator.</p>
-            <p>Deleting a task is not a guarantee of immediate permanent erasure: copies may remain in sync history, other devices, or backups. Local deletion does not erase independently retained backups or diagnostics Apple may have collected under its policy. We cannot delete data from a server we do not control.</p>
+            <p>On iPhone and Android, <strong>Disconnect and erase</strong> removes the local pairing profile and task replica and may discard unsynced work. It does not delete server data or revoke access. With end-to-end encrypted sync, remove the device from another device that still syncs using <code>aven sync device remove &lt;device-id&gt;</code>. With older plaintext sync, the server operator must revoke or replace the shared server credential. To delete server copies, manage your server or contact its operator.</p>
+            <p>Deleting a task is not a guarantee of immediate permanent erasure: copies may remain in sync history, other devices, or backups. Local deletion does not erase independently retained backups or diagnostics Apple or Google may have collected under their policies. We cannot delete data from a server we do not control.</p>
           </section>
 
           <section aria-labelledby="contact">
