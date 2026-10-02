@@ -2,6 +2,7 @@
 pub mod attachments;
 pub mod batch;
 mod client;
+pub use client::Preflight;
 mod codec;
 pub(crate) mod dependencies;
 mod domain;

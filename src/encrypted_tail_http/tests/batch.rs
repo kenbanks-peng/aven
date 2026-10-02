@@ -3,6 +3,7 @@ use aven_core::sync::encrypted_tail::{BatchOperation, BatchRecord, BatchReply};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 mod adversarial;
+mod backlog;
 mod compatibility;
 
 #[derive(Default)]

@@ -308,10 +308,10 @@ impl Client {
         inputs: &TailSnapshot,
         db: &Database,
         blob_dir: &std::path::Path,
-        preflight_local_seq: Option<i64>,
+        preflight: Option<tail::Preflight>,
         batch_count: &mut usize,
         remaining: usize,
-    ) -> Result<(PushStep, Option<i64>)> {
+    ) -> Result<(PushStep, Option<tail::Preflight>)> {
         inputs.require_publishing_ready()?;
         let (a, bearer) = (&inputs.authority, &inputs.bearer);
         if *batch_count == 0 && db.encrypted_tail_has_batch_work(a).await? {
@@ -332,28 +332,25 @@ impl Client {
             .reconcile_frozen(a, bearer, db, blob_dir, *batch_count)
             .await?
         {
-            return Ok((PushStep::Empty, preflight_local_seq));
+            return Ok((PushStep::Empty, preflight));
         }
         // A missing local source leaves its head pending without blocking pulls.
-        let (prepared, preflight_local_seq) = match db
+        let (prepared, preflight) = match db
             .prepare_encrypted_batch_in_run(
                 a,
                 blob_dir,
-                preflight_local_seq,
+                preflight.clone(),
                 (*batch_count).max(1).min(remaining),
             )
             .await
         {
             Err(error) if error.is::<tail::attachments::ImageSourceUnavailable>() => {
-                return Ok((
-                    PushStep::Image(Some(ImageTransfer::Failed)),
-                    preflight_local_seq,
-                ));
+                return Ok((PushStep::Image(Some(ImageTransfer::Failed)), preflight));
             }
             prepared => prepared?,
         };
         let Some(tail::Push { record, upload }) = prepared else {
-            return Ok((PushStep::Empty, preflight_local_seq));
+            return Ok((PushStep::Empty, preflight));
         };
         let frozen = db.encrypted_tail_frozen_records(a).await?;
         if frozen.len() > 1 && *batch_count > 1 {
@@ -395,7 +392,7 @@ impl Client {
             );
             let mappings: Vec<tail::Mapping> = mappings.into_iter().map(Into::into).collect();
             db.accept_encrypted_tail_batch(a, &mappings).await?;
-            return Ok((PushStep::BatchAppended(mappings.len()), preflight_local_seq));
+            return Ok((PushStep::BatchAppended(mappings.len()), preflight));
         }
         let is_image = upload.is_some();
         let ticket = match upload {
@@ -409,10 +406,7 @@ impl Client {
                     return Err(error);
                 }
                 Err(_) => {
-                    return Ok((
-                        PushStep::Image(Some(ImageTransfer::Failed)),
-                        preflight_local_seq,
-                    ));
+                    return Ok((PushStep::Image(Some(ImageTransfer::Failed)), preflight));
                 }
             },
             None => None,
@@ -456,7 +450,7 @@ impl Client {
             } else {
                 PushStep::Appended
             },
-            preflight_local_seq,
+            preflight,
         ))
     }
     /// Reads one authorized page without preparing uploads. True refers only to

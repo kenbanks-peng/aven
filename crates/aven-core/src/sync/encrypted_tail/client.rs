@@ -72,35 +72,66 @@ pub(super) async fn load_change(
     .transpose()
 }
 
-/// Validates the bounded ordered pending prefix and returns its head.
-async fn preflight(conn: &mut SqliteConnection) -> Result<Option<ChangeWire>> {
+/// Ephemeral validation coverage for a serialized push run.
+/// The mutation sequence invalidates it after local edits; the ordering endpoint
+/// prevents reuse beyond the checked prefix, including after pending-row deletion.
+#[derive(Clone)]
+pub struct Preflight {
+    local_seq: i64,
+    through: (i64, String, String),
+}
+
+impl Preflight {
+    fn covers(&self, local_seq: i64, change: &ChangeWire) -> bool {
+        self.local_seq == local_seq
+            && (
+                change.local_seq,
+                change.created_at.as_str(),
+                change.change_id.as_str(),
+            ) <= (
+                self.through.0,
+                self.through.1.as_str(),
+                self.through.2.as_str(),
+            )
+    }
+}
+
+/// Validates one bounded ordered pending window before any of it is frozen.
+async fn preflight(
+    conn: &mut SqliteConnection,
+    local_seq: i64,
+) -> Result<Option<(ChangeWire, Preflight)>> {
     let pending_ids: Vec<String> = sqlx::query_scalar(
         "SELECT change_id FROM changes WHERE server_seq IS NULL
-         ORDER BY local_seq, created_at, change_id LIMIT 4097",
+         ORDER BY local_seq, created_at, change_id LIMIT 4096",
     )
     .fetch_all(&mut *conn)
     .await?;
-    ensure!(
-        pending_ids.len() <= 4096,
-        "error encrypted-tail-preflight-limit"
-    );
     let mut preflight_bytes = 0;
     let mut head = None;
+    let mut through = None;
     for id in pending_ids {
         let change = load_change(&mut *conn, &id)
             .await?
             .context("error encrypted-tail-history-lost")?;
-        preflight_bytes += serde_json::to_vec(&change)?.len();
-        ensure!(
-            preflight_bytes <= 16 * 1048576,
-            "error encrypted-tail-preflight-limit"
-        );
+        let bytes = serde_json::to_vec(&change)?.len();
+        if head.is_some() && preflight_bytes + bytes > 16 * 1048576 {
+            break;
+        }
         domain::validate(&change)?;
+        preflight_bytes += bytes;
+        through = Some((
+            change.local_seq,
+            change.created_at.clone(),
+            change.change_id.clone(),
+        ));
         if head.is_none() {
-            head = Some(change)
+            head = Some(change);
         }
     }
-    Ok(head)
+    Ok(head
+        .zip(through)
+        .map(|(head, through)| (head, Preflight { local_seq, through })))
 }
 
 fn without_server_sequence(change: &ChangeWire) -> ChangeWire {
@@ -321,42 +352,32 @@ impl Database {
             .await?
             .0)
     }
-    /// Freezes the next ordered pending change in one serialized push run.
-    /// The marker avoids rescanning an unchanged prefix while forcing a full
-    /// preflight after the monotonic local change sequence advances.
-    pub async fn prepare_encrypted_push_in_run(
-        &self,
-        authority: &Authority,
-        blob_dir: &std::path::Path,
-        preflight_local_seq: Option<i64>,
-    ) -> Result<(Option<Push>, Option<i64>)> {
-        self.prepare_encrypted_push_inner(authority, blob_dir, preflight_local_seq, 1)
-            .await
-    }
+    /// Freezes the next ordered pending group in one serialized push run.
+    /// Reuses only the checked window while the local mutation sequence is unchanged.
     pub async fn prepare_encrypted_batch_in_run(
         &self,
         authority: &Authority,
         blob_dir: &std::path::Path,
-        preflight_local_seq: Option<i64>,
+        preflight: Option<Preflight>,
         count: usize,
-    ) -> Result<(Option<Push>, Option<i64>)> {
-        self.prepare_encrypted_push_inner(authority, blob_dir, preflight_local_seq, count)
+    ) -> Result<(Option<Push>, Option<Preflight>)> {
+        self.prepare_encrypted_push_inner(authority, blob_dir, preflight, count)
             .await
     }
     async fn prepare_encrypted_push_inner(
         &self,
         authority: &Authority,
         blob_dir: &std::path::Path,
-        preflight_local_seq: Option<i64>,
+        preflight: Option<Preflight>,
         count: usize,
-    ) -> Result<(Option<Push>, Option<i64>)> {
+    ) -> Result<(Option<Push>, Option<Preflight>)> {
         valid((1..=BATCH_COUNT).contains(&count))?;
         let mut conn = self.acquire_writer().await?;
         let mut tx = begin_immediate(&mut conn).await?;
         validate_binding_and_cursor(&mut tx, authority).await?;
         if authority.rotation_pending() {
             tx.commit().await?;
-            return Ok((None, preflight_local_seq));
+            return Ok((None, preflight));
         }
         let frozen: Option<(String, i64, Vec<u8>, bool)> = sqlx::query_as(
             "SELECT association, sync_generation, record, blocked
@@ -389,36 +410,34 @@ impl Database {
                 None
             };
             tx.commit().await?;
-            return Ok((Some(Push { record, upload }), preflight_local_seq));
+            return Ok((Some(Push { record, upload }), preflight));
         }
         let local_seq = db::get_meta(&mut tx, "local_seq")
             .await?
             .context("error encrypted-tail-local-sequence")?
             .parse::<i64>()?;
-        let change = if preflight_local_seq != Some(local_seq) {
-            preflight(&mut tx).await?
-        } else {
-            let id: Option<String> = sqlx::query_scalar(
-                "SELECT change_id FROM changes WHERE server_seq IS NULL
-                 ORDER BY local_seq, created_at, change_id LIMIT 1",
-            )
-            .fetch_optional(&mut *tx)
-            .await?;
-            match id {
-                Some(id) => {
-                    let change = load_change(&mut tx, &id)
-                        .await?
-                        .context("error encrypted-tail-history-lost")?;
-                    domain::validate(&change)?;
-                    Some(change)
-                }
-                None => None,
-            }
-        };
-        let preflight_local_seq = Some(local_seq);
-        let Some(change) = change else {
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT change_id FROM changes WHERE server_seq IS NULL
+             ORDER BY local_seq, created_at, change_id LIMIT 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(id) = id else {
             tx.commit().await?;
-            return Ok((None, preflight_local_seq));
+            return Ok((None, preflight));
+        };
+        let mut change = load_change(&mut tx, &id)
+            .await?
+            .context("error encrypted-tail-history-lost")?;
+        let preflight = match preflight {
+            Some(coverage) if coverage.covers(local_seq, &change) => coverage,
+            _ => {
+                let (head, coverage) = self::preflight(&mut tx, local_seq)
+                    .await?
+                    .context("error encrypted-tail-history-lost")?;
+                change = head;
+                coverage
+            }
         };
         let (projection, upload) = if change.op_type == "attachment_add" {
             let (projection, upload) =
@@ -456,7 +475,7 @@ impl Database {
                 let next = load_change(&mut tx, id)
                     .await?
                     .context("error encrypted-tail-history-lost")?;
-                if next.op_type == "attachment_add" {
+                if !preflight.covers(local_seq, &next) || next.op_type == "attachment_add" {
                     break;
                 }
                 let projection = domain::validate(&next)?;
@@ -481,7 +500,7 @@ impl Database {
         } else {
             "frozen"
         });
-        Ok((Some(Push { record, upload }), preflight_local_seq))
+        Ok((Some(Push { record, upload }), Some(preflight)))
     }
     /// Closed-generation absence and replacement commit under one outbox/history owner.
     /// A failed transaction retains old bytes and requires a new lookup on retry.

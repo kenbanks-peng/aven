@@ -100,7 +100,7 @@ async fn validated_tail_inputs(
 struct RoundProgress {
     pushes: usize,
     batch_collisions: usize,
-    preflight_local_seq: Option<i64>,
+    preflight: Option<tail::Preflight>,
     push_complete: bool,
     publishing_blocked: bool,
     page_complete: Option<bool>,
@@ -117,7 +117,7 @@ impl Default for RoundProgress {
         Self {
             pushes: 0,
             batch_collisions: 0,
-            preflight_local_seq: None,
+            preflight: None,
             push_complete: false,
             publishing_blocked: false,
             page_complete: None,
@@ -227,7 +227,7 @@ impl Client {
                     .await?;
                 drain.tail = validated_tail_inputs(store, db, &self.locator).await?;
                 drain.pull = PullFreshness::default();
-                progress.preflight_local_seq = None;
+                progress.preflight = None;
                 progress.page_complete = None;
                 progress.pulled = false;
                 anyhow::Ok(())
@@ -246,12 +246,12 @@ impl Client {
     ) -> Result<Round> {
         let a = &inputs.authority;
         while !progress.push_complete && progress.pushes < PUSH_LIMIT {
-            let (step, preflight_local_seq) = match self
+            let (step, preflight) = match self
                 .push_in_run(
                     inputs,
                     db,
                     blob_dir,
-                    progress.preflight_local_seq,
+                    progress.preflight.clone(),
                     batch_count,
                     PUSH_LIMIT - progress.pushes,
                 )
@@ -270,7 +270,7 @@ impl Client {
                 }
                 result => result?,
             };
-            progress.preflight_local_seq = preflight_local_seq;
+            progress.preflight = preflight;
             match step {
                 PushStep::Appended => progress.pushes += 1,
                 PushStep::BatchAppended(count) => progress.pushes += count,
