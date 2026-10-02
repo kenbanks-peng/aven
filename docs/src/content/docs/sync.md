@@ -14,6 +14,17 @@ The sync server is not a backup. Only your devices hold the decryption keys, so
 if every device is lost, the server cannot restore your data. Keep regular
 [backups](/backups/).
 
+### What encryption protects
+
+Encryption protects synced content, not the readable databases, images, and
+backups on your devices. Use your operating system's account and disk protection
+for those files.
+
+The server still sees device identities, record sizes, counts, timing, and
+connection metadata. Use HTTPS or a trusted VPN to protect network credentials.
+A malicious server can withhold data or present stale or different views to
+devices; encryption does not guarantee that every device has the latest data.
+
 ## Start a server
 
 The sync server is a single `aven server` process that you host yourself on a
@@ -306,9 +317,10 @@ from the device with the best data:
    ```
 
 3. On each other device, check `aven sync status` for local changes that never
-   synced, and save anything you need with
-   `aven export --output unsynced.json`. Then reset and join the new sync from a
-   new database path:
+   synced. Preserve its database and create a backup with `aven backup` before
+   replacing it; JSON exports do not include image files. Changes unique to
+   that device are not merged into the new sync. Then reset and join the new
+   sync from a new database path:
 
    ```sh
    aven sync reset
@@ -320,7 +332,13 @@ from the device with the best data:
 Earlier releases synced without end-to-end encryption. Encrypted sync can't
 use that server storage, so every device moves to a new sync:
 
-1. Before upgrading, run `aven sync` with the old release on every device.
+1. Before upgrading, run `aven sync` with the old release on every available
+   device, then sync the device whose data will start the new sync again to
+   receive their changes and images. Check that sync is complete and
+   `aven sync status` shows no pending changes or image transfers. Create a
+   backup with `aven backup`, and preserve the old server database and image
+   storage together. If a device cannot sync, preserve its database and backup;
+   its unique edits are not included, so do not erase or replace it.
 2. Upgrade Aven everywhere, including the server.
 3. Prepare and serve new server storage, as in
    [Start a server](#start-a-server), with a new `--data` path.
@@ -328,5 +346,11 @@ use that server storage, so every device moves to a new sync:
 5. Join each other device from a new database path, as in
    [Add a device](#add-a-device).
 
-The old server storage still holds your data unencrypted. Delete it once every
-device has joined the new sync.
+The new sync carries current images and extra image files available on the
+starting device. Deleted images held only by the old server are not transferred.
+Keep the old server storage and backups for as long as you need that recovery
+option; they still hold your data unencrypted.
+
+Old storage protects the pre-upgrade checkpoint, not edits made after cutover.
+Before rolling back, preserve each device's new work and images with a backup.
+Aven does not merge changes between the old and new sync.

@@ -436,11 +436,13 @@ async fn large_image_setup() {
                 }
             }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // The parent treats the origin file's existence as server readiness.
         std::fs::write(
-            root.join("origin"),
+            root.join("origin.pending"),
             format!("http://{}", listener.local_addr().unwrap()),
         )
         .unwrap();
+        std::fs::rename(root.join("origin.pending"), root.join("origin")).unwrap();
         axum::serve(listener, app).await.unwrap();
         return;
     }
