@@ -238,6 +238,7 @@ impl Client {
             .await,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     async fn round_once(
         &self,
         inputs: &TailSnapshot,

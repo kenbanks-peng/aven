@@ -371,7 +371,7 @@ impl Model {
                     }
                     return;
                 }
-                let error = result.err().expect("removed credentials were accepted");
+                let error = result.expect_err("removed credentials were accepted");
                 assert!(
                     !error.is::<aven_core::sync::seed_claim::membership::StaleContext>(),
                     "removed credentials received stale context: {error:#}"
