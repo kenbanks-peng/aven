@@ -84,6 +84,178 @@ fn policy() -> aven_core::attachments::LifecyclePolicy {
     crate::config::AttachmentLifecycleConfig::default().server_policy()
 }
 
+async fn configured_quota_case() -> (Fixture, Client, String, String, String, i64) {
+    let f = fixture().await;
+    converge(&f).await;
+
+    let workspace = f.seed.list_workspaces().await.unwrap().remove(0);
+    let filler_task = f
+        .seed
+        .create_task(&workspace, draft("local quota filler"))
+        .await
+        .unwrap()
+        .task;
+    let filler_reference =
+        add_image_to_database(&f.seed, f.root.path(), &workspace, &filler_task.id, 8).await;
+    let (filler_hash, filler_bytes): (String, i64) =
+        sqlx::query_as("SELECT sha256,byte_size FROM task_attachments WHERE attachment_id=?")
+            .bind(&filler_reference)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.seed).await.unwrap())
+            .await
+            .unwrap();
+    let used_before: i64 = scalar(
+        &f.seed,
+        "SELECT COALESCE(SUM(byte_size),0) FROM blob_inventory WHERE available=1",
+    )
+    .await;
+    assert!(used_before >= filler_bytes && filler_bytes > 1);
+
+    let incoming_reference = add_image(&f).await;
+    let client = Client::new(&f.origin).unwrap();
+    let source_round = client
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap();
+    assert_eq!(source_round.images, ImageTransfer::Complete);
+    let (incoming_hash, incoming_bytes): (String, i64) =
+        sqlx::query_as("SELECT sha256,byte_size FROM task_attachments WHERE attachment_id=?")
+            .bind(&incoming_reference)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.peer).await.unwrap())
+            .await
+            .unwrap();
+    let quota_bytes = used_before - 1;
+    assert_ne!(filler_hash, incoming_hash);
+    assert!(quota_bytes < crate::attachments::lifecycle::DEFAULT_ORIGINAL_QUOTA_BYTES);
+    assert!(
+        used_before + incoming_bytes < crate::attachments::lifecycle::DEFAULT_ORIGINAL_QUOTA_BYTES
+    );
+
+    (
+        f,
+        client,
+        incoming_reference,
+        filler_hash,
+        incoming_hash,
+        quota_bytes,
+    )
+}
+
+fn config_with_local_quota(quota_bytes: i64) -> crate::config::AppConfig {
+    let mut config = crate::config::AppConfig::default();
+    config.local.attachment_lifecycle.quota_bytes = quota_bytes;
+    config
+}
+
+async fn incoming_available(db: &Database, sha256: &str) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM blob_inventory WHERE sha256=? AND available=1")
+        .bind(sha256)
+        .fetch_one(&mut *aven_core::test_support::acquire(db).await.unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn engine_uses_configured_quota_for_download_and_retry() {
+    let (f, client, _reference, filler_hash, incoming_hash, quota_bytes) =
+        configured_quota_case().await;
+    let incoming_path = aven_core::attachments::object_path(f.root.path(), &incoming_hash).unwrap();
+    let filler_path = aven_core::attachments::object_path(f.root.path(), &filler_hash).unwrap();
+
+    let rejected = crate::sync::encrypted::drain_with_config(
+        &client,
+        &f.seed_store,
+        &f.seed,
+        f.root.path(),
+        1,
+        &config_with_local_quota(quota_bytes),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected.images, ImageTransfer::Failed);
+    assert!(filler_path.exists());
+    assert!(!incoming_path.exists());
+    assert_eq!(incoming_available(&f.seed, &incoming_hash).await, 0);
+
+    // Raising only the configured local quota makes the same queued transfer
+    // install successfully on a subsequent engine drain.
+    let retried = crate::sync::encrypted::drain_with_config(
+        &client,
+        &f.seed_store,
+        &f.seed,
+        f.root.path(),
+        1,
+        &config_with_local_quota(crate::attachments::lifecycle::DEFAULT_ORIGINAL_QUOTA_BYTES),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retried.images, ImageTransfer::Complete);
+    assert!(incoming_path.exists());
+    assert_eq!(incoming_available(&f.seed, &incoming_hash).await, 1);
+}
+
+#[tokio::test]
+async fn engine_uses_configured_quota_for_cached_image_install() {
+    let (f, client, incoming_reference, filler_hash, incoming_hash, quota_bytes) =
+        configured_quota_case().await;
+    let incoming_path = aven_core::attachments::object_path(f.root.path(), &incoming_hash).unwrap();
+    let cached_path =
+        aven_core::attachments::object_path(&f.root.path().join("peer-blobs"), &incoming_hash)
+            .unwrap();
+    std::fs::copy(cached_path, &incoming_path).unwrap();
+
+    // Withheld server bytes make this succeed only via the local-cache install
+    // path; an empty-cache fallback would report Unavailable instead.
+    let object: Vec<u8> =
+        sqlx::query_scalar("SELECT object FROM server_e2ee_image_references WHERE reference=?")
+            .bind(&incoming_reference)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.server).await.unwrap())
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM server_e2ee_image_chunks WHERE object=?")
+        .bind(&object)
+        .execute(&mut *aven_core::test_support::acquire(&f.server).await.unwrap())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE server_e2ee_images SET complete=0 WHERE object=?")
+        .bind(object)
+        .execute(&mut *aven_core::test_support::acquire(&f.server).await.unwrap())
+        .await
+        .unwrap();
+
+    let rejected = crate::sync::encrypted::drain_with_config(
+        &client,
+        &f.seed_store,
+        &f.seed,
+        f.root.path(),
+        1,
+        &config_with_local_quota(quota_bytes),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rejected.images, ImageTransfer::Failed);
+    assert!(incoming_path.exists(), "the preloaded cache source remains");
+    assert!(
+        aven_core::attachments::object_path(f.root.path(), &filler_hash)
+            .unwrap()
+            .exists(),
+        "the referenced image remains under the configured quota"
+    );
+    assert_eq!(incoming_available(&f.seed, &incoming_hash).await, 0);
+
+    let retried = crate::sync::encrypted::drain_with_config(
+        &client,
+        &f.seed_store,
+        &f.seed,
+        f.root.path(),
+        1,
+        &config_with_local_quota(crate::attachments::lifecycle::DEFAULT_ORIGINAL_QUOTA_BYTES),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retried.images, ImageTransfer::Complete);
+    assert_eq!(incoming_available(&f.seed, &incoming_hash).await, 1);
+}
+
 #[tokio::test]
 async fn image_round_honors_configured_local_quota() {
     let f = fixture().await;

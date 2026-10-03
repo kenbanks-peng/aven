@@ -364,8 +364,28 @@ pub(crate) async fn drain(
     blob_dir: &Path,
     round_limit: usize,
 ) -> Result<Outcome> {
-    let config = AppConfig::default();
-    let host = DesktopHost::foreground(&config);
+    drain_with_config(
+        client,
+        store,
+        database,
+        blob_dir,
+        round_limit,
+        &AppConfig::default(),
+    )
+    .await
+}
+
+/// Drives the production engine with a desktop host backed by the given config.
+#[cfg(test)]
+pub(crate) async fn drain_with_config(
+    client: &crate::encrypted_tail_http::Client,
+    store: &crate::protected_local_keys::ProtectedLocalKeyStore,
+    database: &Database,
+    blob_dir: &Path,
+    round_limit: usize,
+    config: &AppConfig,
+) -> Result<Outcome> {
+    let host = DesktopHost::foreground(config);
     client
         .transport
         .driver
