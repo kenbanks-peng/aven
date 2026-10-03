@@ -337,7 +337,6 @@ pub(crate) async fn cmd_internal_natural_add(
     tracing::info!(
         workspace_id = %args.workspace_id,
         task_id = %task.id,
-        project = %task.project_key,
         "created task from internal natural-add"
     );
     print_created_task(&task, &workspace, &display_refs);

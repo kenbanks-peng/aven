@@ -1,4 +1,3 @@
-use std::fs::{self, OpenOptions};
 use std::panic::{self, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -72,14 +71,14 @@ fn init_stderr(filter: EnvFilter) -> Result<()> {
 }
 
 fn init_file(path: &Path, filter: EnvFilter) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        aven_core::private_fs::create_dir_all(parent)
             .with_context(|| format!("create log directory {}", parent.display()))?;
     }
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    let file = aven_core::private_fs::open_append_file(path)
         .with_context(|| format!("open log file {}", path.display()))?;
     tracing_subscriber::fmt()
         .with_env_filter(filter)

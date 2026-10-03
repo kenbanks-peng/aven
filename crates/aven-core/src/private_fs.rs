@@ -49,6 +49,30 @@ pub fn open_lock_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Opens or creates a file for appending, owner-only when created, without
+/// following a final-component symlink and refusing anything but a regular
+/// file.
+pub fn open_append_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(PRIVATE_FILE_MODE)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(not(unix))]
+    if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(io::Error::other("append path is a symlink"));
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("append path is not a regular file"));
+    }
+    Ok(file)
+}
+
 /// Creates a new empty owner-only file. Fails if anything exists at `path`.
 pub fn create_new_file(path: &Path) -> io::Result<File> {
     create_new_options().open(path)
@@ -165,5 +189,73 @@ pub(crate) mod test_umask {
             .permissions()
             .mode()
             & 0o777
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{create_dir_all, open_append_file};
+    use crate::private_fs::test_umask::{Umask, mode};
+    use std::fs;
+    use std::io::Write as _;
+
+    #[test]
+    fn append_file_and_parent_are_owner_only_under_permissive_umask() {
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("logs");
+        create_dir_all(&parent).unwrap();
+        let path = parent.join("aven.log");
+        open_append_file(&path)
+            .unwrap()
+            .write_all(b"first\n")
+            .unwrap();
+        open_append_file(&path)
+            .unwrap()
+            .write_all(b"second\n")
+            .unwrap();
+
+        assert_eq!(mode(&parent), 0o700);
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(fs::read(&path).unwrap(), b"first\nsecond\n");
+    }
+
+    #[test]
+    fn append_file_preserves_existing_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("aven.log");
+        fs::write(&path, b"before\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+
+        open_append_file(&path)
+            .unwrap()
+            .write_all(b"after\n")
+            .unwrap();
+
+        assert_eq!(mode(&path), 0o640);
+        assert_eq!(fs::read(&path).unwrap(), b"before\nafter\n");
+    }
+
+    #[test]
+    fn append_file_refuses_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("victim");
+        let path = temp.path().join("aven.log");
+        fs::write(&target, b"sentinel").unwrap();
+        symlink(&target, &path).unwrap();
+
+        assert!(open_append_file(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"sentinel");
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }
