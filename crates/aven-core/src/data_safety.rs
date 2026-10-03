@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, Database};
@@ -74,6 +76,39 @@ pub(crate) async fn scan_export_tables(conn: &mut sqlx::SqliteConnection) -> Res
         conflicts: scan::scan_conflicts(conn).await?,
         meta: scan::scan_meta(conn).await?,
     })
+}
+
+/// Writes a portable export as an owner-only file, atomically replacing an
+/// existing regular file while refusing any other existing file type.
+pub fn write_export_file(output: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        crate::private_fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            bail!("error export-output-not-regular path={}", output.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("could not inspect export destination {}", output.display())
+            });
+        }
+    }
+
+    let mut temp = crate::private_fs::sibling_tempfile(output)
+        .with_context(|| format!("could not create temporary file for {}", output.display()))?;
+    temp.write_all(bytes)
+        .with_context(|| format!("could not write temporary export file {}", output.display()))?;
+    temp.persist(output)
+        .map(|_| ())
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not replace export file {}", output.display()))
 }
 
 impl Database {
@@ -197,4 +232,65 @@ pub async fn restore_backup_archive(
     source: &Path,
 ) -> Result<PathBuf> {
     archive::restore_backup_archive(db_path, blob_dir, source).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_export_file;
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_is_owner_only_under_permissive_umask() {
+        use crate::private_fs::test_umask::{Umask, mode};
+
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("new-parent").join("export.json");
+        write_export_file(&output, b"{}\n").unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), b"{}\n");
+        assert_eq!(mode(&output), 0o600);
+        assert_eq!(mode(output.parent().unwrap()), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_replaces_existing_regular_file_and_remains_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::private_fs::test_umask::{Umask, mode};
+
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("export.json");
+        write_export_file(&output, b"first export").unwrap();
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_export_file(&output, b"second export").unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), b"second export");
+        assert_eq!(mode(&output), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_refuses_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("victim");
+        let output = temp.path().join("export.json");
+        fs::write(&target, b"sentinel").unwrap();
+        symlink(&target, &output).unwrap();
+
+        assert!(write_export_file(&output, b"export").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"sentinel");
+        assert!(
+            fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

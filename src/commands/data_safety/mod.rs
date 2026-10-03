@@ -59,16 +59,9 @@ pub(crate) async fn cmd_backup_restore(
 
 pub(crate) async fn cmd_export(database: &Database, args: ExportArgs) -> Result<()> {
     let export = database.export_data(now()).await?;
-    if let Some(parent) = args.output.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-    let text = serde_json::to_string(&export).context("could not serialize export")?;
-    fs::write(&args.output, text)
-        .with_context(|| format!("could not write export file {}", args.output.display()))?;
-    let bytes = fs::metadata(&args.output)
-        .with_context(|| format!("could not stat {}", args.output.display()))?
-        .len();
+    let text = serde_json::to_vec(&export).context("could not serialize export")?;
+    aven_core::data_safety::write_export_file(&args.output, &text)?;
+    let bytes = text.len();
     println!(
         "exported path={} workspaces={} tasks={} bytes={bytes}",
         quote(&args.output.display().to_string()),
