@@ -1,7 +1,7 @@
 use super::super::*;
 use super::{
-    Declaration, Evidence, EvidenceRecord, Invitation, Joiner, Membership, RotationMaterial,
-    VerifiedKeys, encoding,
+    Declaration, Device, Evidence, EvidenceRecord, Hash, Invitation, Joiner, Membership,
+    RotationMaterial, VerifiedKeys, admission, encoding, rotation,
 };
 use crate::{
     db::Database,
@@ -145,6 +145,94 @@ impl Fixture {
     }
 }
 
+pub(crate) fn copy_invitation(inv: &Invitation) -> Invitation {
+    Invitation::from_protected_storage(&inv.protected_storage_bytes()).unwrap()
+}
+pub(crate) fn seal_fixed(
+    inv: &Invitation,
+    recipient: &Hash,
+    info: &[u8],
+    aad: &[u8],
+    plain: &[u8],
+    seed: u8,
+) -> (Vec<u8>, Vec<u8>) {
+    let handle = inv.handle();
+    let mode = OpModeS::Psk(hpke::PskBundle::new(inv.psk.expose(), &handle).unwrap());
+    let public = <Kem as hpke::Kem>::PublicKey::from_bytes(recipient).unwrap();
+    let (enc, ciphertext) = hpke::single_shot_seal_with_rng::<Aead, Kdf, Kem>(
+        &mode,
+        &public,
+        info,
+        plain,
+        aad,
+        &mut ChaCha20Rng::from_seed([seed; 32]),
+    )
+    .unwrap();
+    (enc.to_bytes().to_vec(), ciphertext)
+}
+pub(crate) fn joiner(inv: &Invitation, seed: u8) -> Joiner {
+    let (private, _) = <Kem as hpke::Kem>::derive_keypair(&[seed + 2; 32]);
+    let mut peer = peer::PeerAuthority {
+        device: [seed; 32],
+        signing: Secret::new([seed + 1; 32]),
+        recipient: Secret::new(private.to_bytes().into()),
+        bearer: Secret::new([seed + 3; 32]),
+        invitation: copy_invitation(inv),
+        request: vec![],
+    };
+    let info = cce("aven-e2ee/v1/pairing/request", &[&inv.vault, &inv.handle()]);
+    let aad = cce(
+        "aven-e2ee/v1/pairing/request-aad",
+        &[&inv.vault, &inv.handle(), &inv.inviter],
+    );
+    let (enc, ciphertext) = seal_fixed(
+        inv,
+        &inv.inviter,
+        &info,
+        &aad,
+        &peer.recipient().unwrap().plaintext(),
+        seed + 4,
+    );
+    let mut request = vec![1];
+    for field in [&inv.handle()[..], &enc, &ciphertext] {
+        bytes(&mut request, field);
+    }
+    peer.request = request;
+    Joiner(peer)
+}
+pub(crate) fn reseal(
+    m: &Membership,
+    d: &Declaration,
+    peer: &Joiner,
+    signing: &Secret,
+    plain: &[u8],
+    seed: u8,
+) -> Vec<u8> {
+    let recipient = peer.0.recipient().unwrap();
+    let (state, core) = admission::state_core(m, d, peer.request(), &recipient);
+    let info = cce(
+        "aven-e2ee/v1/pairing/grant",
+        &[&peer.0.vault(), &d.handle, &hash(peer.request())],
+    );
+    let (enc, ciphertext) = seal_fixed(
+        &peer.0.invitation,
+        &recipient.hpke,
+        &info,
+        &core,
+        plain,
+        seed,
+    );
+    let mut attachments = encoding::packages(1);
+    encoding::package(
+        &mut attachments,
+        1,
+        &recipient.device,
+        &recipient.hpke,
+        &enc,
+        &ciphertext,
+    );
+    admission::signed(signing, &core, &state, &attachments)
+}
 struct Signed {
     seed: SeedAuthority,
     descriptor: Vec<u8>,
@@ -195,7 +283,47 @@ struct Bases {
     signed: Signed,
     admitted: Membership,
     admission: [Vec<u8>; 3],
+    enrollments: [Enrollment; 3],
+    rotation: Rotation,
 }
+
+/// A declared invitation whose grant plaintext the harness seals itself.
+struct Enrollment {
+    base: Membership,
+    declaration: Declaration,
+    joiner: Joiner,
+    signing: Secret,
+    plaintext: Zeroizing<Vec<u8>>,
+}
+fn enrollment(base: &Membership, inviter: Device<'_>, keys: &VerifiedKeys, psk: u8) -> Enrollment {
+    let (inv, declaration) = inviter
+        .invitation_with_psk(base, 2_000_000_000, Secret::new([psk; 32]))
+        .unwrap();
+    let joiner = joiner(&inv, psk + 1);
+    let recipient = joiner.0.recipient().unwrap();
+    let plaintext =
+        admission::grant_plaintext(base, &declaration, joiner.request(), &recipient, keys);
+    Enrollment {
+        base: base.clone(),
+        declaration,
+        joiner,
+        signing: Secret::new(*inviter.signing.expose()),
+        plaintext,
+    }
+}
+
+/// The seed's rotation of the frozen two-device membership, as received by
+/// the first peer.
+struct Rotation {
+    before: Membership,
+    keys: VerifiedKeys,
+    receiver: Joiner,
+    signing: Secret,
+    record: Vec<u8>,
+    plaintext: Zeroizing<Vec<u8>>,
+}
+const ROTATED_GENERATION: Hash = [7; 32];
+const ROTATED_KEY: Hash = [8; 32];
 
 fn bases() -> Bases {
     let signed = signed_publication();
@@ -207,10 +335,82 @@ fn bases() -> Bases {
         .membership
         .append(&admission[0], &admission[1], &admission[2])
         .unwrap();
+    let seed = Device::seed(&signed.seed);
+    let keys = signed.membership.verify_initial_key(&signed.key).unwrap();
+    let first = enrollment(&signed.membership, Device::seed(&signed.seed), &keys, 31);
+    let freeze = seed.prepare_revoke(&admitted, &[]).unwrap();
+    let before = admitted.append(&[], &[], &freeze).unwrap();
+    let record = seed
+        .rotation_with(
+            &before,
+            &keys,
+            ROTATED_GENERATION,
+            &LocalSharedStatePackageKey::new(ROTATED_KEY),
+            before.publication().binding().prefix_count,
+            &mut ChaCha20Rng::from_seed([9; 32]),
+        )
+        .unwrap();
+    let rotated = before.append(&[], &[], &record).unwrap();
+    let rotated_keys = seed.receive_rotation(&before, &record, &keys).unwrap();
+    let receiver = joiner(&first.joiner.0.invitation, 32);
+    let member = rotated.member(&receiver.device()).unwrap();
+    let plaintext = rotation::plaintext(
+        &before,
+        member,
+        rotated.current_generation(),
+        &LocalSharedStatePackageKey::new(ROTATED_KEY),
+    );
+    let enrollments = [
+        enrollment(&admitted, first.joiner.authority(), &keys, 41),
+        enrollment(&rotated, Device::seed(&signed.seed), &rotated_keys, 51),
+        first,
+    ];
+    let rotation = Rotation {
+        before,
+        keys,
+        receiver,
+        signing: Secret::new(*signed.seed.signing.expose()),
+        record,
+        plaintext,
+    };
     Bases {
         signed,
         admitted,
         admission,
+        enrollments,
+        rotation,
+    }
+}
+
+impl Rotation {
+    /// The signed rotation with the receiver's package replaced by `plaintext`.
+    fn sealing(&self, plaintext: &[u8]) -> Vec<u8> {
+        let (core, _, attachments, _) = encoding::components(&self.record).unwrap();
+        let next = self.before.append(&[], &[], &self.record).unwrap();
+        let packages = encoding::read_packages(attachments, 0, next.members.len(), 176).unwrap();
+        let receiver = next.member(&self.receiver.device()).unwrap();
+        let public = <Kem as hpke::Kem>::PublicKey::from_bytes(&receiver.hpke).unwrap();
+        let (enc, cipher) = hpke::single_shot_seal_with_rng::<Aead, Kdf, Kem>(
+            &OpModeS::Base,
+            &public,
+            &rotation::info(&self.before, receiver),
+            plaintext,
+            core,
+            &mut ChaCha20Rng::from_seed([10; 32]),
+        )
+        .unwrap();
+        let enc = enc.to_bytes();
+        let mut out = encoding::packages(packages.len());
+        for p in &packages {
+            let (enc, cipher) = if p.device == receiver.device {
+                (&enc[..], &cipher[..])
+            } else {
+                (p.enc, p.cipher)
+            };
+            encoding::package(&mut out, 0, &p.device, &p.public, enc, cipher);
+        }
+        let (_, state, _, _) = encoding::components(&self.record).unwrap();
+        admission::signed(&self.signing, core, state, &out)
     }
 }
 
@@ -228,7 +428,7 @@ pub(crate) fn fuzz(data: &[u8]) {
         } else {
             &b.admitted
         };
-        match selector % 6 {
+        match selector % 8 {
             0 => {
                 if let Ok((evidence, membership)) = Evidence::decode(input.0) {
                     let again = Evidence::decode(&serde_json::to_vec(&evidence).unwrap())
@@ -283,7 +483,7 @@ pub(crate) fn fuzz(data: &[u8]) {
                     let _ = next.validate_key(&b.signed.key);
                 }
             }
-            _ => {
+            5 => {
                 let raw = input.0;
                 let _ = Declaration::from_record(base, raw);
                 let _ = VerifiedKeys::from_protected_storage(base, raw);
@@ -295,6 +495,30 @@ pub(crate) fn fuzz(data: &[u8]) {
                     b.signed.seed.genesis().context(),
                     &b.signed.key,
                 );
+            }
+            6 => {
+                // Grant plaintext sealed under the invitation PSK by the inviter.
+                let e = &b.enrollments[usize::from(input.byte()) % 3];
+                let d = e.declaration.record();
+                let record = reseal(&e.base, &e.declaration, &e.joiner, &e.signing, input.0, 90);
+                if let Ok(grant) = e.joiner.open_provisional(d, &record) {
+                    assert_eq!(grant.outcome, hash(&record));
+                }
+                if let Ok(verified) = e.joiner.verify_enrollment(&e.base, d, &record) {
+                    assert_eq!(input.0, e.plaintext.as_slice());
+                    assert!(verified.membership().extends(&e.base));
+                }
+            }
+            _ => {
+                // Rotation key package sealed to the first peer by the seed.
+                let r = &b.rotation;
+                let raw = r.sealing(input.0);
+                let receiver = r.receiver.authority();
+                if let Ok(keys) = receiver.receive_rotation(&r.before, &raw, &r.keys) {
+                    assert_eq!(input.0, r.plaintext.as_slice());
+                    let key = keys.key(ROTATED_GENERATION).unwrap();
+                    assert_eq!(key.protected_storage_bytes(), &ROTATED_KEY);
+                }
             }
         }
     })
@@ -335,6 +559,19 @@ pub(crate) fn fuzz_seeds() -> Vec<(&'static str, Vec<u8>)> {
             ),
         ),
         ("membership", frame(&[5, 1], &[declaration])),
+        (
+            "membership",
+            frame(&[6, 0, 0], &[&b.enrollments[0].plaintext]),
+        ),
+        (
+            "membership",
+            frame(&[6, 0, 1], &[&b.enrollments[1].plaintext]),
+        ),
+        (
+            "membership",
+            frame(&[6, 0, 2], &[&b.enrollments[2].plaintext]),
+        ),
+        ("membership", frame(&[7, 0], &[&b.rotation.plaintext])),
         ("wire", frame(&[4], &[&evidence])),
     ]
 }

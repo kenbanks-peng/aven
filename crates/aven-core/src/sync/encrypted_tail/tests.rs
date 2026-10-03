@@ -79,6 +79,17 @@ fn strict_json_and_numeric_equality() {
     assert!(domain::decode(&serde_json::to_vec(&value).unwrap()).is_err());
 }
 #[test]
+fn member_local_seq_cannot_push_peer_sequences_to_overflow() {
+    // Peers adopt the largest applied remote local_seq as their own floor.
+    let mut c = change();
+    c.local_seq = crate::sync::wire::MAX_LOCAL_SEQ;
+    assert!(domain::decode(&serde_json::to_vec(&c).unwrap()).is_ok());
+    for local_seq in [crate::sync::wire::MAX_LOCAL_SEQ + 1, i64::MAX, -1] {
+        c.local_seq = local_seq;
+        assert!(domain::decode(&serde_json::to_vec(&c).unwrap()).is_err());
+    }
+}
+#[test]
 fn parent_projection_limits_and_domain_binding() {
     for action in 0..=2 {
         let p = Projection::Parent {

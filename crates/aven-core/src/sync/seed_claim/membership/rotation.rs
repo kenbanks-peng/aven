@@ -144,7 +144,7 @@ pub(super) fn validate(m: &Membership, raw: &[u8]) -> Result<Membership> {
     )?;
     Ok(next)
 }
-fn info(m: &Membership, member: &Member) -> Vec<u8> {
+pub(super) fn info(m: &Membership, member: &Member) -> Vec<u8> {
     cce(
         "aven-e2ee/v1/membership/rotation-key",
         &[
@@ -155,7 +155,7 @@ fn info(m: &Membership, member: &Member) -> Vec<u8> {
         ],
     )
 }
-fn plaintext(
+pub(super) fn plaintext(
     m: &Membership,
     member: &Member,
     g: &Generation,

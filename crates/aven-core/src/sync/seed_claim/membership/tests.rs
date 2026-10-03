@@ -1,8 +1,9 @@
 mod rotation;
 mod rotation_packages;
-use super::super::{peer, publication};
+use super::super::publication;
 use super::*;
 use hpke::PskBundle;
+use test_support::{copy_invitation, joiner, reseal, seal_fixed};
 
 struct Fixture {
     seed: SeedAuthority,
@@ -16,94 +17,6 @@ fn fixture() -> Fixture {
         membership,
         key,
     }
-}
-fn copy_invitation(inv: &Invitation) -> Invitation {
-    Invitation::from_protected_storage(&inv.protected_storage_bytes()).unwrap()
-}
-fn seal_fixed(
-    inv: &Invitation,
-    recipient: &Hash,
-    info: &[u8],
-    aad: &[u8],
-    plain: &[u8],
-    seed: u8,
-) -> (Vec<u8>, Vec<u8>) {
-    let handle = inv.handle();
-    let mode = OpModeS::Psk(PskBundle::new(inv.psk.expose(), &handle).unwrap());
-    let public = <Kem as hpke::Kem>::PublicKey::from_bytes(recipient).unwrap();
-    let (enc, ciphertext) = hpke::single_shot_seal_with_rng::<Aead, Kdf, Kem>(
-        &mode,
-        &public,
-        info,
-        plain,
-        aad,
-        &mut ChaCha20Rng::from_seed([seed; 32]),
-    )
-    .unwrap();
-    (enc.to_bytes().to_vec(), ciphertext)
-}
-fn joiner(inv: &Invitation, seed: u8) -> Joiner {
-    let (private, _) = <Kem as hpke::Kem>::derive_keypair(&[seed + 2; 32]);
-    let mut peer = peer::PeerAuthority {
-        device: [seed; 32],
-        signing: Secret::new([seed + 1; 32]),
-        recipient: Secret::new(private.to_bytes().into()),
-        bearer: Secret::new([seed + 3; 32]),
-        invitation: copy_invitation(inv),
-        request: vec![],
-    };
-    let info = cce("aven-e2ee/v1/pairing/request", &[&inv.vault, &inv.handle()]);
-    let aad = cce(
-        "aven-e2ee/v1/pairing/request-aad",
-        &[&inv.vault, &inv.handle(), &inv.inviter],
-    );
-    let (enc, ciphertext) = seal_fixed(
-        inv,
-        &inv.inviter,
-        &info,
-        &aad,
-        &peer.recipient().unwrap().plaintext(),
-        seed + 4,
-    );
-    let mut request = vec![1];
-    for field in [&inv.handle()[..], &enc, &ciphertext] {
-        bytes(&mut request, field);
-    }
-    peer.request = request;
-    Joiner(peer)
-}
-fn reseal(
-    m: &Membership,
-    d: &Declaration,
-    peer: &Joiner,
-    signing: &Secret,
-    plain: &[u8],
-    seed: u8,
-) -> Vec<u8> {
-    let recipient = peer.0.recipient().unwrap();
-    let (state, core) = admission::state_core(m, d, peer.request(), &recipient);
-    let info = cce(
-        "aven-e2ee/v1/pairing/grant",
-        &[&peer.0.vault(), &d.handle, &hash(peer.request())],
-    );
-    let (enc, ciphertext) = seal_fixed(
-        &peer.0.invitation,
-        &recipient.hpke,
-        &info,
-        &core,
-        plain,
-        seed,
-    );
-    let mut attachments = encoding::packages(1);
-    encoding::package(
-        &mut attachments,
-        1,
-        &recipient.device,
-        &recipient.hpke,
-        &enc,
-        &ciphertext,
-    );
-    admission::signed(signing, &core, &state, &attachments)
 }
 fn fixed_admission(
     m: &Membership,

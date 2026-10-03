@@ -151,6 +151,11 @@ pub fn validate_pushed_change(change: &ChangeWire) -> Result<()> {
     super::protocol::validate_change(SYNC_PROTOCOL_VERSION, change)
 }
 
+/// Largest local sequence a change may carry. Installations number their own
+/// writes upward from one and adopt the largest applied remote value, so the
+/// bound keeps every replica's next local sequence far from overflow.
+pub(crate) const MAX_LOCAL_SEQ: i64 = 1 << 53;
+
 pub(crate) fn validate_local_change_shape(change: &ChangeWire) -> Result<()> {
     ensure_non_empty("change_id", &change.change_id)?;
     ensure_non_empty("client_id", &change.client_id)?;
@@ -160,6 +165,9 @@ pub(crate) fn validate_local_change_shape(change: &ChangeWire) -> Result<()> {
     ensure_sync_id("change_id", &change.change_id)?;
     if change.server_seq.is_some() {
         bail!("error invalid-sync-change server_seq client-supplied");
+    }
+    if !(0..=MAX_LOCAL_SEQ).contains(&change.local_seq) {
+        bail!("error invalid-sync-change local_seq out-of-range");
     }
     if !change.payload.is_object() {
         bail!("error invalid-sync-change payload expected-object");
