@@ -23,7 +23,7 @@ only after checking the relevant source, dependencies, and environment for chang
 - [x] **Integrated validation:** `just check-full` on the candidate; include
   opt-in batch crash-boundary tests. Retain full logs and actual test counts.
   Follow [TESTING.md](TESTING.md); do not substitute compilation for tests.
-- [ ] **Desktop manual journey:** isolated production CLI/TUI/daemon setup,
+- [x] **Desktop manual journey:** isolated production CLI/TUI/daemon setup,
   invitation/join, task/image transfer, conflicts, removal/rotation, offline
   work, interrupted setup/join, missing credentials, and actionable failure
   states. Include TLS success and certificate/proxy failure cases. Distinguish
@@ -61,6 +61,26 @@ Recovery kits, self-removal, same-vault restore, hosted service implementation,
 periodic snapshots, compaction, and global ciphertext deduplication are outside
 this desktop release. Notarization and updater signer verification are separate
 follow-ups, not evidence supplied by checksum verification.
+
+## Desktop manual journey: October 4, 2026
+
+Executed on `efe11a8e` with the normal debug CLI, isolated databases, loopback
+HTTP servers and real macOS Keychain accounts (cleaned afterwards). Raw logs and
+harnesses are under `history/2026-10-04-desktop-manual-journey/`.
+
+| Area | Result |
+| --- | --- |
+| Base journey | October 2 `manual.py` rerun at this source: setup, two joins, task and exact image transfer, removal and rotation, removed-device refusal, daemon pull, missing wrapping key, canary scan, backup and new-vault recovery. Passed. |
+| Offline work | Server stopped: `sync` fails with `[encrypted-tail-network]` and local edits continue; `doctor` shows pending changes. After restart, offline edits sync and non-conflicting changes merge. |
+| Conflicts | Concurrent offline description edits produce a conflict on both devices; resolving with a variant token converges both. The guide's `--use local` example failed and is fixed in `a50141f4`. |
+| Interrupted setup | Unreachable server: `[bootstrap-network]` with next step. Setup killed at 0.15, 0.4 and 0.8 s (during upload): status reports setup incomplete, rerunning setup with the same invitation completes, and a fresh peer receives all 8 images byte-for-byte. |
+| Interrupted join | Server down during join: `[enrollment-network]`; retry with a fresh invitation succeeds. Joiner killed mid-join: status and `sync` say joining is incomplete with recovery steps; a fresh invitation completes it. Local data added during a pending join is refused with `[shared-state-install]` and a next step. |
+| Missing credentials | Deleting a device's protected key files: `[protected-key-storage-missing]` with a do-not-replace hint, local work continues, nothing is regenerated; restoring the files resumes sync including work made meanwhile. |
+| TUI and TLS | Carried forward from the [October 3 Linux TUI/TLS QA](history/2026-10-03-e2ee-tui-tls-qa/README.md) at `092022f0` plus `69bde6ca`: TUI setup, join, two-way sync and device removal over HTTPS; wrong-host, self-signed and expired certificates; proxy body limit. TUI, sync and HTTP client sources changed by one image-lifecycle line since. |
+
+Observations, not fixed: if the inviting device quits, the joiner waits for the
+10-minute invitation lifetime showing only "Waiting for the inviting device...";
+the inviter's device list shows joined devices without names.
 
 ## Assessment: October 2, 2026
 
