@@ -171,6 +171,10 @@ impl ClientHost for BenchHost {
         Ok(self.blobs.clone())
     }
 
+    fn attachment_lifecycle_policy(&self) -> aven_core::attachments::LifecyclePolicy {
+        aven_core::attachments::LifecyclePolicy::default()
+    }
+
     fn device_label(&self) -> Option<String> {
         None
     }

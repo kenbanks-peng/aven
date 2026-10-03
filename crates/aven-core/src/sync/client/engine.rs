@@ -1055,10 +1055,17 @@ async fn drain_reporting(
     let mut sent_changes = 0;
     let mut received_changes = 0;
     let mut images_progress = None;
+    let lifecycle_policy = host.attachment_lifecycle_policy();
     let mut drain = Box::pin(client.start_drain(store, database)).await?;
     while rounds < round_limit {
-        let round: Round =
-            Box::pin(client.round_in_drain(store, database, blob_dir, &mut drain)).await?;
+        let round: Round = Box::pin(client.round_in_drain(
+            store,
+            database,
+            blob_dir,
+            lifecycle_policy,
+            &mut drain,
+        ))
+        .await?;
         rounds += 1;
         sent_changes += round.sent_changes;
         received_changes += round.received_changes;

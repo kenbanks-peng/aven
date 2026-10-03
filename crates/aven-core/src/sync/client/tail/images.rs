@@ -196,15 +196,17 @@ impl Client {
         store: &ProtectedLocalKeyStore,
         db: &Database,
         blob_dir: &Path,
+        lifecycle_policy: crate::attachments::LifecyclePolicy,
     ) -> Result<Round> {
         let mut drain = Box::pin(self.start_drain(store, db)).await?;
-        Box::pin(self.round_in_drain(store, db, blob_dir, &mut drain)).await
+        Box::pin(self.round_in_drain(store, db, blob_dir, lifecycle_policy, &mut drain)).await
     }
     pub async fn round_in_drain(
         &self,
         store: &ProtectedLocalKeyStore,
         db: &Database,
         blob_dir: &Path,
+        lifecycle_policy: crate::attachments::LifecyclePolicy,
         drain: &mut DrainSnapshot,
     ) -> Result<Round> {
         if !drain.tail.is_current(db).await? {
@@ -217,6 +219,7 @@ impl Client {
                 &mut drain.pull,
                 db,
                 blob_dir,
+                lifecycle_policy,
                 &mut progress,
                 &mut drain.batch_count
             )
@@ -241,6 +244,7 @@ impl Client {
         pull: &mut PullFreshness,
         db: &Database,
         blob_dir: &Path,
+        lifecycle_policy: crate::attachments::LifecyclePolicy,
         progress: &mut RoundProgress,
         batch_count: &mut usize,
     ) -> Result<Round> {
@@ -321,7 +325,14 @@ impl Client {
                     break;
                 }
                 match self
-                    .download_image(a, &inputs.bearer, db, blob_dir, progress.download.as_ref())
+                    .download_image(
+                        a,
+                        &inputs.bearer,
+                        db,
+                        blob_dir,
+                        progress.download.as_ref(),
+                        lifecycle_policy,
+                    )
                     .await
                 {
                     Ok(true) => {
@@ -501,15 +512,11 @@ impl Client {
         db: &Database,
         blob_dir: &Path,
         selected: Option<&images::Download>,
+        lifecycle_policy: crate::attachments::LifecyclePolicy,
     ) -> Result<bool> {
         if let Some(download) = selected
             && !db
-                .complete_encrypted_image_from_local(
-                    a,
-                    blob_dir,
-                    download,
-                    crate::attachments::LifecyclePolicy::default(),
-                )
+                .complete_encrypted_image_from_local(a, blob_dir, download, lifecycle_policy)
                 .await?
         {
             let mut records = Vec::new();
@@ -540,14 +547,8 @@ impl Client {
                     _ => anyhow::bail!("error encrypted-image-reply"),
                 }
             }
-            db.install_encrypted_image(
-                a,
-                blob_dir,
-                download,
-                &records,
-                crate::attachments::LifecyclePolicy::default(),
-            )
-            .await?;
+            db.install_encrypted_image(a, blob_dir, download, &records, lifecycle_policy)
+                .await?;
         }
         Ok(true)
     }

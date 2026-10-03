@@ -25,30 +25,46 @@ async fn add_image_to_task(
     task: &aven_core::ids::TaskId,
     width: u32,
 ) -> String {
+    add_image_to_database(
+        &f.peer,
+        &f.root.path().join("peer-blobs"),
+        workspace,
+        task,
+        width,
+    )
+    .await
+}
+
+async fn add_image_to_database(
+    db: &Database,
+    blob_dir: &std::path::Path,
+    workspace: &aven_core::workspaces::Workspace,
+    task: &aven_core::ids::TaskId,
+    width: u32,
+) -> String {
     let mut bytes = std::io::Cursor::new(Vec::new());
     ::image::DynamicImage::new_rgb8(width, 3)
         .write_to(&mut bytes, ::image::ImageFormat::Png)
         .unwrap();
-    f.peer
-        .add_task_attachment(
-            workspace,
-            &f.root.path().join("peer-blobs"),
-            Default::default(),
-            task,
-            aven_core::operations::AttachmentAddInput {
-                filename: None,
-                alt_text: None,
-                declared_media_type: None,
-                bytes: bytes.into_inner(),
-                optimization_policy: aven_core::attachments::ImageOptimizationPolicy::Preserve,
-                dedupe_existing: false,
-            },
-        )
-        .await
-        .unwrap()
-        .outcome
-        .attachment
-        .attachment_id
+    db.add_task_attachment(
+        workspace,
+        blob_dir,
+        Default::default(),
+        task,
+        aven_core::operations::AttachmentAddInput {
+            filename: None,
+            alt_text: None,
+            declared_media_type: None,
+            bytes: bytes.into_inner(),
+            optimization_policy: aven_core::attachments::ImageOptimizationPolicy::Preserve,
+            dedupe_existing: false,
+        },
+    )
+    .await
+    .unwrap()
+    .outcome
+    .attachment
+    .attachment_id
 }
 
 async fn add_image_batch(f: &Fixture, count: usize) {
@@ -67,6 +83,87 @@ async fn add_image_batch(f: &Fixture, count: usize) {
 fn policy() -> aven_core::attachments::LifecyclePolicy {
     crate::config::AttachmentLifecycleConfig::default().server_policy()
 }
+
+#[tokio::test]
+async fn image_round_honors_configured_local_quota() {
+    let f = fixture().await;
+    converge(&f).await;
+
+    let workspace = f.seed.list_workspaces().await.unwrap().remove(0);
+    let filler_task = f
+        .seed
+        .create_task(&workspace, draft("local quota filler"))
+        .await
+        .unwrap()
+        .task;
+    let filler_reference =
+        add_image_to_database(&f.seed, f.root.path(), &workspace, &filler_task.id, 8).await;
+    let (filler_hash, filler_bytes): (String, i64) =
+        sqlx::query_as("SELECT sha256,byte_size FROM task_attachments WHERE attachment_id=?")
+            .bind(&filler_reference)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.seed).await.unwrap())
+            .await
+            .unwrap();
+    let used_before: i64 = scalar(
+        &f.seed,
+        "SELECT COALESCE(SUM(byte_size),0) FROM blob_inventory WHERE available=1",
+    )
+    .await;
+    assert!(used_before >= filler_bytes && filler_bytes > 1);
+    let quota_bytes = used_before - 1;
+
+    let incoming_reference = add_image(&f).await;
+    let client = Client::new(&f.origin).unwrap();
+    let source_round = client
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap();
+    assert_eq!(source_round.images, ImageTransfer::Complete);
+    let (incoming_hash, incoming_bytes): (String, i64) =
+        sqlx::query_as("SELECT sha256,byte_size FROM task_attachments WHERE attachment_id=?")
+            .bind(&incoming_reference)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.peer).await.unwrap())
+            .await
+            .unwrap();
+    let default_quota = crate::attachments::lifecycle::DEFAULT_ORIGINAL_QUOTA_BYTES;
+    assert_ne!(filler_hash, incoming_hash);
+    assert!(used_before > quota_bytes);
+    assert!(quota_bytes < default_quota);
+    assert!(used_before + incoming_bytes < default_quota);
+
+    let local_policy = crate::config::AttachmentLifecycleConfig {
+        quota_bytes,
+        ..crate::config::AttachmentLifecycleConfig::default()
+    }
+    .policy();
+    // Prefilled referenced storage exceeds the configured quota, while both
+    // images together fit under the default; the normal download must reject
+    // only the incoming image under this policy.
+    let round = client
+        .round_with_policy(&f.seed_store, &f.seed, f.root.path(), local_policy)
+        .await
+        .unwrap();
+    let incoming_path = aven_core::attachments::object_path(f.root.path(), &incoming_hash).unwrap();
+    let filler_path = aven_core::attachments::object_path(f.root.path(), &filler_hash).unwrap();
+
+    assert_eq!(round.images, ImageTransfer::Failed);
+    assert!(
+        filler_path.exists(),
+        "the referenced prefilled image remains"
+    );
+    assert!(
+        !incoming_path.exists(),
+        "the over-quota synced image is not retained"
+    );
+    let incoming_available: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM blob_inventory WHERE sha256=? AND available=1")
+            .bind(&incoming_hash)
+            .fetch_one(&mut *aven_core::test_support::acquire(&f.seed).await.unwrap())
+            .await
+            .unwrap();
+    assert_eq!(incoming_available, 0);
+}
+
 async fn exec(db: &Database, sql: &str) {
     sqlx::query(sqlx::AssertSqlSafe(sql.to_owned()))
         .execute(&mut *aven_core::test_support::acquire(db).await.unwrap())

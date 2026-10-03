@@ -112,6 +112,10 @@ impl ClientHost for DesktopHost {
         config::resolve_blob_dir(database.path(), &self.config)
     }
 
+    fn attachment_lifecycle_policy(&self) -> aven_core::attachments::LifecyclePolicy {
+        self.config.local.attachment_lifecycle.policy()
+    }
+
     fn device_label(&self) -> Option<String> {
         super::device_label::automatic_label()
     }

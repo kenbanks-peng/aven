@@ -103,6 +103,9 @@ mod tests {
         fn blob_dir(&self, database: &Database) -> Result<PathBuf> {
             Ok(database.path().with_extension("blobs"))
         }
+        fn attachment_lifecycle_policy(&self) -> crate::attachments::LifecyclePolicy {
+            crate::attachments::LifecyclePolicy::default()
+        }
         fn device_label(&self) -> Option<String> {
             None
         }

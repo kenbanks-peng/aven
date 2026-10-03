@@ -72,7 +72,27 @@ impl Client {
         db: &Database,
         blob_dir: &Path,
     ) -> Result<Round> {
-        run!(self, |client| client.round(store, db, blob_dir))
+        self.round_with_policy(
+            store,
+            db,
+            blob_dir,
+            aven_core::attachments::LifecyclePolicy::default(),
+        )
+        .await
+    }
+    pub(crate) async fn round_with_policy(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+        blob_dir: &Path,
+        lifecycle_policy: aven_core::attachments::LifecyclePolicy,
+    ) -> Result<Round> {
+        run!(self, |client| client.round(
+            store,
+            db,
+            blob_dir,
+            lifecycle_policy
+        ))
     }
     /// Repairs one known reference without changing its descriptor or metadata.
     pub async fn repair_attachment(
@@ -100,7 +120,29 @@ impl Client {
         blob_dir: &Path,
         drain: &mut DrainSnapshot,
     ) -> Result<Round> {
-        run!(self, |client| client
-            .round_in_drain(store, db, blob_dir, drain))
+        self.round_in_drain_with_policy(
+            store,
+            db,
+            blob_dir,
+            aven_core::attachments::LifecyclePolicy::default(),
+            drain,
+        )
+        .await
+    }
+    pub(crate) async fn round_in_drain_with_policy(
+        &self,
+        store: &ProtectedLocalKeyStore,
+        db: &Database,
+        blob_dir: &Path,
+        lifecycle_policy: aven_core::attachments::LifecyclePolicy,
+        drain: &mut DrainSnapshot,
+    ) -> Result<Round> {
+        run!(self, |client| client.round_in_drain(
+            store,
+            db,
+            blob_dir,
+            lifecycle_policy,
+            drain
+        ))
     }
 }

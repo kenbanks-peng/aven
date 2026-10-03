@@ -18,6 +18,9 @@ pub trait ClientHost: Send + Sync {
     /// The local image blob root of `database`.
     fn blob_dir(&self, database: &Database) -> Result<PathBuf>;
 
+    /// Lifecycle limits for images installed from encrypted sync.
+    fn attachment_lifecycle_policy(&self) -> crate::attachments::LifecyclePolicy;
+
     /// A name other devices show for this one, such as the computer name.
     /// Asked for only while this device has no published label; control
     /// characters are dropped and the length is bounded.
