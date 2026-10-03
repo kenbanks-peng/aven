@@ -160,6 +160,8 @@ jobs:
 
   release:
     needs: [build, sign-macos]
+    # Hyphenated tags such as v1.2.3-signtest.1 build and sign without publishing.
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -179,6 +181,7 @@ jobs:
 
   update-tap:
     needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
