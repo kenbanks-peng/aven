@@ -2968,5 +2968,6 @@ mod faults;
 mod generated;
 mod journey;
 mod membership;
+mod wedge;
 
 mod batch;
