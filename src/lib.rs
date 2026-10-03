@@ -51,7 +51,7 @@ use commands::{
     cmd_add, cmd_attachment, cmd_backup, cmd_bulk_update, cmd_config, cmd_conflict, cmd_context,
     cmd_daemon_status, cmd_delete_restore, cmd_demo, cmd_dep, cmd_doctor, cmd_edit, cmd_epic,
     cmd_export, cmd_import, cmd_internal_demo_snapshot, cmd_internal_natural_add, cmd_label,
-    cmd_list, cmd_metadata, cmd_note, cmd_note_delete, cmd_prime, cmd_project, cmd_recur,
+    cmd_list, cmd_metadata, cmd_move, cmd_note, cmd_note_delete, cmd_prime, cmd_project, cmd_recur,
     cmd_related, cmd_search, cmd_self_update, cmd_show, cmd_skill, cmd_skill_install, cmd_text,
     cmd_workspace,
 };
@@ -141,6 +141,7 @@ enum DatabaseCommand {
     Dep(cli::DepCommand),
     Related(cli::RelatedCommand),
     Edit(cli::TaskEditArgs),
+    Move(cli::MoveArgs),
     Epic(cli::EpicCommand),
     Export(cli::ExportArgs),
     Import(cli::ImportArgs),
@@ -181,6 +182,7 @@ impl From<Commands> for CliDispatch {
             Commands::BulkUpdate(args) => Self::database(DatabaseCommand::BulkUpdate(args)),
             Commands::Prime(args) => Self::database(DatabaseCommand::Prime(args)),
             Commands::Edit(args) => Self::database(DatabaseCommand::Edit(args)),
+            Commands::Move(args) => Self::database(DatabaseCommand::Move(args)),
             Commands::Update(args) => Self::Standalone(StandaloneCommand::Update(args)),
             Commands::Note(args) => Self::database(DatabaseCommand::Note(args)),
             Commands::NoteDelete(args) => Self::database(DatabaseCommand::NoteDelete(args)),
@@ -390,6 +392,11 @@ async fn dispatch_database(
             let workspace =
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
             cmd_edit(&database, &workspace, args).await
+        }
+        DatabaseCommand::Move(args) => {
+            let workspace =
+                resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
+            cmd_move(&database, &workspace, args).await
         }
         DatabaseCommand::Note(args) => {
             let workspace =

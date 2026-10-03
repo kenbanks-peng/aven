@@ -6,7 +6,7 @@ use sqlx::SqliteConnection;
 use crate::sync::wire::ChangeWire;
 
 use super::shared::str_payload;
-use super::shared::workspace_id_payload;
+use super::shared::{task_operation_workspace_id_payload, workspace_id_payload};
 
 pub(super) async fn create_label(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
     let workspace_id = workspace_id_payload(conn, change).await?;
@@ -17,7 +17,7 @@ pub(super) async fn create_label(conn: &mut SqliteConnection, change: &ChangeWir
 }
 
 pub(super) async fn add_label(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = super::shared::task_id(change)?;
     let label = str_payload(&change.payload, "label")?;
     insert_label(conn, &workspace_id, &label, &change.created_at).await?;
@@ -127,7 +127,7 @@ async fn delete_label_rows(
 }
 
 pub(super) async fn remove_label(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = super::shared::task_id(change)?;
     let label = str_payload(&change.payload, "label")?;
     sqlx::query("DELETE FROM task_labels WHERE workspace_id = ? AND task_id = ? AND label = ?")

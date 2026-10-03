@@ -1641,3 +1641,122 @@ async fn cli_drain_stops_promptly_behind_missing_local_image_and_still_pulls() {
         ]
     );
 }
+
+#[tokio::test]
+async fn workspace_move_routes_late_images_and_preserves_download_and_pruning() {
+    let f = fixture().await;
+    converge(&f).await;
+    let source = f.seed.list_workspaces().await.unwrap().remove(0);
+    let target = f.seed.create_workspace("Moved").await.unwrap();
+    f.seed.create_project(&target, "Destination").await.unwrap();
+    converge(&f).await;
+    let task = f
+        .seed
+        .export_data("now".into())
+        .await
+        .unwrap()
+        .tables
+        .task_attachments[0]
+        .task_id
+        .clone();
+    let late_reference = add_image_to_database(&f.peer, &blobs(&f.peer), &source, &task, 13).await;
+    f.seed
+        .move_tasks(
+            &source,
+            aven_core::operations::MoveTasksInput {
+                task_ids: vec![task.clone()],
+                target_workspace: target.clone(),
+                target_project: "Destination".into(),
+            },
+        )
+        .await
+        .unwrap();
+    converge(&f).await;
+    assert_quiescent(&[&f.seed, &f.peer]).await;
+    for db in [&f.seed, &f.peer] {
+        let export = db.export_data("now".into()).await.unwrap();
+        assert!(
+            export
+                .tables
+                .task_attachments
+                .iter()
+                .filter(|a| a.task_id == task)
+                .all(|a| a.workspace_id == target.id)
+        );
+        assert!(
+            export
+                .tables
+                .task_attachments
+                .iter()
+                .any(|a| a.attachment_id == late_reference)
+        );
+        assert_eq!(db.encrypted_image_downloads_remaining().await.unwrap(), 0);
+        assert_eq!(
+            scalar(db, "SELECT count(*) FROM conflicts WHERE resolved=0").await,
+            0
+        );
+    }
+    let client = Client::new(&f.origin).unwrap();
+    let record = f
+        .peer
+        .export_data("now".into())
+        .await
+        .unwrap()
+        .tables
+        .task_attachments
+        .into_iter()
+        .find(|a| a.attachment_id == late_reference)
+        .unwrap();
+    let path = aven_core::attachments::object_path(&blobs(&f.seed), &record.sha256).unwrap();
+    std::fs::remove_file(path).unwrap();
+    sqlx::query("UPDATE blob_inventory SET available=0 WHERE sha256=?")
+        .bind(&record.sha256)
+        .execute(&mut *aven_core::test_support::acquire(&f.seed).await.unwrap())
+        .await
+        .unwrap();
+    drain(&client, &f.seed_store, &f.seed).await;
+    assert_eq!(
+        f.seed.encrypted_image_downloads_remaining().await.unwrap(),
+        0
+    );
+    f.seed
+        .update_task(
+            &target,
+            &task,
+            TaskUpdate {
+                deleted: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    converge(&f).await;
+    assert_eq!(
+        scalar_after_prune_pass(
+            &f.server,
+            "SELECT count(*) FROM server_e2ee_images WHERE unreferenced_at IS NOT NULL"
+        )
+        .await,
+        2
+    );
+    f.seed
+        .update_task(
+            &target,
+            &task,
+            TaskUpdate {
+                deleted: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    converge(&f).await;
+    assert_eq!(
+        scalar_after_prune_pass(
+            &f.server,
+            "SELECT count(*) FROM server_e2ee_images WHERE unreferenced_at IS NOT NULL"
+        )
+        .await,
+        0
+    );
+}

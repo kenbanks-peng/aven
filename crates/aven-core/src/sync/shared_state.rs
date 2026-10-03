@@ -432,6 +432,7 @@ async fn install_in_transaction(
     }
     let local_seq = t.changes.iter().map(|row| row.local_seq).max().unwrap_or(0);
     db::set_meta(conn, "local_seq", &local_seq.to_string()).await?;
+    crate::sync::apply::rebuild_task_placements(conn).await?;
     data_safety::ensure_integrity_ok(
         &crate::data_safety::integrity_report_in_transaction(conn).await?,
     )?;
@@ -978,7 +979,8 @@ pub(crate) async fn ensure_empty_domain(conn: &mut sqlx::SqliteConnection) -> Re
            + (SELECT count(*) FROM shared_history_provenance)
            + (SELECT count(*) FROM local_shared_capture_journal)
            + (SELECT count(*) FROM local_e2ee_dependency_baseline)
-           + (SELECT count(*) FROM local_e2ee_dependency_edges)",
+           + (SELECT count(*) FROM local_e2ee_dependency_edges)
+           + (SELECT count(*) FROM local_e2ee_epic_edges)",
     )
     .fetch_one(conn)
     .await?;

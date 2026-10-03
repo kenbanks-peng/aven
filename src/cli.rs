@@ -47,8 +47,8 @@ pub(crate) use sync::{
     ResetArgs, ServerArgs, ServerSetupArgs, ServerSubcommand, SetupArgs, SyncArgs, SyncSubcommand,
 };
 pub(crate) use tasks::{
-    AddArgs, BulkUpdateArgs, ContextArgs, ListArgs, NoteArgs, NoteDeleteArgs, PrimeArgs, RefArgs,
-    ShowArgs, TaskEditArgs, TaskSearchArgs, TextCommand, TextSubcommand,
+    AddArgs, BulkUpdateArgs, ContextArgs, ListArgs, MoveArgs, NoteArgs, NoteDeleteArgs, PrimeArgs,
+    RefArgs, ShowArgs, TaskEditArgs, TaskSearchArgs, TextCommand, TextSubcommand,
 };
 #[cfg(test)]
 pub(crate) use tui::TuiPriorityArg;
@@ -99,6 +99,8 @@ pub(crate) enum Commands {
     /// Edit task fields
     #[command(after_long_help = EDIT_EXAMPLES)]
     Edit(TaskEditArgs),
+    /// Move tasks to another workspace
+    Move(MoveArgs),
     /// Check for and install an aven update
     Update(SelfUpdateArgs),
     /// Append a note to a task

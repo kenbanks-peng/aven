@@ -9,7 +9,7 @@ use crate::attachments::validation::{
     validate_media_type,
 };
 use crate::change_log::op_type;
-use crate::ids::{BASE32, MetadataFieldId, ProjectId, WorkspaceId};
+use crate::ids::{BASE32, MetadataFieldId, ProjectId, TaskId, WorkspaceId};
 use crate::task_fields::TaskField;
 
 mod changes;
@@ -61,6 +61,71 @@ pub struct ChangeWire {
     pub base_version: Option<String>,
     pub created_at: String,
     pub server_seq: Option<i64>,
+}
+
+pub const MAX_MOVE_TASKS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTaskMetadataSnapshot {
+    pub(crate) field_id: MetadataFieldId,
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTaskSnapshot {
+    pub(crate) task_id: TaskId,
+    pub(crate) labels: Vec<String>,
+    pub(crate) metadata: Vec<MoveTaskMetadataSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveDependencySnapshot {
+    pub(crate) task_id: TaskId,
+    pub(crate) depends_on_task_id: TaskId,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveRelatedSnapshot {
+    pub(crate) task_a_id: TaskId,
+    pub(crate) task_b_id: TaskId,
+    pub(crate) linked: bool,
+    pub(crate) last_change_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveEpicSnapshot {
+    pub(crate) child_task_id: TaskId,
+    pub(crate) epic_task_id: TaskId,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTasksPayload {
+    pub(crate) source_workspace_id: WorkspaceId,
+    pub(crate) target_workspace_id: WorkspaceId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project_key: String,
+    pub(crate) project_name: String,
+    pub(crate) project_prefix: String,
+    pub(crate) tasks: Vec<MoveTaskSnapshot>,
+    pub(crate) dependencies: Vec<MoveDependencySnapshot>,
+    pub(crate) related: Vec<MoveRelatedSnapshot>,
+    pub(crate) epics: Vec<MoveEpicSnapshot>,
+}
+
+impl MoveTasksPayload {
+    pub(crate) fn from_change(change: &ChangeWire) -> Result<Self> {
+        changes::validate_move_tasks(change)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +240,9 @@ pub(crate) fn validate_local_change_shape(change: &ChangeWire) -> Result<()> {
     serialize_change_payload(&change.payload)?;
 
     match change.op_type.as_str() {
+        op_type::MOVE_TASKS => {
+            changes::validate_move_tasks(change)?;
+        }
         op_type::PUBLISH_DEVICE_LABEL => changes::validate_publish_device_label(change)?,
         op_type::CREATE_WORKSPACE => changes::validate_create_workspace(change)?,
         op_type::SET_WORKSPACE_FIELD => changes::validate_set_workspace_field(change)?,

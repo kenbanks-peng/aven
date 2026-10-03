@@ -4,12 +4,17 @@ use sqlx::SqliteConnection;
 
 use crate::sync::wire::ChangeWire;
 
-use super::shared::{str_payload, task_id, workspace_id_payload};
+use super::shared::{
+    relationship_endpoint_is_current, str_payload, task_id, task_operation_workspace_id_payload,
+};
 
 pub(super) async fn add_epic_link(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let child_task_id = task_id(change)?;
     let epic_task_id: TaskId = str_payload(&change.payload, "epic_task_id")?.parse()?;
+    if !relationship_endpoint_is_current(conn, &workspace_id, &epic_task_id).await? {
+        return Ok(());
+    }
     ensure_epic_tasks_can_link(conn, &workspace_id, &child_task_id, &epic_task_id).await?;
     sqlx::query("UPDATE tasks SET is_epic = 1 WHERE workspace_id = ? AND id = ?")
         .bind(&workspace_id)
@@ -65,9 +70,12 @@ pub(super) async fn remove_epic_link(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
 ) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let child_task_id = task_id(change)?;
     let epic_task_id: TaskId = str_payload(&change.payload, "epic_task_id")?.parse()?;
+    if !relationship_endpoint_is_current(conn, &workspace_id, &epic_task_id).await? {
+        return Ok(());
+    }
     sqlx::query(
         "DELETE FROM task_epic_links
          WHERE workspace_id = ? AND child_task_id = ? AND epic_task_id = ?",

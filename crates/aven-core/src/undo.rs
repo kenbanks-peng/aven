@@ -1,6 +1,6 @@
 use crate::ids::{ProjectId, WorkspaceId};
 use crate::operations::{RecurrenceStructuralMutation, RecurrenceTaskMutation};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Result, bail, ensure};
 use sqlx::{Row, SqliteConnection};
@@ -591,6 +591,64 @@ pub(crate) async fn clear_pending_tui_undo_entries(conn: &mut SqliteConnection) 
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn discard_pending_tui_undo_for_tasks(
+    conn: &mut SqliteConnection,
+    task_ids: &HashSet<crate::ids::TaskId>,
+) -> Result<()> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, payload FROM tui_undo_entries WHERE undone_at IS NULL")
+            .fetch_all(&mut *conn)
+            .await?;
+    for (id, payload) in rows {
+        let payload: UndoPayload = serde_json::from_str(&payload)?;
+        if payload
+            .commands
+            .iter()
+            .flat_map(undo_command_task_ids)
+            .any(|task_id| task_ids.contains(task_id))
+        {
+            sqlx::query("DELETE FROM tui_undo_entries WHERE id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn undo_command_task_ids(command: &UndoCommand) -> Vec<&crate::ids::TaskId> {
+    match command {
+        UndoCommand::SetTaskField { task_id, .. }
+        | UndoCommand::SetTaskLabels { task_id, .. }
+        | UndoCommand::SetTaskMetadata { task_id, .. }
+        | UndoCommand::DeleteCreatedTask { task_id, .. }
+        | UndoCommand::SetNoteBody { task_id, .. }
+        | UndoCommand::RestoreDeletedNote { task_id, .. }
+        | UndoCommand::DeleteCreatedNote { task_id, .. }
+        | UndoCommand::RestoreConflictResolution { task_id, .. } => vec![task_id],
+        UndoCommand::AddTaskDependency {
+            task_id,
+            depends_on_task_id,
+        }
+        | UndoCommand::RemoveTaskDependency {
+            task_id,
+            depends_on_task_id,
+        } => vec![task_id, depends_on_task_id],
+        UndoCommand::SetTaskRelatedLink {
+            task_id,
+            related_task_id,
+            ..
+        } => vec![task_id, related_task_id],
+        UndoCommand::AddEpicChild { epic_id, child_id }
+        | UndoCommand::RemoveEpicChild { epic_id, child_id } => vec![epic_id, child_id],
+        UndoCommand::DeleteCreatedProject { .. }
+        | UndoCommand::SetProjectMetadata { .. }
+        | UndoCommand::DeleteCreatedLabel { .. }
+        | UndoCommand::SetLabelName { .. }
+        | UndoCommand::RestoreDeletedLabel { .. } => Vec::new(),
+    }
 }
 
 pub(crate) async fn latest_tui_undo_presentation(

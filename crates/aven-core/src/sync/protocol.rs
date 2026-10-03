@@ -81,6 +81,7 @@ pub(crate) async fn establish_protocol(conn: &mut SqliteConnection, protocol: u3
 /// These literal names are the released baseline, not aliases to extensible domain enums.
 const BASELINE_OPERATIONS: &[&str] = &[
     "create_task",
+    "move_tasks",
     "set_field",
     "resolve_field",
     "label_add",
@@ -235,7 +236,7 @@ pub(crate) fn validate_operation(
     Ok(())
 }
 
-fn required_protocol(op: &str) -> Result<u32> {
+pub(crate) fn required_protocol(op: &str) -> Result<u32> {
     #[cfg(test)]
     match op {
         "test_protocol_19" => return Ok(19),

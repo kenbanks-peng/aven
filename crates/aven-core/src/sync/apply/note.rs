@@ -3,10 +3,10 @@ use sqlx::SqliteConnection;
 
 use crate::sync::wire::ChangeWire;
 
-use super::shared::{str_payload, task_field_workspace_id_payload, task_id, workspace_id_payload};
+use super::shared::{str_payload, task_id, task_operation_workspace_id_payload};
 
 pub(super) async fn edit_note(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = task_id(change)?;
     let note_id = str_payload(&change.payload, "note_id")?;
     let body = str_payload(&change.payload, "body")?;
@@ -32,7 +32,7 @@ pub(super) async fn edit_note(conn: &mut SqliteConnection, change: &ChangeWire) 
 }
 
 pub(super) async fn delete_note(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = task_id(change)?;
     let note_id = str_payload(&change.payload, "note_id")?;
     let deleted_at = str_payload(&change.payload, "deleted_at")?;
@@ -56,7 +56,7 @@ pub(super) async fn delete_note(conn: &mut SqliteConnection, change: &ChangeWire
 }
 
 pub(super) async fn add_note(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = task_id(change)?;
     let note_id = str_payload(&change.payload, "note_id")?;
     let body = str_payload(&change.payload, "body")?;

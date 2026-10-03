@@ -545,6 +545,33 @@ aven edit APP-7KQ9 --remove-metadata review-state
 aven edit APP-7KQ0 --epic on
 ```
 
+### `aven move`
+
+Move tasks to an existing project in another workspace.
+
+```sh
+aven move <task-ref>... --to-workspace <workspace> --project <project>
+```
+
+The active workspace is the source. Task IDs and ref suffixes stay the same;
+the project prefix changes. Notes, labels, custom metadata, attachments and
+internal relationships move with the tasks. Labels and metadata fields match by
+name or key in the destination. Moving an epic includes its complete subtree,
+including deleted children.
+
+A move is atomic and cannot be undone through TUI undo. It refuses recurring
+tasks, unresolved conflicts and live dependencies, related links or epic links
+crossing the move boundary. A group may contain at most 256 tasks; its snapshot
+must fit the 64 KiB operation payload limit. If validation fails, nothing moves.
+
+```sh
+aven --workspace personal move APP-7KQ9 APP-7KQ0 \
+  --to-workspace work --project app
+```
+
+The summary reports the moved count and source and destination workspace keys.
+Devices sharing the vault must support workspace moves.
+
 ### `aven note`
 
 Append a durable note to a task.

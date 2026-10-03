@@ -12,7 +12,9 @@ use super::conflict;
 use super::label::create_or_update_task_label;
 use super::payload::CreateTaskPayload;
 use super::project::ensure_project_for_payload;
-use super::shared::{str_payload, task_field_workspace_id_payload, task_id, workspace_id_payload};
+use super::shared::{
+    str_payload, task_id, task_operation_workspace_id_payload, workspace_id_payload,
+};
 
 pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
     let p = CreateTaskPayload::from_change(change)?;
@@ -65,6 +67,14 @@ pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire
     .bind(&available_at)
     .bind(&due_on)
     .bind(is_epic)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_workspace_history(task_id, workspace_id)
+         VALUES (?, ?)",
+    )
+    .bind(&task_id)
+    .bind(&workspace_id)
     .execute(&mut *conn)
     .await?;
     if let Some(labels) = change.payload.get("labels").and_then(Value::as_array) {
@@ -216,7 +226,20 @@ pub async fn set_field(
     let task_field = TaskField::parse_or_unknown(field)?;
     let field = task_field.as_str();
     let mut value = str_payload(&change.payload, "value")?;
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let payload_workspace_id: Option<crate::ids::WorkspaceId> = change
+        .payload
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::parse)
+        .transpose()?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
+    if task_field.is_project()
+        && payload_workspace_id
+            .as_ref()
+            .is_some_and(|payload| payload != &workspace_id)
+    {
+        return Ok(());
+    }
     let mut resolved_project_id = None;
     if task_field.is_project() {
         let project_id = str_payload(&change.payload, "project_id")?;

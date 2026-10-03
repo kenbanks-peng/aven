@@ -129,6 +129,16 @@ pub(crate) async fn reconcile_child(
     workspace_id: &str,
     child_id: &str,
 ) -> Result<()> {
+    if get_meta(conn, "e2ee_association").await?.is_some()
+        && crate::sync::encrypted_tail::graphs::owns_graphs(conn).await?
+    {
+        return Ok(());
+    }
+    let moved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes c, json_each(c.payload, '$.tasks') t WHERE c.op_type = 'move_tasks' AND json_extract(t.value, '$.task_id') = ?)")
+        .bind(child_id).fetch_one(&mut *conn).await?;
+    if moved {
+        return Ok(());
+    }
     let operations = sqlx::query_as::<_, Operation>(
         "SELECT op_type, json_extract(payload, '$.epic_task_id') AS epic_task_id,
                 COALESCE(json_extract(payload, '$.created_at'), created_at) AS created_at

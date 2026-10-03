@@ -47,35 +47,62 @@ pub(super) async fn workspace_id_payload(
     Ok(workspace.id)
 }
 
-pub(super) async fn task_field_workspace_id_payload(
+pub(super) async fn task_operation_workspace_id_payload(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
 ) -> Result<WorkspaceId> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let payload_workspace_id = workspace_id_payload(conn, change).await?;
     if change
         .payload
         .get("workspace_id")
         .and_then(Value::as_str)
         .is_none()
     {
-        return Ok(workspace_id);
+        return Ok(payload_workspace_id);
     }
     let task_workspace_id =
         sqlx::query_scalar::<_, WorkspaceId>("SELECT workspace_id FROM tasks WHERE id = ?")
             .bind(&change.entity_id)
             .fetch_optional(&mut *conn)
             .await?;
-    if let Some(task_workspace_id) = task_workspace_id
-        && task_workspace_id != workspace_id
-    {
-        bail!(
-            "error invalid-task-workspace task_id={} workspace_id={} task_workspace_id={}",
-            change.entity_id,
-            workspace_id,
-            task_workspace_id
-        );
+    let Some(task_workspace_id) = task_workspace_id else {
+        return Ok(payload_workspace_id);
+    };
+    if task_workspace_id == payload_workspace_id {
+        return Ok(task_workspace_id);
     }
-    Ok(workspace_id)
+    let historical: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM task_workspace_history
+         WHERE task_id = ? AND workspace_id = ?)",
+    )
+    .bind(&change.entity_id)
+    .bind(&payload_workspace_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if historical {
+        return Ok(task_workspace_id);
+    }
+    bail!(
+        "error invalid-task-workspace task_id={} workspace_id={} task_workspace_id={}",
+        change.entity_id,
+        payload_workspace_id,
+        task_workspace_id
+    );
+}
+
+pub(super) async fn relationship_endpoint_is_current(
+    conn: &mut SqliteConnection,
+    workspace_id: &WorkspaceId,
+    task_id: &TaskId,
+) -> Result<bool> {
+    let current: Option<WorkspaceId> =
+        sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    Ok(current
+        .as_ref()
+        .is_none_or(|current| current == workspace_id))
 }
 
 async fn ensure_workspace_exists(

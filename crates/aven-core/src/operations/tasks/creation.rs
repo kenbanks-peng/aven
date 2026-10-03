@@ -308,6 +308,14 @@ pub(super) async fn insert_task(
             .set("created_at", ts),
     )
     .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_workspace_history(task_id, workspace_id)
+         VALUES (?, ?)",
+    )
+    .bind(&id)
+    .bind(&workspace.id)
+    .execute(&mut *conn)
+    .await?;
     for field in TaskField::VERSIONED {
         set_field_version(conn, &id, field.as_str(), &change_id).await?;
     }

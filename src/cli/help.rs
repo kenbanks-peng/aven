@@ -36,6 +36,7 @@ pub(super) const HELP_SECTIONS: &[HelpSection] = &[
             "context",
             "show",
             "edit",
+            "move",
             "note",
             "note-delete",
             "dep",

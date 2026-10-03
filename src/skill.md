@@ -58,6 +58,7 @@ aven show APP-7KQ9 --full
 ```sh
 aven edit APP-7KQ9 --status active
 aven edit APP-7KQ9 --title "Clearer title" --priority medium
+aven --workspace personal move APP-7KQ9 --to-workspace work --project app
 aven note APP-7KQ9 --stdin <<'EOF'
 Implemented the parser and documented the remaining edge case.
 EOF
@@ -65,6 +66,9 @@ aven edit APP-7KQ9 --status done
 ```
 
 - Mark work `active` when starting it and `done` only when the work is complete.
+- `move` preserves task IDs and associated data. Its destination project must
+  already exist, and linked tasks must move together so relationships do not
+  cross workspace boundaries.
 - Notes are append-style durable context for decisions, blockers, partial
   progress, and review findings. Keep scratch work elsewhere.
 - Inspect dependency and conflict context before changing status or task order.

@@ -90,6 +90,9 @@ pub(super) async fn reconcile(
     prefix: i64,
     workspace: &str,
 ) -> Result<()> {
+    if super::graphs::owns_graphs(conn).await? {
+        return Ok(());
+    }
     let dangling: bool = sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM local_e2ee_dependency_edges e WHERE e.workspace_id = ?

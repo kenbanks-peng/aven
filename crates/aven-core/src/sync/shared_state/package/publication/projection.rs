@@ -67,7 +67,32 @@ pub(super) fn images(t: &ExportTables, mappings: &[Mapping], mut result: Images)
     let mut history = t.changes.iter().collect::<Vec<_>>();
     history.sort_by_key(|r| r.server_seq);
     let mut states: HashMap<(String, String), ParentState> = HashMap::new();
+    let mut placements = HashMap::new();
     for change in history {
+        if change.op_type == "move_tasks" {
+            let payload: crate::sync::wire::MoveTasksPayload =
+                serde_json::from_str(&change.payload).map_err(|_| Error::Invalid)?;
+            for task in payload.tasks {
+                let current = placements
+                    .get(task.task_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| payload.source_workspace_id.to_string());
+                if let Some(state) = states.remove(&(current, task.task_id.to_string())) {
+                    states.insert(
+                        (
+                            payload.target_workspace_id.to_string(),
+                            task.task_id.to_string(),
+                        ),
+                        state,
+                    );
+                }
+                placements.insert(
+                    task.task_id.to_string(),
+                    payload.target_workspace_id.to_string(),
+                );
+            }
+            continue;
+        }
         if change.entity_type != "task"
             || !(change.op_type == "create_task"
                 || (matches!(change.op_type.as_str(), "set_field" | "resolve_field")
@@ -77,7 +102,11 @@ pub(super) fn images(t: &ExportTables, mappings: &[Mapping], mut result: Images)
         }
         let payload: serde_json::Value =
             serde_json::from_str(&change.payload).map_err(|_| Error::Invalid)?;
-        let workspace = payload["workspace_id"].as_str().ok_or(Error::Invalid)?;
+        let authored = payload["workspace_id"].as_str().ok_or(Error::Invalid)?;
+        let workspace = placements
+            .get(&change.entity_id)
+            .map(String::as_str)
+            .unwrap_or(authored);
         let state = states
             .entry((workspace.to_owned(), change.entity_id.clone()))
             .or_default();

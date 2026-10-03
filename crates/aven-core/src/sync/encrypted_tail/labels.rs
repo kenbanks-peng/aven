@@ -25,6 +25,11 @@ pub(super) async fn reconcile(
     prefix: i64,
     change: &ChangeWire,
 ) -> Result<()> {
+    if change.entity_type == "task"
+        && super::moves::is_moved(conn, prefix, &change.entity_id).await?
+    {
+        return Ok(());
+    }
     let names = match change.op_type.as_str() {
         op_type::LABEL_ADD | op_type::LABEL_REMOVE => vec![text(change, "label")?.to_owned()],
         op_type::CREATE_LABEL | op_type::LABEL_DELETE | op_type::LABEL_RESTORE => {
@@ -77,6 +82,9 @@ pub(super) async fn reconcile_names(
             .await?
         };
         for task in tasks {
+            if super::moves::is_moved(conn, prefix, &task).await? {
+                continue;
+            }
             reconcile_pair(conn, prefix, workspace, &task, &label).await?;
         }
         i += 1;

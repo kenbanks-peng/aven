@@ -64,6 +64,8 @@ struct FixtureOptions {
     unavailable_image: bool,
     /// A recurring task with an edited occurrence.
     recurrence: bool,
+    /// Moves the captured tasks before publishing the bootstrap snapshot.
+    move_before_capture: bool,
     /// Counts HTTP requests and body bytes for the benchmark.
     count_http: bool,
 }
@@ -85,6 +87,7 @@ async fn fixture_with(options: FixtureOptions) -> Fixture {
         unavailable_image: unavailable,
         recurrence,
         count_http,
+        move_before_capture,
     } = options;
     let root = tempfile::tempdir().unwrap();
     let (seed, seed_store, authority, _) = e2ee_http::fixture(root.path()).await;
@@ -134,7 +137,7 @@ async fn fixture_with(options: FixtureOptions) -> Fixture {
             .unwrap();
     }
     let mut snapshot_note = None;
-    if shared || note_after_capture.is_some() || relations || recurrence {
+    if shared || note_after_capture.is_some() || relations || recurrence || move_before_capture {
         let capture = seed
             .resume_local_shared_state_never_dispatched()
             .await
@@ -215,7 +218,29 @@ async fn fixture_with(options: FixtureOptions) -> Fixture {
             seed.edit_note(&workspace, &task.id, &note.note_id, "snapshot body".into())
                 .await
                 .unwrap();
-            snapshot_note = Some((workspace, task.id, note.note_id));
+            snapshot_note = Some((workspace.clone(), task.id, note.note_id));
+        }
+        if move_before_capture {
+            let target = seed.create_workspace("Moved").await.unwrap();
+            seed.create_project(&target, "Moved").await.unwrap();
+            let tasks = {
+                let mut conn = aven_core::test_support::acquire(&seed).await.unwrap();
+                sqlx::query_scalar("SELECT id FROM tasks WHERE workspace_id=?")
+                    .bind(&workspace.id)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .unwrap()
+            };
+            seed.move_tasks(
+                &workspace,
+                aven_core::operations::MoveTasksInput {
+                    task_ids: tasks,
+                    target_workspace: target,
+                    target_project: "Moved".into(),
+                },
+            )
+            .await
+            .unwrap();
         }
         seed.capture_local_shared_state_never_dispatched()
             .await

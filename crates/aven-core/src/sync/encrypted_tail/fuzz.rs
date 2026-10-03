@@ -101,6 +101,8 @@ pub(crate) fn apply(data: &[u8]) {
                     if let Some(workspace) = dependencies::affected_workspace(&change)? {
                         dependencies::reconcile(&mut tx, 0, workspace).await?;
                     }
+                    moves::reconcile(&mut tx, 0).await?;
+                    graphs::reconcile(&mut tx, 0).await?;
                     anyhow::Ok(())
                 };
                 if reconciled.await.is_err() {
@@ -161,6 +163,40 @@ fn has_float(value: &serde_json::Value) -> bool {
 /// Operations from a small local history, valid for the encrypted tail.
 fn changes() -> Vec<ChangeWire> {
     crate::sync::fuzz::with_history(async |db| {
+        let source = db.list_workspaces().await.unwrap().remove(0);
+        db.create_project(&source, "Move source").await.unwrap();
+        let target = db.create_workspace("Move destination").await.unwrap();
+        db.create_project(&target, "Destination").await.unwrap();
+        let task = db
+            .create_task(
+                &source,
+                crate::operations::TaskDraft {
+                    title: "Movable fuzz task".into(),
+                    description: String::new(),
+                    project: Some("Move source".into()),
+                    status: "todo".into(),
+                    priority: "none".into(),
+                    source: crate::choices::TaskSource::Cli,
+                    labels: Vec::new(),
+                    metadata: Vec::new(),
+                    available_at: None,
+                    due_on: None,
+                    is_epic: false,
+                },
+            )
+            .await
+            .unwrap()
+            .task;
+        db.move_tasks(
+            &source,
+            crate::operations::MoveTasksInput {
+                task_ids: vec![task.id],
+                target_workspace: target,
+                target_project: "Destination".into(),
+            },
+        )
+        .await
+        .unwrap();
         let mut conn = db.acquire_writer().await.unwrap();
         let ids: Vec<String> = sqlx::query_scalar("SELECT change_id FROM changes ORDER BY rowid")
             .fetch_all(&mut *conn)

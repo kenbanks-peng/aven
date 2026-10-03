@@ -273,6 +273,28 @@ pub(super) fn decode_projection(input: &[u8]) -> Result<Projection> {
                 }
             }
         }
+        4 => {
+            let source = std::str::from_utf8(r.blob(16)?)?.to_owned();
+            let target = std::str::from_utf8(r.blob(16)?)?.to_owned();
+            source.parse::<crate::ids::WorkspaceId>()?;
+            target.parse::<crate::ids::WorkspaceId>()?;
+            valid(source != target)?;
+            let count = u16::from_be_bytes(r.array()?) as usize;
+            valid((1..=crate::sync::wire::MAX_MOVE_TASKS).contains(&count))?;
+            let mut tasks: Vec<String> = Vec::with_capacity(count);
+            for _ in 0..count {
+                let mut bytes = [0_u8; 16];
+                bytes[6..].copy_from_slice(r.take(10)?);
+                let task = crate::ids::encode_crockford(bytes[6..].try_into()?);
+                valid(tasks.last().is_none_or(|previous| previous < &task))?;
+                tasks.push(task);
+            }
+            Projection::Move {
+                source,
+                target,
+                tasks,
+            }
+        }
         _ => anyhow::bail!("error encrypted-tail-projection"),
     };
     valid(r.0.is_empty())?;
@@ -308,6 +330,41 @@ mod tests {
         let mut forged = Vec::new();
         bytes(&mut forged, &header);
         bytes(&mut forged, &body);
+        assert!(parse(&forged).is_ok());
+        assert!(open(&a, &forged).is_err());
+    }
+    #[test]
+    fn move_projection_is_bounded_canonical_and_authenticated() {
+        let tasks = (0..256_u16)
+            .map(|n| {
+                let mut id = [0_u8; 10];
+                id[8..].copy_from_slice(&n.to_be_bytes());
+                crate::ids::encode_crockford(&id)
+            })
+            .collect::<Vec<_>>();
+        let projection = Projection::Move {
+            source: "0000000000000000".into(),
+            target: "1111111111111111".into(),
+            tasks,
+        };
+        let bytes = projection.encode();
+        assert!(bytes.len() < 4096);
+        assert!(Projection::decode(&bytes).unwrap() == projection);
+        for n in 0..bytes.len() {
+            assert!(Projection::decode(&bytes[..n]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(Projection::decode(&trailing).is_err());
+        let mut duplicate = bytes.clone();
+        let last = duplicate.len() - 10;
+        let previous = duplicate[last - 10..last].to_vec();
+        duplicate[last..].copy_from_slice(&previous);
+        assert!(Projection::decode(&duplicate).is_err());
+        let a = super::super::tests::authority();
+        let c = super::super::tests::change();
+        let plain = serde_json::to_vec(&c).unwrap();
+        let forged = seal_raw(&a, c.change_id.as_bytes(), &bytes, &plain);
         assert!(parse(&forged).is_ok());
         assert!(open(&a, &forged).is_err());
     }

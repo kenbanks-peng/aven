@@ -163,6 +163,12 @@ pub(crate) async fn accept(
             descriptor,
             ..
         } => {
+            let workspace: String =
+                sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = ?")
+                    .bind(&task)
+                    .fetch_optional(&mut *conn)
+                    .await?
+                    .unwrap_or(workspace);
             let d = Descriptor::decode(&descriptor)?;
             let sha = change.payload["sha256"]
                 .as_str()
@@ -195,6 +201,12 @@ pub(crate) async fn accept(
             task,
             reference,
         } => {
+            let workspace: String =
+                sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = ?")
+                    .bind(&task)
+                    .fetch_optional(&mut *conn)
+                    .await?
+                    .unwrap_or(workspace);
             let n=sqlx::query("UPDATE local_e2ee_image_references SET deleted=1 WHERE workspace=? AND reference=? AND parent=?").bind(workspace).bind(reference).bind(task).execute(&mut *conn).await?.rows_affected();
             valid(n == 1)?;
         }
@@ -283,7 +295,7 @@ pub(in crate::sync::encrypted_tail) async fn stage(
         .execute(&mut *conn)
         .await?;
     }
-    let (deleted,version):(bool,Option<String>)=sqlx::query_as("SELECT t.deleted,(SELECT version FROM field_versions f WHERE f.workspace_id=t.workspace_id AND f.entity_type='task' AND f.entity_id=t.id AND f.field='deleted') FROM tasks t WHERE t.workspace_id=? AND t.id=?").bind(c.payload["workspace_id"].as_str()).bind(&c.entity_id).fetch_one(&mut *conn).await?;
+    let (deleted,version):(bool,Option<String>)=sqlx::query_as("SELECT t.deleted,(SELECT version FROM field_versions f WHERE f.workspace_id=t.workspace_id AND f.entity_type='task' AND f.entity_id=t.id AND f.field='deleted') FROM tasks t WHERE t.id=?").bind(&c.entity_id).fetch_one(&mut *conn).await?;
     let projection = Projection::Ref {
         workspace: c.payload["workspace_id"]
             .as_str()

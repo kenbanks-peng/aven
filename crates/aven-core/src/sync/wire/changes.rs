@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 use crate::change_log::op_type;
 use crate::choices::TaskSource;
@@ -129,6 +131,110 @@ pub(super) fn validate_task_metadata(change: &ChangeWire) -> Result<()> {
     }
 
     Ok(())
+}
+
+pub(super) fn validate_move_tasks(change: &ChangeWire) -> Result<MoveTasksPayload> {
+    ensure_entity_type(change, "task_move")?;
+    ensure_sync_id("entity_id", &change.entity_id)?;
+    if change.field.is_some() || change.base_version.is_some() {
+        bail!("error invalid-sync-change move-envelope");
+    }
+    let payload: MoveTasksPayload = serde_json::from_value(change.payload.clone())
+        .context("error invalid-sync-change move payload")?;
+    if payload.source_workspace_id == payload.target_workspace_id {
+        bail!("error invalid-sync-change move-same-workspace");
+    }
+    if payload.tasks.is_empty() || payload.tasks.len() > MAX_MOVE_TASKS {
+        bail!("error invalid-sync-change move-task-count");
+    }
+    let mut task_ids = HashSet::with_capacity(payload.tasks.len());
+    let mut previous_task = None;
+    for task in &payload.tasks {
+        if previous_task
+            .as_ref()
+            .is_some_and(|previous| previous >= &task.task_id)
+        {
+            bail!("error invalid-sync-change move-task-order");
+        }
+        task_ids.insert(task.task_id.clone());
+        previous_task = Some(task.task_id.clone());
+        if task.labels.windows(2).any(|pair| pair[0] >= pair[1])
+            || task.labels.iter().any(|label| {
+                label.is_empty() || crate::labels::normalize_label(label) != label.as_str()
+            })
+        {
+            bail!("error invalid-sync-change move-labels");
+        }
+        let mut previous_key: Option<&str> = None;
+        let mut field_ids = HashSet::new();
+        let mut total_bytes = 0_usize;
+        for metadata in &task.metadata {
+            let normalized = crate::metadata::normalize_metadata_key(&metadata.key)
+                .context("error invalid-sync-change move-metadata-key")?;
+            if normalized != metadata.key
+                || previous_key.is_some_and(|previous| previous >= metadata.key.as_str())
+                || !field_ids.insert(metadata.field_id.clone())
+                || metadata
+                    .value
+                    .as_ref()
+                    .is_some_and(|value| value.len() > crate::metadata::MAX_METADATA_VALUE_BYTES)
+            {
+                bail!("error invalid-sync-change move-metadata");
+            }
+            if let Some(version) = &metadata.version {
+                ensure_sync_id("metadata version", version)?;
+            }
+            total_bytes += metadata.value.as_ref().map_or(0, String::len);
+            previous_key = Some(&metadata.key);
+        }
+        if task
+            .metadata
+            .iter()
+            .filter(|value| value.value.is_some())
+            .count()
+            > crate::metadata::MAX_METADATA_VALUES
+            || total_bytes > crate::metadata::MAX_METADATA_TOTAL_BYTES
+        {
+            bail!("error invalid-sync-change move-metadata-limit");
+        }
+    }
+    let mut dependencies = HashSet::new();
+    for dependency in &payload.dependencies {
+        if dependency.task_id == dependency.depends_on_task_id
+            || !task_ids.contains(&dependency.task_id)
+            || !task_ids.contains(&dependency.depends_on_task_id)
+            || !dependencies.insert((
+                dependency.task_id.clone(),
+                dependency.depends_on_task_id.clone(),
+            ))
+        {
+            bail!("error invalid-sync-change move-dependency");
+        }
+        validate_timestamp_value("move dependency created_at", &dependency.created_at)?;
+    }
+    let mut related_pairs = HashSet::new();
+    for related in &payload.related {
+        if related.task_a_id >= related.task_b_id
+            || !task_ids.contains(&related.task_a_id)
+            || !task_ids.contains(&related.task_b_id)
+            || !related_pairs.insert((related.task_a_id.clone(), related.task_b_id.clone()))
+        {
+            bail!("error invalid-sync-change move-related");
+        }
+        ensure_sync_id("last_change_id", &related.last_change_id)?;
+    }
+    let mut epic_links = HashSet::new();
+    for epic in &payload.epics {
+        if epic.child_task_id == epic.epic_task_id
+            || !task_ids.contains(&epic.child_task_id)
+            || !task_ids.contains(&epic.epic_task_id)
+            || !epic_links.insert((epic.child_task_id.clone(), epic.epic_task_id.clone()))
+        {
+            bail!("error invalid-sync-change move-epic");
+        }
+        validate_timestamp_value("move epic created_at", &epic.created_at)?;
+    }
+    Ok(payload)
 }
 
 pub(super) fn validate_create_task(change: &ChangeWire) -> Result<()> {

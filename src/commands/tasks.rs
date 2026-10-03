@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use super::validation::{validate_optional_priority, validate_optional_status, validate_priority};
 use crate::cli::{
-    AddArgs, InternalNaturalAddArgs, ListArgs, RefArgs, ShowArgs, TaskEditArgs, TaskSearchArgs,
+    AddArgs, InternalNaturalAddArgs, ListArgs, MoveArgs, RefArgs, ShowArgs, TaskEditArgs,
+    TaskSearchArgs,
 };
 use crate::config::AppConfig;
 use crate::input::read_optional_text;
@@ -709,6 +710,56 @@ pub(crate) async fn cmd_edit(
     );
     Ok(())
 }
+pub(crate) async fn cmd_move(
+    database: &Database,
+    source_workspace: &Workspace,
+    args: MoveArgs,
+) -> Result<()> {
+    let target_workspace = database
+        .resolve_required_workspace(&args.to_workspace, "--to-workspace")
+        .await?;
+    let mut task_ids = Vec::with_capacity(args.task_refs.len());
+    for task_ref in &args.task_refs {
+        task_ids.push(
+            database
+                .resolve_task_ref(source_workspace, task_ref)
+                .await?
+                .id,
+        );
+    }
+    let outcome = database
+        .move_tasks(
+            source_workspace,
+            aven_core::operations::MoveTasksInput {
+                task_ids,
+                target_workspace: target_workspace.clone(),
+                target_project: args.project,
+            },
+        )
+        .await?;
+    let display_refs = database.display_ref_context(&target_workspace.id).await?;
+    for task_id in &outcome.task_ids {
+        let task = database
+            .resolve_task_ref(&target_workspace, task_id.as_str())
+            .await?;
+        println!(
+            "moved {} workspace={} project={} title={}",
+            display_refs.display_ref(&task),
+            target_workspace.key,
+            task.project_key,
+            quote(&task.title)
+        );
+    }
+    println!(
+        "moved={} from={} to={} project={}",
+        outcome.task_ids.len(),
+        source_workspace.key,
+        target_workspace.key,
+        outcome.target_project_key
+    );
+    Ok(())
+}
+
 pub(crate) async fn cmd_delete_restore(
     database: &Database,
     workspace: &Workspace,

@@ -10,7 +10,9 @@ use crate::metadata::{
 use crate::sync::wire::ChangeWire;
 use crate::types::MutableEntityType;
 
-use super::shared::{str_payload, task_id, workspace_id_payload};
+use super::shared::{
+    str_payload, task_id, task_operation_workspace_id_payload, workspace_id_payload,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct MetadataValuePayload {
@@ -313,7 +315,7 @@ async fn apply_task_value(
     change: &ChangeWire,
     present: bool,
 ) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = task_id(change)?;
     let remote_id: MetadataFieldId = str_payload(&change.payload, "field_id")?.parse()?;
     let key = str_payload(&change.payload, "key")?;
@@ -645,19 +647,35 @@ pub(super) async fn ensure_remote_field(
         insert_field_alias(conn, workspace_id, remote_id, &field.id).await?;
         return Ok(field);
     }
+    let occupied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metadata_fields WHERE id = ?)")
+            .bind(remote_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let local_id = if occupied {
+        use sha2::Digest;
+        let digest =
+            sha2::Sha256::digest(format!("aven/moved-metadata/{workspace_id}/{remote_id}"));
+        crate::ids::encode_crockford(digest[..10].try_into()?).parse()?
+    } else {
+        remote_id.clone()
+    };
     sqlx::query(
         "INSERT INTO metadata_fields(id, workspace_id, key, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(remote_id)
+    .bind(&local_id)
     .bind(workspace_id)
     .bind(&key)
     .bind(created_at)
     .bind(created_at)
     .execute(&mut *conn)
     .await?;
+    if local_id != *remote_id {
+        insert_field_alias(conn, workspace_id, remote_id, &local_id).await?;
+    }
     Ok(MetadataField {
-        id: remote_id.clone(),
+        id: local_id,
         workspace_id: workspace_id.clone(),
         key,
         created_at: created_at.to_string(),

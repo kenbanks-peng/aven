@@ -1,4 +1,4 @@
-mod apply;
+pub(crate) mod apply;
 pub mod base64_bytes;
 mod blob;
 pub mod bootstrap_staging;

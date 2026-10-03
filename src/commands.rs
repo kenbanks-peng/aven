@@ -41,7 +41,8 @@ pub(crate) use self::self_update::run as cmd_self_update;
 pub(crate) use self::skill::{install as cmd_skill_install, print as cmd_skill};
 pub(crate) use self::status::cmd_daemon_status;
 pub(crate) use self::tasks::{
-    cmd_add, cmd_delete_restore, cmd_edit, cmd_internal_natural_add, cmd_list, cmd_search, cmd_show,
+    cmd_add, cmd_delete_restore, cmd_edit, cmd_internal_natural_add, cmd_list, cmd_move,
+    cmd_search, cmd_show,
 };
 pub(crate) use self::text::cmd_text;
 pub(crate) use self::workspaces::cmd_workspace;

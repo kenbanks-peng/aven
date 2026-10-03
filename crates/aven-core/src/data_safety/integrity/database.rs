@@ -162,7 +162,9 @@ pub(super) async fn report_with_connection(conn: &mut SqliteConnection) -> Resul
              WHERE c.change_id = r.last_change_id
                AND c.entity_type = 'task' AND c.field = 'related'
                AND c.op_type = CASE r.linked WHEN 1 THEN 'related_add' ELSE 'related_remove' END
-               AND CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.workspace_id') END = r.workspace_id
+               AND (CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.workspace_id') END = r.workspace_id OR (
+               EXISTS(SELECT 1 FROM task_workspace_history h WHERE h.task_id = r.task_a_id AND h.workspace_id = CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.workspace_id') END)
+               AND EXISTS(SELECT 1 FROM task_workspace_history h WHERE h.task_id = r.task_b_id AND h.workspace_id = CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.workspace_id') END)))
                AND CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.related_task_id') END IS NOT NULL
                AND min(c.entity_id, CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.related_task_id') END) = r.task_a_id
                AND max(c.entity_id, CASE WHEN json_valid(c.payload) THEN json_extract(c.payload, '$.related_task_id') END) = r.task_b_id
@@ -305,14 +307,29 @@ async fn push_meta_checks(
     };
     checks.push(sync_cursor_ok);
     let protocol = crate::sync::protocol::replica_protocol(conn).await;
-    checks.push(IntegrityCheck {
-        label: "replica sync protocol",
-        ok: protocol.is_ok(),
-        value: match protocol {
-            Ok(value) => value.to_string(),
-            Err(error) => error.to_string(),
+    let operations: Vec<String> = query_scalar("SELECT DISTINCT op_type FROM changes")
+        .fetch_all(&mut *conn)
+        .await?;
+    let required_protocol = operations.into_iter().try_fold(
+        crate::sync::protocol::MAINTAINED_PROTOCOL_BASELINE,
+        |required, operation| {
+            crate::sync::protocol::required_protocol(&operation)
+                .map(|operation_protocol| required.max(operation_protocol))
         },
-    });
+    );
+    let protocol_check = match (protocol, required_protocol) {
+        (Ok(protocol), Ok(required)) => IntegrityCheck {
+            label: "replica sync protocol",
+            ok: protocol >= required,
+            value: format!("recorded={protocol} required={required}"),
+        },
+        (Err(error), _) | (_, Err(error)) => IntegrityCheck {
+            label: "replica sync protocol",
+            ok: false,
+            value: error.to_string(),
+        },
+    };
+    checks.push(protocol_check);
 
     Ok(())
 }

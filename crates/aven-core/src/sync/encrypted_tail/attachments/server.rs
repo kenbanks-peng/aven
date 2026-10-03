@@ -409,6 +409,14 @@ pub(in crate::sync::encrypted_tail) async fn admit(
     use super::super::domain::Projection;
     let now = chrono::Utc::now().timestamp();
     match p {
+        Projection::Move {
+            source,
+            target,
+            tasks,
+        } => {
+            valid(t.is_none())?;
+            super::super::moves::admit(conn, source, target, tasks).await?;
+        }
         Projection::Ref {
             workspace,
             task,
@@ -417,6 +425,9 @@ pub(in crate::sync::encrypted_tail) async fn admit(
             deleted,
             version,
         } => {
+            let authored_workspace = workspace;
+            let routed = super::super::moves::server_workspace(conn, task, workspace).await?;
+            let workspace = &routed;
             let d = Descriptor::decode(descriptor)?;
             eligible_object(conn, membership, &d).await?;
             let (_, complete) = load(conn, &d.object, &hash(descriptor)).await?;
@@ -434,7 +445,7 @@ pub(in crate::sync::encrypted_tail) async fn admit(
                 ticket(
                     conn,
                     &d.object,
-                    workspace,
+                    authored_workspace,
                     &context.device,
                     t.context("error encrypted-image-reservation-required")?,
                     now,
@@ -469,8 +480,19 @@ pub(in crate::sync::encrypted_tail) async fn admit(
                 .execute(&mut *conn)
                 .await?;
             if let Some(t) = t {
-                sqlx::query("DELETE FROM server_e2ee_image_tickets WHERE reservation=? AND device=? AND workspace=? AND object=?").bind(t.reservation.as_slice()).bind(context.device.as_slice()).bind(workspace).bind(d.object.as_slice()).execute(&mut *conn).await?;
+                sqlx::query("DELETE FROM server_e2ee_image_tickets WHERE reservation=? AND device=? AND workspace=? AND object=?").bind(t.reservation.as_slice()).bind(context.device.as_slice()).bind(authored_workspace).bind(d.object.as_slice()).execute(&mut *conn).await?;
             }
+            sqlx::query(
+                "INSERT OR IGNORE INTO server_e2ee_image_scopes(object, workspace) VALUES (?, ?)",
+            )
+            .bind(d.object.as_slice())
+            .bind(workspace)
+            .execute(&mut *conn)
+            .await?;
+            let scopes: i64 = sqlx::query_scalar("SELECT count(*) FROM server_e2ee_image_scopes")
+                .fetch_one(&mut *conn)
+                .await?;
+            valid(scopes <= 262144)?;
             retain_parent(conn, workspace, task).await?;
         }
         Projection::Unref {
@@ -478,7 +500,8 @@ pub(in crate::sync::encrypted_tail) async fn admit(
             task,
             reference,
         } => {
-            let changed=sqlx::query("UPDATE server_e2ee_image_references SET deleted=1 WHERE workspace=? AND reference=? AND parent=?").bind(workspace).bind(reference).bind(task).execute(&mut *conn).await?.rows_affected();
+            let workspace = super::super::moves::server_workspace(conn, task, workspace).await?;
+            let changed=sqlx::query("UPDATE server_e2ee_image_references SET deleted=1 WHERE workspace=? AND reference=? AND parent=?").bind(&workspace).bind(reference).bind(task).execute(&mut *conn).await?.rows_affected();
             valid(changed == 1)?;
         }
         _ => valid(t.is_none())?,

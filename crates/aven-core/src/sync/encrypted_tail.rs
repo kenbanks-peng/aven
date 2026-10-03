@@ -8,7 +8,9 @@ pub(crate) mod dependencies;
 mod domain;
 #[cfg(feature = "test-support")]
 pub(crate) mod fuzz;
+pub(crate) mod graphs;
 mod labels;
+mod moves;
 mod notes;
 mod recurrence;
 mod server;

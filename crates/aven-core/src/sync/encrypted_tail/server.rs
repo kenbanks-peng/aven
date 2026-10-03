@@ -348,6 +348,8 @@ async fn apply_parent(conn: &mut SqliteConnection, id: &str, p: &domain::Project
     else {
         return Ok(());
     };
+    let workspace = super::moves::server_workspace(conn, task, workspace).await?;
+    let workspace = &workspace;
     let existing:Option<(Option<String>,bool,bool)>=sqlx::query_as("SELECT version,deleted,protected FROM server_e2ee_image_parents WHERE workspace=? AND parent=?").bind(workspace).bind(task).fetch_optional(&mut *conn).await?;
     if existing.is_none() {
         let count: i64 = sqlx::query_scalar("SELECT count(*) FROM server_e2ee_image_parents")

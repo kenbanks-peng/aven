@@ -1,17 +1,23 @@
 mod attachment;
 mod conflict;
 mod dependency;
+pub(crate) use dependency::apply_graph_add;
 mod epic;
 mod label;
 mod metadata;
+mod move_tasks;
+pub(crate) use move_tasks::rebuild_task_placements;
 mod note;
 mod payload;
 mod project;
 mod recurrence;
 mod related;
+pub(crate) use related::replay_related;
 mod shared;
 mod task;
 mod workspace;
+
+pub(crate) use move_tasks::replay_move_tasks;
 
 use anyhow::{Result, bail};
 use sqlx::SqliteConnection;
@@ -45,6 +51,11 @@ pub(crate) async fn apply_remote_change(
         op_type::SET_LABEL_NAME => label::set_label_name(conn, change).await?,
         op_type::LABEL_RESTORE => label::restore_label(conn, change).await?,
         op_type::CREATE_TASK => task::create_task(conn, change).await?,
+        op_type::MOVE_TASKS => {
+            let tasks = move_tasks::apply_move_tasks(conn, change).await?;
+            crate::undo::discard_pending_tui_undo_for_tasks(conn, &tasks.into_iter().collect())
+                .await?;
+        }
         op_type::SET_FIELD => task::set_field(conn, change, false).await?,
         op_type::RESOLVE_FIELD => task::set_field(conn, change, true).await?,
         op_type::LABEL_ADD => label::add_label(conn, change).await?,

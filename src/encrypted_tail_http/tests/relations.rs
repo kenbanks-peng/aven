@@ -355,3 +355,143 @@ async fn opposite_dependencies_keep_the_minimum_id_direction() {
         }
     }
 }
+
+#[tokio::test]
+async fn move_keeps_prefix_graph_and_late_owned_edits_without_poisoning_other_edges() {
+    let f = fixture_with(with_relations()).await;
+    converge(&f).await;
+    let source = f.seed.list_workspaces().await.unwrap().remove(0);
+    let ids = f
+        .seed
+        .export_data("now".into())
+        .await
+        .unwrap()
+        .tables
+        .tasks
+        .into_iter()
+        .map(|t| t.id)
+        .collect::<Vec<_>>();
+    let target = f.seed.create_workspace("Moved").await.unwrap();
+    f.seed.create_project(&target, "Destination").await.unwrap();
+    let other_a = f
+        .seed
+        .create_task(&source, draft("other A"))
+        .await
+        .unwrap()
+        .task;
+    let other_b = f
+        .seed
+        .create_task(&source, draft("other B"))
+        .await
+        .unwrap()
+        .task;
+    converge(&f).await;
+    let (_, owner) = snapshot_owner(&f).await;
+    f.peer
+        .add_note(&source, &owner, "late source note".into())
+        .await
+        .unwrap();
+    f.peer
+        .update_task(
+            &source,
+            &owner,
+            TaskUpdate {
+                add_labels: vec!["late".into()],
+                create_missing_labels: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    f.seed
+        .move_tasks(
+            &source,
+            aven_core::operations::MoveTasksInput {
+                task_ids: ids,
+                target_workspace: target.clone(),
+                target_project: "Destination".into(),
+            },
+        )
+        .await
+        .unwrap();
+    converge(&f).await;
+    f.seed
+        .add_task_dependency(&source, &other_a.id, &other_b.id)
+        .await
+        .unwrap();
+    converge(&f).await;
+    assert_quiescent(&[&f.seed, &f.peer]).await;
+    for db in [&f.seed, &f.peer] {
+        let labels = db.task_labels(&target.id, &owner).await.unwrap();
+        assert!(labels.contains(&"late".into()));
+        assert_eq!(
+            scalar(db, "SELECT count(*) FROM task_dependencies").await,
+            2
+        );
+        assert_eq!(scalar(db, "SELECT count(*) FROM task_epic_links").await, 1);
+        assert_eq!(
+            scalar(
+                db,
+                "SELECT count(*) FROM notes WHERE body='late source note'"
+            )
+            .await,
+            1
+        );
+    }
+}
+
+#[tokio::test]
+async fn incorporated_move_preserves_epic_baseline_and_ordered_offline_membership() {
+    for seed_first in [true, false] {
+        let f = fixture_with(FixtureOptions {
+            relations: true,
+            move_before_capture: true,
+            ..Default::default()
+        })
+        .await;
+        let w = f
+            .seed
+            .list_workspaces()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|w| w.key == "moved")
+            .unwrap();
+        let (_, child) = snapshot_owner(&f).await;
+        let parent: TaskId = {
+            let mut c = aven_core::test_support::acquire(&f.seed).await.unwrap();
+            sqlx::query_scalar("SELECT epic_task_id FROM task_epic_links WHERE child_task_id=?")
+                .bind(&child)
+                .fetch_one(&mut *c)
+                .await
+                .unwrap()
+        };
+        f.seed
+            .remove_task_from_epic(&w, &child, &parent)
+            .await
+            .unwrap();
+        f.peer
+            .remove_task_from_epic(&w, &child, &parent)
+            .await
+            .unwrap();
+        f.peer.add_task_to_epic(&w, &child, &parent).await.unwrap();
+        let client = Client::new(&f.origin).unwrap();
+        if seed_first {
+            drain(&client, &f.seed_store, &f.seed).await;
+        } else {
+            drain(&client, &f.peer_store, &f.peer).await;
+        }
+        converge(&f).await;
+        for db in [&f.seed, &f.peer] {
+            assert_eq!(
+                scalar(db, "SELECT count(*) FROM task_epic_links").await,
+                i64::from(seed_first)
+            );
+            assert_eq!(
+                scalar(db, "SELECT count(*) FROM task_dependencies").await,
+                1
+            );
+        }
+        assert_quiescent(&[&f.seed, &f.peer]).await;
+    }
+}

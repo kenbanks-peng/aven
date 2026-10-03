@@ -117,6 +117,12 @@ impl EncryptedSyncServer {
             })
             .collect::<Result<Vec<_>>>()?;
         dependencies::initialize(&mut tx, ASSOCIATION, GENERATION, prefix, &edges).await?;
+        let epics = sqlx::query_as::<_, crate::data_safety::TaskEpicLinkRow>(
+            "SELECT workspace_id, child_task_id, epic_task_id, created_at FROM task_epic_links",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tail::graphs::initialize(&mut tx, &epics).await?;
         attachments::client::initialize(
             &mut tx,
             ASSOCIATION,

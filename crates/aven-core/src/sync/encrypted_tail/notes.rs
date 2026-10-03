@@ -28,19 +28,30 @@ pub(super) async fn reconcile(
     ) {
         return Ok(());
     }
-    let workspace = text(&change.payload, "workspace_id")?;
+    let workspace: String = sqlx::query_scalar("SELECT workspace_id FROM tasks WHERE id = ?")
+        .bind(&change.entity_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .unwrap_or_else(|| {
+            change.payload["workspace_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned()
+        });
     let note = text(&change.payload, "note_id")?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT op_type, payload, change_id FROM changes
          WHERE entity_type = 'task' AND entity_id = ?
            AND op_type IN ('note_add', 'note_edit', 'note_delete')
-           AND json_extract(payload, '$.workspace_id') = ?
+           AND (json_extract(payload, '$.workspace_id') = ? OR EXISTS(
+             SELECT 1 FROM task_workspace_history h WHERE h.task_id = changes.entity_id
+               AND h.workspace_id = json_extract(changes.payload, '$.workspace_id')))
            AND json_extract(payload, '$.note_id') = ?
            AND (server_seq > ? OR server_seq IS NULL)
          ORDER BY server_seq IS NULL, server_seq, local_seq, created_at, change_id",
     )
     .bind(&change.entity_id)
-    .bind(workspace)
+    .bind(&workspace)
     .bind(note)
     .bind(prefix)
     .fetch_all(&mut *conn)
@@ -71,7 +82,7 @@ pub(super) async fn reconcile(
                 "UPDATE notes SET body = ? WHERE workspace_id = ? AND task_id = ? AND id = ?",
             )
             .bind(body)
-            .bind(workspace)
+            .bind(&workspace)
             .bind(&change.entity_id)
             .bind(note)
             .execute(conn)
@@ -91,7 +102,7 @@ pub(super) async fn reconcile(
                  WHERE notes.workspace_id = excluded.workspace_id
                    AND notes.task_id = excluded.task_id",
             )
-            .bind(workspace)
+            .bind(&workspace)
             .bind(&change.entity_id)
             .bind(note)
             .bind(body)
@@ -102,7 +113,7 @@ pub(super) async fn reconcile(
         }
         NoteState::Absent => {
             sqlx::query("DELETE FROM notes WHERE workspace_id = ? AND task_id = ? AND id = ?")
-                .bind(workspace)
+                .bind(&workspace)
                 .bind(&change.entity_id)
                 .bind(note)
                 .execute(conn)

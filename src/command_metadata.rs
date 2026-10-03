@@ -59,7 +59,7 @@ impl Commands {
                 wakes_daemon: !args.dry_run,
             },
             Self::Prime(_) => CommandMetadata::cli(),
-            Self::Edit(_) => CommandMetadata::cli_wake(),
+            Self::Edit(_) | Self::Move(_) => CommandMetadata::cli_wake(),
             Self::Update(_) => CommandMetadata::cli(),
             Self::Note(_) => CommandMetadata::cli_wake(),
             Self::NoteDelete(_) => CommandMetadata::cli_wake(),

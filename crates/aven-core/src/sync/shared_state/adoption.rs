@@ -918,6 +918,11 @@ impl Database {
             &proof.capture().capture.snapshot.tables.task_dependencies,
         )
         .await?;
+        crate::sync::encrypted_tail::graphs::initialize(
+            &mut tx,
+            &proof.capture().capture.snapshot.tables.task_epic_links,
+        )
+        .await?;
         crate::sync::encrypted_tail::attachments::client::initialize_index(
             &mut tx,
             &association,

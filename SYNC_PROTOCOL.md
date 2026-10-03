@@ -16,6 +16,34 @@ release protocol markers. Tail transport capabilities are negotiated separately
 as described below. Changing an encrypted operation contract also requires an encrypted
 tail codec change and its own security review.
 
+## Workspace moves
+
+Protocol 18 includes `move_tasks`. A move is one atomic snapshot operation for
+at most 256 sorted task IDs, with the existing 64 KiB operation payload limit.
+It relocates task-owned data and internal relationships to an existing workspace
+and project. Recurring tasks, unresolved conflicts and live relationships
+crossing the move boundary prevent a local move.
+
+The authenticated Move projection exposes source and destination workspace IDs
+and sorted task IDs to the server, but not task contents. Task IDs are packed as
+80-bit values so the largest projection fits the 4 KiB envelope limit. The
+recipient compares the projection with the decrypted payload before applying it.
+Image object and reference identities remain unchanged; placement, scopes and
+parent liveness accounting follow accepted moves. Historical image operations
+route to current placement while upload tickets retain their authored scope.
+
+Replicas replay placement-sensitive commands in accepted order, then pending
+order. Metadata snapshots pair values (including removal tombstones) with their
+versions. Dependency and epic reduction share this order and use the exact
+published graph baseline; incorporated bootstrap history is not reapplied.
+Local JSON import rebuilds placement history without replaying domain snapshots.
+Encrypted replicas retain the existing data-only export/import restrictions.
+
+This operation is part of the initial encrypted-sync contract, not a protocol-19
+extension. All supported clients, including the mobile core, must read it before
+sharing a vault with a producer. Subsequent changes to this contract follow the
+reader-first publication rules below.
+
 ## Encrypted tail transport capabilities
 
 Transport batching does not change replicated operation meanings or protocol 18.

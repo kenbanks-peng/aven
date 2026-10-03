@@ -249,6 +249,27 @@ pub(super) async fn apply_new_remote_change(
     attachment_hashes: &mut HashSet<String>,
 ) -> Result<()> {
     persistence::collect_attachment_liveness_hashes(conn, change, attachment_hashes).await?;
+    if persistence::is_epic_change(change) && super::graphs::owns_graphs(conn).await? {
+        persistence::insert_wire_change(conn, change).await?;
+        let prefix: i64 = sqlx::query_scalar(
+            "SELECT prefix_count FROM local_e2ee_dependency_baseline WHERE singleton=1",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        super::graphs::reconcile(conn, prefix).await?;
+        return Ok(());
+    }
+    if super::moves::is_metadata(change) {
+        let prefix: i64 = sqlx::query_scalar(
+            "SELECT prefix_count FROM local_e2ee_dependency_baseline WHERE singleton=1",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if super::moves::is_moved(conn, prefix, &change.entity_id).await? {
+            persistence::insert_wire_change(conn, change).await?;
+            return Ok(());
+        }
+    }
     if persistence::is_epic_change(change) {
         crate::epic_membership::capture_snapshot_baseline(
             conn,
@@ -726,6 +747,12 @@ impl Database {
             .context("error encrypted-tail-local-missing")?;
         require_canonical_equality(&local, &change)?;
         accept_local_change(&mut tx, authority, accepted, &change).await?;
+        if super::moves::needs_reconcile(&change) {
+            super::moves::reconcile(&mut tx, authority.prefix).await?;
+        }
+        if super::graphs::needs_reconcile(&change) {
+            super::graphs::reconcile(&mut tx, authority.prefix).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -807,6 +834,18 @@ impl Database {
         for (accepted, change) in &accepted_records {
             accept_local_change(&mut tx, authority, accepted, change).await?;
         }
+        if accepted_records
+            .iter()
+            .any(|(_, change)| super::moves::needs_reconcile(change))
+        {
+            super::moves::reconcile(&mut tx, authority.prefix).await?;
+        }
+        if accepted_records
+            .iter()
+            .any(|(_, change)| super::graphs::needs_reconcile(change))
+        {
+            super::graphs::reconcile(&mut tx, authority.prefix).await?;
+        }
         crate::sync::crash::Crash::Tail.at("before-batch-commit");
         tx.commit().await?;
         crate::sync::crash::Crash::Tail.at("after-batch-commit");
@@ -859,6 +898,8 @@ impl Database {
         let mut attachment_hashes = HashSet::new();
         let mut dependency_workspaces = HashSet::new();
         // Validate every mapping and local comparison before any domain effects.
+        let placement_changed = changes.iter().any(super::moves::needs_reconcile);
+        let graphs_changed = changes.iter().any(super::graphs::needs_reconcile);
         let mut local_presence = Vec::with_capacity(changes.len());
         for (accepted, change) in page.records.iter().zip(&changes) {
             validate_mapping(&mut tx, &accepted.mapping, page.after).await?;
@@ -933,6 +974,12 @@ impl Database {
         }
         for workspace in dependency_workspaces {
             super::dependencies::reconcile(&mut tx, authority.prefix, &workspace).await?;
+        }
+        if placement_changed {
+            super::moves::reconcile(&mut tx, authority.prefix).await?;
+        }
+        if graphs_changed {
+            super::graphs::reconcile(&mut tx, authority.prefix).await?;
         }
         crate::attachments::lifecycle::reconcile_liveness_for_hashes_in_transaction(
             &mut tx,

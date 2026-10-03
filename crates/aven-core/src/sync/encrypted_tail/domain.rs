@@ -8,6 +8,11 @@ use std::{collections::HashSet, fmt};
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum Projection {
     None,
+    Move {
+        source: String,
+        target: String,
+        tasks: Vec<String>,
+    },
     Ref {
         workspace: String,
         task: String,
@@ -32,6 +37,28 @@ pub(super) enum Projection {
 impl Projection {
     pub fn encode(&self) -> Vec<u8> {
         match self {
+            Self::Move {
+                source,
+                target,
+                tasks,
+            } => {
+                let mut out = vec![4];
+                codec::encode_text(&mut out, source);
+                codec::encode_text(&mut out, target);
+                out.extend((tasks.len() as u16).to_be_bytes());
+                for task in tasks {
+                    let mut bits = 0_u128;
+                    for byte in task.bytes() {
+                        bits = (bits << 5)
+                            | crate::ids::BASE32
+                                .iter()
+                                .position(|v| *v == byte)
+                                .expect("validated task ID") as u128;
+                    }
+                    out.extend_from_slice(&bits.to_be_bytes()[6..]);
+                }
+                return out;
+            }
             Self::Ref {
                 workspace,
                 task,
@@ -94,6 +121,18 @@ impl Projection {
 /// Payload keys accepted for each supported operation, or None when unsupported.
 pub(super) fn payload_keys(op: &str) -> Option<&'static [&'static str]> {
     Some(match op {
+        "move_tasks" => &[
+            "source_workspace_id",
+            "target_workspace_id",
+            "project_id",
+            "project_key",
+            "project_name",
+            "project_prefix",
+            "tasks",
+            "dependencies",
+            "related",
+            "epics",
+        ],
         "create_task" => &[
             "title",
             "description",
@@ -299,6 +338,18 @@ pub(super) fn validate(c: &ChangeWire) -> Result<Projection> {
     }
     if c.op_type == "set_label_name" {
         valid(p.get("new_name") != p.get("name"))?;
+    }
+    if c.op_type == "move_tasks" {
+        let payload = crate::sync::wire::MoveTasksPayload::from_change(c)?;
+        return Ok(Projection::Move {
+            source: payload.source_workspace_id.to_string(),
+            target: payload.target_workspace_id.to_string(),
+            tasks: payload
+                .tasks
+                .into_iter()
+                .map(|task| task.task_id.to_string())
+                .collect(),
+        });
     }
     if c.op_type == "publish_device_label" {
         return Ok(Projection::None);

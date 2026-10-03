@@ -32,6 +32,7 @@ pub(super) async fn replace_from_export(
         "DELETE FROM conflicts",
         "DELETE FROM field_versions",
         "DELETE FROM shared_history_provenance",
+        "DELETE FROM task_workspace_history",
         "DELETE FROM changes",
         "DELETE FROM project_paths",
         "DELETE FROM project_id_aliases",
@@ -162,6 +163,7 @@ pub(super) async fn replace_from_export(
     tables::import_task_related_links(tx, &export.tables.task_related_links).await?;
     tables::import_field_versions(tx, &field_versions).await?;
     tables::import_conflicts(tx, &conflicts).await?;
+    crate::sync::apply::rebuild_task_placements(tx).await?;
     crate::epic_membership::recover(tx, true).await?;
 
     Ok(())

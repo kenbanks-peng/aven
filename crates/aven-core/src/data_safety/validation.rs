@@ -360,6 +360,17 @@ pub(crate) fn validate_shared_snapshot(export: &AvenExport) -> Result<()> {
         .iter()
         .map(|change| (change.change_id.as_str(), change))
         .collect::<HashMap<_, _>>();
+    let mut placement_history = HashSet::new();
+    for row in &export.tables.changes {
+        if row.op_type != crate::change_log::op_type::MOVE_TASKS {
+            continue;
+        }
+        let payload: crate::sync::wire::MoveTasksPayload = serde_json::from_str(&row.payload)?;
+        for task in payload.tasks {
+            placement_history.insert((task.task_id.clone(), payload.source_workspace_id.clone()));
+            placement_history.insert((task.task_id, payload.target_workspace_id.clone()));
+        }
+    }
     for link in &export.tables.task_related_links {
         ensure!(
             link.task_a_id < link.task_b_id,
@@ -391,8 +402,18 @@ pub(crate) fn validate_shared_snapshot(export: &AvenExport) -> Result<()> {
         ensure!(
             change.entity_type == "task"
                 && change.field.as_deref() == Some("related")
-                && payload.get("workspace_id").and_then(Value::as_str)
-                    == Some(link.workspace_id.as_str())
+                && payload
+                    .get("workspace_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|workspace| {
+                        workspace == link.workspace_id.as_str()
+                            || workspace.parse::<WorkspaceId>().is_ok_and(|workspace| {
+                                placement_history
+                                    .contains(&(link.task_a_id.clone(), workspace.clone()))
+                                    && placement_history
+                                        .contains(&(link.task_b_id.clone(), workspace))
+                            })
+                    })
                 && change_a == &link.task_a_id
                 && change_b == &link.task_b_id
                 && ((link.linked == 1 && change.op_type == "related_add")
