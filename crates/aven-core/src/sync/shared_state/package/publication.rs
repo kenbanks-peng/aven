@@ -61,6 +61,8 @@
 pub(crate) mod catalog;
 pub(crate) mod codec;
 mod domain;
+#[cfg(feature = "test-support")]
+pub(crate) mod fuzz;
 
 pub use codec::MAX_DESCRIPTOR_BYTES;
 
@@ -603,22 +605,7 @@ fn decrypt_metadata(
         .map_err(|_| Error::Authentication)?,
     );
     valid(*manifest == manifest_plaintext(&d, &stats))?;
-    // Select the internal validation adapter version, not a wire version.
-    let validation_version = if tables.shared_history_provenance.is_empty() {
-        3
-    } else {
-        4
-    };
-    let capture = SharedStateCapture {
-        snapshot: crate::data_safety::export_types::AvenExport {
-            format: "aven-export".into(),
-            version: validation_version,
-            exported_at: String::new(),
-            schema_version: 0,
-            blobs_included: false,
-            tables,
-        },
-    };
+    let capture = capture(tables);
     capture.validate().map_err(|_| Error::Invalid)?;
     valid(
         projection::prefix(&capture.snapshot.tables)?
@@ -636,6 +623,26 @@ fn decrypt_metadata(
     )?;
     valid(images == expected)?;
     Ok((capture, mappings))
+}
+
+/// Decoded domain tables as a capture for the shared domain validators.
+fn capture(tables: crate::data_safety::export_types::ExportTables) -> SharedStateCapture {
+    // Select the internal validation adapter version, not a wire version.
+    let version = if tables.shared_history_provenance.is_empty() {
+        3
+    } else {
+        4
+    };
+    SharedStateCapture {
+        snapshot: crate::data_safety::export_types::AvenExport {
+            format: "aven-export".into(),
+            version,
+            exported_at: String::new(),
+            schema_version: 0,
+            blobs_included: false,
+            tables,
+        },
+    }
 }
 
 /// Authenticates and decrypts the complete package into installable state.

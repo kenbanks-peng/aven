@@ -416,7 +416,7 @@ fn read_section<T: Serialize + for<'de> Deserialize<'de>>(
     Ok((rows, (n, number(start - r.0.len())?)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn encode(t: &local::ExportTables, mappings: &[Mapping]) -> Result<(Vec<u8>, Stats)> {
     let mut out = Vec::new();
     let stats = encode_into(&mut out, t, mappings)?;

@@ -243,7 +243,7 @@ async fn task_exists(conn: &mut SqliteConnection, task_id: &str) -> Result<bool>
     )
 }
 
-async fn apply_new_remote_change(
+pub(super) async fn apply_new_remote_change(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
     attachment_hashes: &mut HashSet<String>,

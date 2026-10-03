@@ -223,5 +223,7 @@ impl PublicationOutcome {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(super) mod fixture;
 #[cfg(test)]
 pub(super) mod tests;

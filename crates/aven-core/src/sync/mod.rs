@@ -7,6 +7,8 @@ mod codec;
 mod crash;
 mod device_labels;
 pub mod encrypted_tail;
+#[cfg(feature = "test-support")]
+pub mod fuzz;
 pub mod invitation_text;
 mod persistence;
 pub(crate) use persistence::changes::canonical_equal;

@@ -10,20 +10,7 @@ struct Fixture {
     key: LocalSharedStatePackageKey,
 }
 fn fixture() -> Fixture {
-    let seed = publication::tests::seed();
-    let descriptor = publication::tests::descriptor(seed.genesis());
-    let binding = PublicationBinding::from_descriptor(seed.genesis(), &descriptor).unwrap();
-    let (core, state, attachments) = publication::components(seed.genesis(), &binding);
-    let record = publication::tests::signed(&seed, &core, &state, &attachments);
-    let membership = Membership::from_publication(seed.genesis(), &descriptor, &record).unwrap();
-    let fixture: serde_json::Value =
-        serde_json::from_str(include_str!("../fixtures/genesis.json")).unwrap();
-    let key = LocalSharedStatePackageKey::new(
-        hex::decode(fixture["generation_secret"].as_str().unwrap())
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    );
+    let (seed, membership, key) = test_support::publication();
     Fixture {
         seed,
         membership,
@@ -561,10 +548,4 @@ fn protected_generation_coverage_revalidates_exact_complete_commitments() {
     extra.push(0);
     assert!(VerifiedKeys::from_protected_storage(&f.membership, &extra).is_err());
     assert!(VerifiedKeys::from_protected_storage(&f.membership, &vec![0; 2345]).is_err());
-}
-
-pub(crate) fn content_authority() -> (Membership, VerifiedKeys) {
-    let f = fixture();
-    let keys = f.membership.verify_initial_key(&f.key).unwrap();
-    (f.membership, keys)
 }

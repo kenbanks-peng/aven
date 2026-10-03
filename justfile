@@ -118,6 +118,10 @@ test-target package target:
 test-package package:
     just _test --package {{package}} --all-targets
 
+# Run a fuzz target on stable Rust; `just fuzz --list` names them
+fuzz target *ARGS:
+    scripts/fuzz {{target}} {{ARGS}}
+
 # Report passing tests that take longer than one second
 profile-tests *ARGS:
     env SQLX_OFFLINE=true RUST_MIN_STACK=4194304 cargo nextest run --target-dir target/test --locked --no-fail-fast --profile slow-tests {{ARGS}}

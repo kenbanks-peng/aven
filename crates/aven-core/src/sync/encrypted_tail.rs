@@ -6,6 +6,8 @@ pub use client::Preflight;
 mod codec;
 pub(crate) mod dependencies;
 mod domain;
+#[cfg(feature = "test-support")]
+pub(crate) mod fuzz;
 mod labels;
 mod notes;
 mod recurrence;
@@ -245,6 +247,28 @@ pub(crate) fn valid(ok: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+/// An authority over the fixed publication fixture and its initial key.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn fixture_authority() -> Authority {
+    let (membership, keys) = crate::sync::seed_claim::membership::test_support::content_authority();
+    let b = membership.publication().binding();
+    Authority {
+        context: Context {
+            vault: b.vault_id,
+            genesis: membership.genesis().commitment(),
+            device: [3; 32],
+            head: membership.head(),
+            stream: b.stream_id,
+            descriptor: b.descriptor_commitment,
+        },
+        prefix: b.prefix_count as i64,
+        membership,
+        keys,
+        association: "test".into(),
+        sync_generation: 1,
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn attachment_integrity_scan_metrics() -> (u64, u64) {

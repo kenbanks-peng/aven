@@ -126,6 +126,40 @@ pub(super) fn seal_projection(
     parse(&record)?;
     Ok(record)
 }
+/// Seals arbitrary operation ID, projection and plaintext bytes under the
+/// current generation, so fuzzing reaches checks after authentication.
+#[cfg(feature = "test-support")]
+pub(super) fn seal_raw(a: &Authority, id: &[u8], projection: &[u8], plain: &[u8]) -> Vec<u8> {
+    let nonce = [7; 24];
+    let mut header = b"AVEN\x01\x00\x01\x01".to_vec();
+    for value in [
+        &a.context.vault[..],
+        &a.context.stream,
+        &a.generation(),
+        &[0; 32],
+        id,
+    ] {
+        bytes(&mut header, value);
+    }
+    header.extend(18u32.to_be_bytes());
+    bytes(&mut header, projection);
+    bytes(&mut header, &nonce);
+    let k = key(a, a.generation()).expect("current generation key");
+    let body = XChaCha20Poly1305::new_from_slice(k.as_ref())
+        .expect("fixed key")
+        .encrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: plain,
+                aad: &header,
+            },
+        )
+        .expect("encryption");
+    let mut record = Vec::new();
+    bytes(&mut record, &header);
+    bytes(&mut record, &body);
+    record
+}
 pub(super) fn open(a: &Authority, record: &[u8]) -> Result<ChangeWire> {
     a.validate()?;
     let e = parse(record)?;
