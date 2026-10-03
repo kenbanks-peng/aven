@@ -524,7 +524,7 @@ fn freeze_is_refused_without_room_for_its_rotation() {
 }
 
 #[test]
-fn protected_rotation_material_replays_exact_candidate_and_rejects_other_generation() {
+fn protected_rotation_material_replays_exact_candidate_binds_cutoff_and_rejects_other_generation() {
     let f = fixture();
     let (_, _, peer, _, m) = first(&f);
     let keys = m.verify_initial_key(&f.key).unwrap();
@@ -544,6 +544,18 @@ fn protected_rotation_material_replays_exact_candidate_and_rejects_other_generat
             .prepare_rotation_with(&pending, &keys, 100, &reopened)
             .unwrap()
     );
+    let changed_cutoff = peer
+        .authority()
+        .prepare_rotation_with(&pending, &keys, 101, &reopened)
+        .unwrap();
+    let (_, _, packages, _) = encoding::components(&raw).unwrap();
+    let original = encoding::read_packages(packages, 0, pending.device_count(), 176).unwrap();
+    let (_, _, packages, _) = encoding::components(&changed_cutoff).unwrap();
+    let changed = encoding::read_packages(packages, 0, pending.device_count(), 176).unwrap();
+    for (original, changed) in original.iter().zip(&changed) {
+        assert_eq!(original.device, changed.device);
+        assert_ne!(original.enc, changed.enc, "device {:?}", original.device);
+    }
     let after = pending.append(&[], &[], &raw).unwrap();
     reopened.validate_generation(&after).unwrap();
     let other = RotationMaterial::generate().unwrap();

@@ -199,8 +199,10 @@ impl Device<'_> {
     ) -> Result<Vec<u8>> {
         self.prepare_rotation_with(m, keys, cutoff, &RotationMaterial::generate()?)
     }
-    /// Replay one protected candidate. Replacements must use fresh material;
-    /// callers own predecessor/cutoff binding and must not reuse losing secrets.
+    /// Replay one protected candidate. Encapsulation randomness is bound to the
+    /// predecessor, signer, and cutoff, so retries are byte-identical while a
+    /// changed context gets independent HPKE encapsulations. Replacements still
+    /// require fresh material for independent generation keys.
     pub fn prepare_rotation_with(
         &self,
         m: &Membership,
@@ -208,13 +210,45 @@ impl Device<'_> {
         cutoff: u64,
         material: &RotationMaterial,
     ) -> Result<Vec<u8>> {
+        let genesis = m.genesis.commitment();
+        let predecessor = m.head();
+        let sequence = m.sequence().to_be_bytes();
+        let stream = m.publication.binding().stream_id;
+        let cutoff_bytes = cutoff.to_be_bytes();
+        let commitment = generation_commitment(
+            LocalSharedStatePackageContext {
+                vault_id: m.genesis.context.vault_id,
+                generation_id: material.generation,
+            },
+            material.key.protected_storage_bytes(),
+        );
+        let context = cce(
+            "aven-e2ee/v1/membership/rotation-rng/context",
+            &[
+                &genesis,
+                &predecessor,
+                &sequence,
+                &stream,
+                &self.device,
+                &cutoff_bytes,
+                &material.generation,
+                &commitment,
+            ],
+        );
+        let kdf = hkdf::Hkdf::<sha2::Sha256>::new(
+            Some(b"aven-e2ee/v1/membership/rotation-rng"),
+            material.entropy.expose(),
+        );
+        let mut seed = Zeroizing::new([0; 32]);
+        kdf.expand(&context, seed.as_mut())
+            .expect("fixed HKDF length");
         self.rotation_with(
             m,
             keys,
             material.generation,
             &material.key,
             cutoff,
-            &mut ChaCha20Rng::from_seed(*material.entropy.expose()),
+            &mut ChaCha20Rng::from_seed(*seed),
         )
     }
     pub(super) fn rotation_with(
