@@ -38,7 +38,7 @@ import '../styles/privacy.css';
         <header class="privacy-heading">
           <p class="eyebrow">Your data</p>
           <h1>Privacy policy</h1>
-          <p class="privacy-updated">Last updated: <time datetime="2026-10-02">October 2, 2026</time></p>
+          <p class="privacy-updated">Last updated: <time datetime="2026-10-03">October 3, 2026</time></p>
           <p class="privacy-intro">Your tasks stay on your devices and, if you choose to sync, on a server you control. We cannot see your tasks or activity, and Aven includes no analytics, advertising, or automatic crash-reporting SDK.</p>
         </header>
 
@@ -50,12 +50,13 @@ import '../styles/privacy.css';
             <p>Aven stores tasks, projects, labels, notes, schedules, and related data in a local database. Image attachments and app settings are also stored on your device. On desktop and iPhone, this data may be included in device or filesystem backups according to your backup settings.</p>
             <p>On iPhone, the server address and pairing credential are stored in the system Keychain. They are not synchronized through iCloud Keychain. Aven does not use iCloud to sync tasks.</p>
             <p>On Android, tasks, attachments, and keys are kept in no-backup storage. Credentials are protected with the Android Keystore. App backup is disabled, and data-extraction rules exclude app data, including credentials, from cloud backup and device transfer.</p>
+            <p>On macOS, desktop sync keys are stored in files protected by your login Keychain. On Linux, they are stored in files only your user account can read, under <code>~/.local/state/aven/protected-keys</code> by default.</p>
           </section>
 
           <section aria-labelledby="sync">
             <h2 id="sync">Sync to your own server</h2>
             <p>Desktop sync is optional. The iPhone and Android apps connect to a user-operated sync server. What that server can read depends on the sync protocol used by your version of Aven.</p>
-            <p>Aven's encrypted sync protocol encrypts tasks, history, and images on each device before upload. The server stores ciphertext and cannot read task content, but still sees device identities, record sizes, counts and timing, and HTTP request metadata, including authentication information.</p>
+            <p>Aven's encrypted sync protocol encrypts tasks, history, and images on each device before upload. The server cannot read task titles, notes, or images. It still sees device identities; random IDs for tasks, workspaces, and images; whether a change creates or deletes something; sizes, counts, and timing; and HTTP request metadata, including authentication information.</p>
             <p>Older releases use plaintext sync with a shared server credential (<code>sync.auth_token</code>). With that protocol, the server can read task content, attachments, and changes. HTTPS protects the connection but does not make plaintext sync end-to-end encrypted.</p>
             <p>We and our partners have no access to your sync server. Its operator controls access, logs, retention, and backups.</p>
             <p>Use HTTPS or a trusted private network such as a VPN. Over plain HTTP, metadata and credentials are visible to network observers; with plaintext sync, task content is visible too. End-to-end encrypted task content remains encrypted even over HTTP. Keep pairing invitations and tokens private.</p>

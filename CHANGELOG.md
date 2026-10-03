@@ -5,7 +5,7 @@ description: Release notes for aven.
 
 ## Unreleased
 
-- Sync is now [end-to-end encrypted](https://aventasks.dev/sync/). Devices encrypt tasks, history and images before upload, so the sync server stores only ciphertext and cannot read your data.
+- Sync is now [end-to-end encrypted](https://aventasks.dev/sync/). Devices encrypt tasks, history and images before upload, so the sync server cannot read your tasks or images. It still sees [some metadata](https://aventasks.dev/sync/#what-encryption-protects), such as IDs, sizes and timing.
 - Start a sync with a one-time setup invitation from [`aven server setup`](https://aventasks.dev/sync/#start-a-server), and [add devices](https://aventasks.dev/sync/#add-a-device) by scanning a QR code or pasting an invitation from a device that already syncs.
 - [List and remove devices](https://aventasks.dev/sync/#manage-devices) with `aven sync device` or **Manage devices** in the TUI Sync dialog. Removing a device rotates the keys for future changes.
 - [`aven sync reset`](https://aventasks.dev/sync/#rebuilding-sync) returns a database to local-only use, keeping its tasks and images.

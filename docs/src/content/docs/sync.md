@@ -6,7 +6,7 @@ description: Synchronize Aven data with end-to-end encryption, resolve conflicts
 Sync keeps the same aven tasks available across laptops, agents, and other devices. Each client writes to its own local SQLite database first, so task capture and updates stay fast and work offline.
 
 Sync is end-to-end encrypted. Devices encrypt tasks, history, and images before
-upload; the self-hosted server stores ciphertext and cannot read your data. One
+upload, so the self-hosted server cannot read your tasks or images. One
 device starts the sync from its database, and each other device joins with an
 invitation from a device that already syncs.
 
@@ -26,8 +26,13 @@ images, which records belong together, and exact image sizes. IDs of recurring
 task proposals derive from the recurrence itself, so someone who already knows
 most of a recurrence can confirm a guess about it.
 
-A malicious server can withhold data or present stale or different views to
-devices; encryption does not guarantee that every device has the latest data.
+A malicious server can withhold data or show devices stale or different views.
+Encryption does not guarantee that every device has the latest data, or that
+all devices end up seeing the same thing.
+
+Every paired device has full control of the sync: it can add and remove
+devices, including removing all the others. There are no admin or read-only
+devices, so pair only devices you control.
 
 Each device keeps its sync credentials on disk: owner-only files on Linux, and
 Keychain-protected files on macOS. Aven backups leave them out, but operating
@@ -69,8 +74,10 @@ options.
 ### Use a public TLS proxy
 
 The server does not terminate TLS. Give `server setup` the public HTTPS origin
-with no path prefix, then route that origin to the server's loopback address. A
-Caddy proxy needs only the upstream:
+with no path prefix, then route that origin to the server's loopback address.
+Anyone can send requests to a public server and keep it busy, so prefer a VPN;
+if you do expose it, rate-limit at the proxy. A Caddy proxy needs only the
+upstream:
 
 ```caddyfile
 sync.example.com {
@@ -254,9 +261,11 @@ aven sync device remove 3f9a
 
 Removal stops that device from syncing and changes the encryption keys, so it
 cannot read changes made after your other devices sync and pick up the new
-keys. It keeps whatever it already downloaded. Run
-removal from another device; a device cannot remove itself. In the TUI, choose
-**Manage devices** in the Sync dialog.
+keys. It keeps whatever it already downloaded. To bring it back, add it again
+with a new invitation, as in [Add a device](#add-a-device).
+
+Run removal from another device; Aven does not let a device remove itself. In
+the TUI, choose **Manage devices** in the Sync dialog.
 
 To stop syncing this database but keep its data locally, use
 [`aven sync reset`](/command-reference/#aven-sync-reset). Reset does not remove
