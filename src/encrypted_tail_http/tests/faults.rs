@@ -905,3 +905,5 @@ async fn pruned_bootstrap_image_does_not_block_fresh_post_rotation_metadata() {
 }
 
 mod withdrawal;
+
+mod hostile_pages;

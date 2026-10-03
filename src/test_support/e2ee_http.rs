@@ -272,3 +272,5 @@ pub(crate) fn worker(name: &str) -> tokio::process::Command {
     command.args(["--exact", name, "--ignored", "--nocapture"]);
     command
 }
+
+pub(crate) mod protected_state;
