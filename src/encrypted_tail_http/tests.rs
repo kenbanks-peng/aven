@@ -2965,6 +2965,7 @@ mod recurrence;
 
 mod bench;
 mod faults;
+mod generated;
 mod journey;
 mod membership;
 
