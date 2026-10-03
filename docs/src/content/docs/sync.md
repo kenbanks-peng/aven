@@ -21,9 +21,22 @@ backups on your devices. Use your operating system's account and disk protection
 for those files.
 
 The server still sees device identities, record sizes, counts, timing, and
-connection metadata. Use HTTPS or a trusted VPN to protect network credentials.
+connection metadata. It also sees the random IDs of tasks, workspaces, and
+images, which records belong together, and exact image sizes. IDs of recurring
+task proposals derive from the recurrence itself, so someone who already knows
+most of a recurrence can confirm a guess about it.
+
 A malicious server can withhold data or present stale or different views to
 devices; encryption does not guarantee that every device has the latest data.
+
+Each device keeps its sync credentials on disk: owner-only files on Linux, and
+Keychain-protected files on macOS. Aven backups leave them out, but operating
+system backups of your home directory, such as Time Machine, may copy them.
+
+A device's credential cannot decrypt anything, but whoever holds it can upload
+records that stop other devices from syncing or mark records deleted on the
+server. Use HTTPS or a trusted VPN so the credential never crosses an
+unprotected network, and remove a lost device promptly.
 
 ## Start a server
 
@@ -240,7 +253,8 @@ aven sync device remove 3f9a
 ```
 
 Removal stops that device from syncing and changes the encryption keys, so it
-cannot read future changes. It keeps whatever it already downloaded. Run
+cannot read changes made after your other devices sync and pick up the new
+keys. It keeps whatever it already downloaded. Run
 removal from another device; a device cannot remove itself. In the TUI, choose
 **Manage devices** in the Sync dialog.
 
