@@ -340,6 +340,20 @@ impl Database {
             downloads,
         })
     }
+    /// Highest tail rank this replica applied or accepted. An honest allocator
+    /// mark is never below a rank it assigned.
+    pub async fn encrypted_tail_observed_rank(&self) -> Result<u64> {
+        let mut conn = self.acquire_reader().await?;
+        let rank: Option<i64> = sqlx::query_scalar(
+            "SELECT max(rank) FROM (
+                 SELECT CAST(value AS INTEGER) AS rank FROM meta WHERE key = 'sync_cursor'
+                 UNION ALL SELECT sequence FROM local_e2ee_accepted
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        Ok(u64::try_from(rank.unwrap_or(0))?)
+    }
     /// Returns the frozen head, or freezes the next ordered pending change.
     /// Image heads also return exact staged ciphertext for upload.
     pub async fn prepare_encrypted_push(

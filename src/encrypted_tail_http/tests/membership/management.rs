@@ -800,3 +800,45 @@ async fn forged_high_water_beyond_tail_ranks_is_refused_before_signing() {
         task.abort();
     }
 }
+
+// An honest allocator mark covers every rank it assigned, so a lower one would
+// sign already accepted old-generation records out of their own interval.
+#[tokio::test]
+async fn forged_high_water_below_accepted_ranks_is_refused_before_signing() {
+    let f = fixture().await;
+    let w = f.seed.list_workspaces().await.unwrap().remove(0);
+    f.seed
+        .create_task(&w, draft("accepted above forged cutoff"))
+        .await
+        .unwrap();
+    converge(&f).await;
+    let inputs = f
+        .seed_store
+        .active_inputs(&f.seed, &f.origin)
+        .await
+        .unwrap();
+    let evidence = inputs.evidence.clone();
+    let prefix = inputs.membership.publication().binding().prefix_count;
+    drop(inputs);
+    let accepted = scalar(&f.seed, "SELECT max(sequence) FROM local_e2ee_accepted").await;
+    assert!(accepted as u64 > prefix);
+    let target = device(&f.peer_store, &f.peer, &f.origin).await;
+    let before = floor(&f.seed_store, &f.seed, &f.origin).await;
+    let managed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task = forged_high_water(&f, evidence, prefix, managed.clone()).await;
+    let removal = peer_enrollment_http::Client::new(&f.origin)
+        .unwrap()
+        .remove_device(&f.seed_store, &f.seed, target)
+        .await;
+    task.abort();
+    let after = floor(&f.seed_store, &f.seed, &f.origin).await;
+    assert!(
+        removal
+            .as_ref()
+            .is_err_and(|e| e.to_string() == "error management-context"),
+        "{:?}",
+        removal.map(|_| after.current_generation().starts_after)
+    );
+    assert!(!managed.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(after.head(), before.head());
+}

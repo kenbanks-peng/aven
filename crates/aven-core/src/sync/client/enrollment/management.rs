@@ -71,6 +71,7 @@ impl Client {
         ensure!(
             membership.head() == inputs.membership.head()
                 && prepared.high_water >= membership.current_generation().starts_after
+                && prepared.high_water >= db.encrypted_tail_observed_rank().await?
                 && prepared.high_water <= MAX_CUTOFF,
             "error management-context"
         );
