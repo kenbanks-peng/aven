@@ -844,10 +844,12 @@ impl Database {
                 persistence::reconcile_epic_change(&mut tx, change).await?;
             }
         }
+        let mut remote_seq = 0;
         for ((accepted, mut change), is_local) in
             page.records.iter().zip(changes).zip(local_presence)
         {
             if !is_local {
+                remote_seq = remote_seq.max(change.local_seq);
                 // Applying lifecycle resolution can materialize deterministic history
                 // needed by a later record in this page. It is not an identity-only echo.
                 if let Some(generated) = load_change(&mut tx, &change.change_id).await? {
@@ -893,6 +895,15 @@ impl Database {
             &crate::attachments::lifecycle::SystemClock,
         )
         .await?;
+        // Like installation, keep the local sequence at or above every stored
+        // change, so later local writes sort after applied remote history.
+        let local_seq = db::get_meta(&mut tx, "local_seq")
+            .await?
+            .unwrap_or_else(|| "0".to_string())
+            .parse::<i64>()?;
+        if remote_seq > local_seq {
+            db::set_meta(&mut tx, "local_seq", &remote_seq.to_string()).await?;
+        }
         crate::sync::protocol::establish_protocol(&mut tx, 18).await?;
         db::set_meta(&mut tx, "sync_cursor", &page.cursor.to_string()).await?;
         if let Some(target) = target {
