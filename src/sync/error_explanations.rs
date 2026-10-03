@@ -60,7 +60,7 @@ pub(crate) fn explain(
         return Some(Explanation {
             code: "sync-request-body-limit",
             message: "The sync request was rejected as too large.",
-            next_step: "If a reverse proxy is in use, raise its request body limit to at least 2 MB, then try again. Local work continues.",
+            next_step: "If a reverse proxy is in use, raise its request body limit to at least 8 MB, then try again. Local work continues.",
         });
     }
     if all.iter().any(|code| code.ends_with("-network")) {
@@ -757,7 +757,7 @@ mod tests {
                 .next_step
                 .contains("If a reverse proxy is in use")
         );
-        assert!(explanation.next_step.contains("2 MB"));
+        assert!(explanation.next_step.contains("8 MB"));
     }
 
     #[test]

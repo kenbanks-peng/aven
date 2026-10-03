@@ -116,6 +116,48 @@ async fn fault_request(
     }
 }
 
+/// Answers image chunk uploads the way a reverse proxy enforcing a small body
+/// limit does: an unstructured 413 that never reaches the server.
+async fn proxy_rejecting_image_puts(request: Request, next: axum::middleware::Next) -> Response {
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, 5 * 1024 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    if operation_name(&value) == Some("Put") {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "<html>413 Request Entity Too Large</html>",
+        )
+            .into_response();
+    }
+    next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
+        .await
+}
+
+#[tokio::test]
+async fn proxy_body_limit_on_image_upload_stops_the_round_with_its_code() {
+    let mut f = fixture().await;
+    add_image(&f).await;
+    f.task.abort();
+    let _ = (&mut f.task).await;
+    let app = peer_enrollment_http::router(f.server.clone())
+        .merge(router(
+            f.server.clone(),
+            crate::config::AttachmentLifecycleConfig::default().server_policy(),
+        ))
+        .layer(axum::middleware::from_fn(proxy_rejecting_image_puts));
+    (_, f.task) = e2ee_http::serve(app, f.origin.strip_prefix("http://").unwrap()).await;
+
+    let error = Client::new(&f.origin)
+        .unwrap()
+        .round(&f.peer_store, &f.peer, &f.root.path().join("peer-blobs"))
+        .await
+        .unwrap_err();
+    assert!(aven_core::sync::client::errors::has_code(
+        &error,
+        "sync-request-body-limit"
+    ));
+}
+
 use crate::test_support::e2ee_http::frozen;
 
 async fn accepted_task(f: &Fixture, title: &str) -> (String, String, Vec<u8>) {

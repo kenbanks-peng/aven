@@ -401,7 +401,9 @@ impl Client {
                 Err(error)
                     if is_stale(&error)
                         || error.is::<PublishingBlocked>()
-                        || super::errors::has_code(&error, "attachment-quota-exceeded") =>
+                        || super::errors::has_code(&error, "attachment-quota-exceeded")
+                        // A proxy body limit refuses every retry identically.
+                        || super::errors::has_code(&error, "sync-request-body-limit") =>
                 {
                     return Err(error);
                 }
