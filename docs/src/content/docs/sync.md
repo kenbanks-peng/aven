@@ -278,12 +278,13 @@ lifetime. When the limit is reached, Aven says so; start a new sync as in
 ## Resolve conflicts
 
 Conflicts happen when two devices edit the same field of the same task between
-syncs. Aven keeps both values and asks you to choose:
+syncs. Aven keeps both values and asks you to choose. `conflict show` prints
+each value with a token such as `v7CQBAP`; pass the token of the value to keep:
 
 ```sh
 aven conflict list
-aven conflict diff APP-7KQ9 description
-aven conflict resolve APP-7KQ9 description --use local
+aven conflict show APP-7KQ9
+aven conflict resolve APP-7KQ9 description --use v7CQBAP
 ```
 
 See [`aven conflict`](/command-reference/#aven-conflict) for exporting both
