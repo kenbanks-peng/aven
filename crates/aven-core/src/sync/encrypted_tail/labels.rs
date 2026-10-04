@@ -123,7 +123,7 @@ async fn reapply_last_removal(
     };
     crate::sync::apply::apply_remote_change(conn, &change)
         .await
-        .map_err(|_| anyhow::anyhow!("error encrypted-tail-apply"))?;
+        .map_err(|error| super::client::apply_failure(error, &change))?;
     Ok(moved)
 }
 

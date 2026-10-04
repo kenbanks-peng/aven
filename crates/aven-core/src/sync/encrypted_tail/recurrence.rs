@@ -49,7 +49,7 @@ pub(super) async fn adopt_earlier_generation(
         .context("error encrypted-tail-history-lost")?;
     let labels = crate::sync::apply::adopt_generated_defaults(conn, &baseline, accepted)
         .await
-        .map_err(|_| anyhow::anyhow!("error encrypted-tail-apply"))?;
+        .map_err(|error| super::client::apply_failure(error, accepted))?;
     if !labels.is_empty() {
         let workspace = accepted.payload["workspace_id"]
             .as_str()

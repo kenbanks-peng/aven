@@ -275,7 +275,7 @@ pub(super) async fn apply_new_remote_change(
 
 /// Transient SQLite failures retry; anything else is this record being
 /// rejected. Only the inner stable code is kept, never decrypted content.
-fn apply_failure(error: anyhow::Error, change: &ChangeWire) -> anyhow::Error {
+pub(super) fn apply_failure(error: anyhow::Error, change: &ChangeWire) -> anyhow::Error {
     let sqlx_error = error
         .chain()
         .find_map(|cause| cause.downcast_ref::<sqlx::Error>());
@@ -295,11 +295,21 @@ fn apply_failure(error: anyhow::Error, change: &ChangeWire) -> anyhow::Error {
     if transient {
         return anyhow::anyhow!("error encrypted-tail-storage");
     }
-    // A bare database error displays as "error returned from database".
-    let cause = match sqlite_code {
-        Some(code) if error.is::<sqlx::Error>() => format!("sqlite-{code}"),
-        _ => crate::sync::client::errors::code(&error).unwrap_or_else(|| "unknown".into()),
-    };
+    // A database error displays as "error returned from database", so sqlx
+    // causes never supply the stable code.
+    let stable = error
+        .chain()
+        .filter(|cause| cause.downcast_ref::<sqlx::Error>().is_none())
+        .find_map(|cause| {
+            cause
+                .to_string()
+                .strip_prefix("error ")
+                .and_then(|rest| rest.split_whitespace().next())
+                .map(str::to_owned)
+        });
+    let cause = stable
+        .or_else(|| sqlite_code.map(|code| format!("sqlite-{code}")))
+        .unwrap_or_else(|| "unknown".into());
     anyhow::anyhow!(
         "error {cause} sequence={} op_type={}",
         change.server_seq.unwrap_or_default(),

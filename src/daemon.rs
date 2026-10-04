@@ -179,7 +179,7 @@ fn daemon_error(error: &anyhow::Error) -> String {
         error,
     ) {
         Some(explanation) => format!(
-            "{} [{}] Next: {}",
+            "{} [{}] Next: {} Cause: {error:#}",
             explanation.message, explanation.code, explanation.next_step
         ),
         None => error.to_string(),

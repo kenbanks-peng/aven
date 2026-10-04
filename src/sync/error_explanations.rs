@@ -550,7 +550,14 @@ pub(crate) fn explain(
             next_step: "Update Aven on this device; edits made meanwhile sync after the update.",
         });
     }
-    if let Some(code) = first(&["encrypted-tail-apply"]) {
+    if let Some(code) = first(&["encrypted-tail-storage"]) {
+        return Some(Explanation {
+            code,
+            message: "Sync couldn't write to this device's database, which may be full or busy. Local tasks are safe.",
+            next_step: "Free up disk space or close other Aven processes; sync retries automatically.",
+        });
+    }
+    if let Some(code) = first(&["encrypted-tail-apply", "encrypted-tail-domain"]) {
         return Some(Explanation {
             code,
             message: "Sync stopped because this device couldn't apply a synced change. Local tasks are safe and editable.",
@@ -596,7 +603,6 @@ pub(crate) fn explain(
 /// A synced change uses an operation or value this version doesn't know.
 const UNSUPPORTED_CHANGE: &[&str] = &[
     "encrypted-tail-operation-unsupported",
-    "encrypted-tail-domain",
     "unsupported-remote-change",
 ];
 
@@ -901,11 +907,17 @@ mod tests {
 
     #[test]
     fn rejected_applies_ask_for_an_update_first() {
-        let error = anyhow!("error task-not-found sequence=7 op_type=set_field")
-            .context("error encrypted-tail-apply");
+        for code in ["encrypted-tail-apply", "encrypted-tail-domain"] {
+            let error = anyhow!("error task-not-found sequence=7 op_type=set_field")
+                .context(format!("error {code}"));
+            let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+            assert_eq!(explanation.code, code);
+            assert!(explanation.next_step.contains("Update Aven"));
+            assert!(!explanation.combined().contains("reset"));
+        }
+        let error = anyhow!("error encrypted-tail-storage");
         let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
-        assert_eq!(explanation.code, "encrypted-tail-apply");
-        assert!(explanation.next_step.contains("Update Aven"));
+        assert!(explanation.next_step.contains("retries"));
         assert!(!explanation.combined().contains("reset"));
     }
 
@@ -937,7 +949,6 @@ mod tests {
             "encrypted-tail-http",
             "encrypted-tail-reply",
             "encrypted-tail-cursor",
-            "encrypted-tail-storage",
         ] {
             let error = anyhow!("error {code}");
             assert_eq!(
