@@ -1,6 +1,6 @@
-// These tests pin the current unquarantined behavior of authenticated member
-// inbound records (AVN-P42B finding W3). A fix must update them to assert the
-// new quarantine or skip behavior rather than delete them.
+// These tests pin how an authenticated member record that can't be applied
+// blocks a receiver at an unchanged cursor: sync fails closed and retries the
+// same record on every round.
 use super::*;
 use aven_core::ids::TaskId;
 

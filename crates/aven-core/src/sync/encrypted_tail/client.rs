@@ -265,12 +265,47 @@ pub(super) async fn apply_new_remote_change(
     }
     crate::sync::apply::apply_remote_change(conn, change)
         .await
-        .map_err(|_| anyhow::anyhow!("error encrypted-tail-apply"))?;
+        .map_err(|error| apply_failure(error, change))?;
     if !related {
         persistence::insert_wire_change(conn, change).await?;
     }
     persistence::reconcile_epic_change(conn, change).await?;
     Ok(())
+}
+
+/// Transient SQLite failures retry; anything else is this record being
+/// rejected. Only the inner stable code is kept, never decrypted content.
+fn apply_failure(error: anyhow::Error, change: &ChangeWire) -> anyhow::Error {
+    let sqlx_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<sqlx::Error>());
+    // sqlx reports the extended result code; the low byte is the primary.
+    let sqlite_code = match sqlx_error {
+        Some(sqlx::Error::Database(db)) => db.code().and_then(|code| code.parse::<i32>().ok()),
+        _ => None,
+    };
+    let transient = matches!(
+        sqlx_error,
+        Some(sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut)
+    ) || matches!(
+        sqlite_code.map(|code| code & 0xff),
+        // SQLITE_BUSY, SQLITE_LOCKED, SQLITE_IOERR, SQLITE_FULL
+        Some(5 | 6 | 10 | 13)
+    );
+    if transient {
+        return anyhow::anyhow!("error encrypted-tail-storage");
+    }
+    // A bare database error displays as "error returned from database".
+    let cause = match sqlite_code {
+        Some(code) if error.is::<sqlx::Error>() => format!("sqlite-{code}"),
+        _ => crate::sync::client::errors::code(&error).unwrap_or_else(|| "unknown".into()),
+    };
+    anyhow::anyhow!(
+        "error {cause} sequence={} op_type={}",
+        change.server_seq.unwrap_or_default(),
+        change.op_type
+    )
+    .context("error encrypted-tail-apply")
 }
 
 async fn accept_local_change(

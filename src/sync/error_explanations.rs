@@ -550,6 +550,13 @@ pub(crate) fn explain(
             next_step: "Update Aven on this device; edits made meanwhile sync after the update.",
         });
     }
+    if let Some(code) = first(&["encrypted-tail-apply"]) {
+        return Some(Explanation {
+            code,
+            message: "Sync stopped because this device couldn't apply a synced change. Local tasks are safe and editable.",
+            next_step: "Update Aven on this device and every other device, then sync again. If it still stops on the latest version, report it before rebuilding sync: rebuilding doesn't merge other devices' unsynced edits.",
+        });
+    }
     if let Some(code) = first(BAD_RECORD) {
         return Some(Explanation {
             code,
@@ -590,6 +597,7 @@ pub(crate) fn explain(
 const UNSUPPORTED_CHANGE: &[&str] = &[
     "encrypted-tail-operation-unsupported",
     "encrypted-tail-domain",
+    "unsupported-remote-change",
 ];
 
 /// A synced change, or this device's record of one, can never be applied or
@@ -608,7 +616,6 @@ const BAD_RECORD: &[&str] = &[
     "encrypted-tail-note-history",
     "encrypted-tail-history-lost",
     "encrypted-tail-mapping",
-    "encrypted-tail-apply",
     "encrypted-tail-same-id-divergence",
     "encrypted-tail-integrity-blocked",
     "encrypted-tail-prefix-identity-collision",
@@ -890,6 +897,16 @@ mod tests {
                 assert!(!explanation.combined().contains("reset"));
             }
         }
+    }
+
+    #[test]
+    fn rejected_applies_ask_for_an_update_first() {
+        let error = anyhow!("error task-not-found sequence=7 op_type=set_field")
+            .context("error encrypted-tail-apply");
+        let explanation = explain(ErrorAction::General, ErrorSurface::Cli, &error).unwrap();
+        assert_eq!(explanation.code, "encrypted-tail-apply");
+        assert!(explanation.next_step.contains("Update Aven"));
+        assert!(!explanation.combined().contains("reset"));
     }
 
     #[test]
