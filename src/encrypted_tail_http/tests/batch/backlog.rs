@@ -6,11 +6,17 @@ async fn pending(db: &Database) -> i64 {
 
 async fn large_notes(f: &Fixture) {
     let workspace = f.peer.list_workspaces().await.unwrap().remove(0);
-    let task_id: aven_core::ids::TaskId = sqlx::query_scalar("SELECT id FROM tasks LIMIT 1")
-        .fetch_one(&mut *aven_core::test_support::acquire(&f.peer).await.unwrap())
-        .await
-        .unwrap();
+    // One note per task: the search index rebuilds a task's document from all
+    // of its notes on every note write, so stacking 18 MB on one task is
+    // quadratic and dominates the test.
     for index in 0..300 {
+        let task_id = f
+            .peer
+            .create_task(&workspace, draft(&format!("note host {index}")))
+            .await
+            .unwrap()
+            .task
+            .id;
         f.peer
             .add_note(
                 &workspace,
@@ -20,7 +26,7 @@ async fn large_notes(f: &Fixture) {
             .await
             .unwrap();
     }
-    assert_eq!(pending(&f.peer).await, 300);
+    assert_eq!(pending(&f.peer).await, 600);
     assert!(
         scalar(
             &f.peer,
