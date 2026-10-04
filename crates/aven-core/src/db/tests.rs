@@ -179,6 +179,65 @@ async fn filesystem_lookalike_keeps_wal_and_concurrent_connections() {
     pool.close().await;
 }
 
+#[tokio::test]
+async fn file_connections_limit_retained_wal_after_large_transaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("wal-limit.sqlite");
+    let database = Database::open(&path).await.unwrap();
+    let mut connections = Vec::new();
+    for _ in 0..FILE_DATABASE_CONNECTIONS {
+        let mut conn = database.pool().acquire().await.unwrap();
+        let limit: i64 = sqlx::query_scalar("PRAGMA journal_size_limit")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(limit, WAL_JOURNAL_SIZE_LIMIT as i64);
+        connections.push(conn);
+    }
+    let conn = &mut *connections[0];
+    // Keep the oversized WAL observable before explicitly checkpointing it.
+    sqlx::query("PRAGMA wal_autocheckpoint=0")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE wal_payload(id INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let payload_size = (WAL_JOURNAL_SIZE_LIMIT * 4) as i64;
+    let mut tx = begin_immediate(conn).await.unwrap();
+    sqlx::query("INSERT INTO wal_payload(data) VALUES (zeroblob(?))")
+        .bind(payload_size)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let wal = wal_path(&path);
+    assert!(fs::metadata(&wal).unwrap().len() > WAL_JOURNAL_SIZE_LIMIT * 4);
+
+    let (busy, frames, checkpointed): (i64, i64, i64) =
+        sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(busy, 0);
+    assert!(frames > 0);
+    assert_eq!(checkpointed, frames);
+    // SQLite applies journal_size_limit on the first commit reusing the WAL.
+    sqlx::query("INSERT INTO wal_payload(data) VALUES (x'01')")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(fs::metadata(&wal).unwrap().len() <= WAL_JOURNAL_SIZE_LIMIT);
+    let stored_size: i64 = sqlx::query_scalar("SELECT length(data) FROM wal_payload WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(stored_size, payload_size);
+    drop(connections);
+    database.close().await;
+}
+
 #[test]
 fn concurrent_first_opens_of_one_file_all_succeed() {
     for _ in 0..20 {

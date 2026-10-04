@@ -44,6 +44,8 @@ pub(crate) use rows::{
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const FILE_DATABASE_CONNECTIONS: u32 = 5;
+// Bounds retained WAL space on reuse after checkpointing, not transaction size.
+const WAL_JOURNAL_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Database {
@@ -196,7 +198,9 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
             .idle_timeout(None)
             .max_lifetime(None),
         DatabaseStorage::File => {
-            options = options.journal_mode(SqliteJournalMode::Wal);
+            options = options
+                .journal_mode(SqliteJournalMode::Wal)
+                .pragma("journal_size_limit", WAL_JOURNAL_SIZE_LIMIT.to_string());
             SqlitePoolOptions::new().max_connections(FILE_DATABASE_CONNECTIONS)
         }
     };
