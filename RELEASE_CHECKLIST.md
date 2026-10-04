@@ -102,6 +102,27 @@ dominates sync time. Pushing many changes costs roughly 0.5–1.2 s more CPU tim
 than the baseline in every push case; that is small next to network time and
 was not investigated.
 
+Joining a large sync with the release CLI on the same host type (`83ed5429`,
+Linux file-backed keys, latency added on loopback with `tc netem`; raw log
+under `history/2026-10-04-hetzner-join-bench/`). The library has 2,001 tasks
+and 246 images totaling 266,967,104 bytes; setup took 8.6 s. Two joins per
+latency, each from an empty database:
+
+| Round-trip latency | Join complete, all images local | Peak join RSS |
+| ---: | ---: | ---: |
+| 0 ms | 6.0–6.3 s | 54–56 MB |
+| 50 ms | 27.4–27.5 s | 52 MB |
+| 100 ms | 48.8–49.0 s | 52–53 MB |
+
+Every image arrives during `sync join`; no follow-up `sync` was needed. Each
+millisecond of round-trip time adds about 0.43 s, so the join makes roughly
+430 sequential round trips, about 1.7 per image. Loopback has no bandwidth
+limit; on a real link, transfer time for the 267 MB adds to these figures.
+
+The server used 550,821,088 bytes for this library: a 277 MB database plus a
+273 MB write-ahead log that SQLite does not shrink after checkpointing, since
+no `journal_size_limit` is set.
+
 ## Migration and recovery: October 4, 2026
 
 Executed on `96299e96` on macOS with the official v0.1.44 `darwin-arm64`
