@@ -33,7 +33,7 @@ only after checking the relevant source, dependencies, and environment for chang
   refusal, preservation of unavailable devices, interrupted publication/install,
   nonempty-join and bound-target restore/import refusal. Preserve post-cutover
   work before rollback. No cross-vault merge or same-vault restore is promised.
-- [ ] **Performance decision:** representative history and image workloads,
+- [x] **Performance decision:** representative history and image workloads,
   memory/CPU, writer holds and responsiveness, retry reuse, round trips, and
   storage growth. Retain ranges and failures. Compare timings under controlled
   conditions before claiming no regression; investigate unexplained differences.
@@ -61,6 +61,28 @@ Recovery kits, self-removal, same-vault restore, hosted service implementation,
 periodic snapshots, compaction, and global ciphertext deduplication are outside
 this desktop release. Notarization and updater signer verification are separate
 follow-ups, not evidence supplied by checksum verification.
+
+## Controlled setup timing: October 4, 2026
+
+The October 2 near-cap samples ran on an overloaded host and could not show
+whether setup regressed. Both versions were rebuilt and run alternately on one
+otherwise idle Hetzner CCX33 (8 dedicated AMD EPYC-Milan vCPUs, 32 GB, Ubuntu
+24.04, Rust 1.98.1, release profile): the September 29 baseline `65da0c05`
+(tree-identical to `5ce50fc2`, with the test-only readiness fix applied) and
+current `e71001d0`. Ignored `large_image_setup` benchmark, 247 images /
+267,431,441 plaintext bytes, five rounds per version, all passed. Raw log and
+scripts are under `history/2026-10-04-hetzner-setup-bench/`.
+
+| Metric | Baseline median (range) | Current median (range) |
+| --- | ---: | ---: |
+| Setup wall time | 8.150 s (8.086–8.174) | 8.204 s (8.098–8.266) |
+| Client peak RSS | 64.1 MB (63.9–70.4) | 67.2 MB (65.1–67.9) |
+| Writer gate hold total | 1.389 s (1.382–1.405) | 1.412 s (1.382–1.417) |
+| Longest writer gate hold | 1.263 s (1.256–1.275) | 1.284 s (1.250–1.287) |
+
+No regression: the ranges overlap and the medians differ by under 1%. The
+3.7 s longest writer hold from October 2 does not reproduce on an idle host;
+local edits can wait up to about 1.3 s during a near-cap setup.
 
 ## Migration and recovery: October 4, 2026
 
@@ -184,7 +206,8 @@ Darwin 25.5.0, 12 CPUs, 32 GiB RAM; Rust 1.98.1.
 2. Perform the required physical-iPhone HTTPS smoke test against the final core.
    The referenced `/Users/raine/code/aven-ios` checkout is absent on this host;
    no mobile source, export declaration, or phone result was inferred.
-3. Resolve timing acceptance with controlled measurements or a recorded decision.
+3. ~~Resolve timing acceptance with controlled measurements or a recorded decision.~~
+   Done: see the October 4 controlled setup timing comparison.
 4. Verify current packaged/signed CI artifacts, Intel and Linux targets, and the
    remaining updater upgrade path. Do not create production tags merely to
    collect qualification evidence without explicit release authorization.
