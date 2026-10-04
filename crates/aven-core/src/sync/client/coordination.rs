@@ -16,6 +16,16 @@ pub struct SyncProcessGuard {
     _file: Option<File>,
 }
 
+impl Drop for SyncProcessGuard {
+    fn drop(&mut self) {
+        if let Some(file) = &self._file {
+            // Close-on-exec descriptors can still retain the lock in a child
+            // between concurrent process creation and exec.
+            let _ = file.unlock();
+        }
+    }
+}
+
 /// Waits briefly for another sync on this database to finish.
 pub async fn acquire(database: &Database) -> Result<SyncProcessGuard> {
     let Some(file) = open_lock(database)? else {
@@ -70,6 +80,25 @@ fn lock_path(database_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drop_releases_lock_while_an_inherited_descriptor_remains_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open(&directory.path().join("aven.sqlite"))
+            .await
+            .unwrap();
+        let first = acquire(&database).await.unwrap();
+        let inherited = first._file.as_ref().unwrap().try_clone().unwrap();
+        assert!(try_acquire(&database).unwrap().is_none());
+        drop(first);
+        let next = try_acquire(&database).unwrap().unwrap();
+        assert!(try_acquire(&database).unwrap().is_none());
+        drop(inherited);
+        assert!(try_acquire(&database).unwrap().is_none());
+        drop(next);
+        assert!(try_acquire(&database).unwrap().is_some());
+    }
 
     #[tokio::test]
     async fn lock_contends_and_releases() {

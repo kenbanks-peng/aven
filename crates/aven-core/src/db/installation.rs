@@ -19,6 +19,14 @@ pub struct InstallationGuard {
     exclusive: bool,
 }
 
+impl Drop for InstallationGuard {
+    fn drop(&mut self) {
+        // Closing alone leaves the lock held by descriptors inherited during
+        // concurrent process creation, even when they are close-on-exec.
+        let _ = self._lock.unlock();
+    }
+}
+
 impl InstallationGuard {
     pub fn acquire(path: &Path) -> Result<Self> {
         Self::acquire_mode(path, true)
@@ -177,6 +185,27 @@ impl super::Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_releases_lock_while_an_inherited_descriptor_remains_open() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db.sqlite");
+        for exclusive in [true, false] {
+            let guard = InstallationGuard::acquire_mode(&path, exclusive).unwrap();
+            // A duplicate shares the open file description, just like a child
+            // process's inherited descriptor before close-on-exec runs.
+            let inherited = guard._lock.try_clone().unwrap();
+            assert!(InstallationGuard::acquire(&path).is_err());
+            drop(guard);
+            let next = InstallationGuard::acquire(&path).unwrap();
+            assert!(InstallationGuard::acquire(&path).is_err());
+            drop(inherited);
+            assert!(InstallationGuard::acquire(&path).is_err());
+            drop(next);
+            assert!(InstallationGuard::acquire(&path).is_ok());
+        }
+    }
 
     #[test]
     fn missing_target_retains_same_denial_identity_and_aliases_fail() {
