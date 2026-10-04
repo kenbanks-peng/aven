@@ -8,7 +8,7 @@ Choose the command that matches what you need to preserve:
 | Goal | Commands | Image files included? |
 | --- | --- | --- |
 | Preserve or move all local Aven data | `aven backup` and `aven backup restore` | Yes, for images available on this device when the backup is created |
-| Move task data through JSON | `aven export` and `aven import` | No |
+| Move task data through JSON from a database that doesn't sync | `aven export` and `aven import` | No |
 
 ## Create and restore a complete backup
 
@@ -76,6 +76,10 @@ A JSON export includes tasks, recurring schedules, future-task settings,
 history, pauses, conflicts, and attachment information. It sets
 `blobs_included: false` and leaves out image files.
 
+An export from a database that has set up or joined sync can't be imported,
+including into a new database. Use [`aven backup`](#create-and-restore-a-complete-backup)
+to preserve or move synced data.
+
 Import validates recurring schedules, generated tasks, history, and recurring
 state before replacing local data. Older task-only exports import every task as
 nonrecurring data. Import keeps this installation's client identity and resets
@@ -94,15 +98,11 @@ a safety backup first.
 ## Restore attachment images
 
 After importing JSON, attachment labels remain visible while the TUI shows
-unavailable-image placeholders. Sync can restore an image only if its attachment
-was synchronized to the same server before the export. Until the bytes return,
+unavailable-image placeholders, and
 [`attachment get --output`](/command-reference/#aven-attachment) cannot save the
-image.
-
-An attachment that was still local-only when exported remains local unavailable
-metadata after import. Aven does not publish it because the JSON lacks the image
-bytes required by the sync server. Use a backup archive instead when moving
-unsynchronized images. Restoring that archive replaces the database and restores
+image. Sync does not restore these images: Aven does not publish them because
+the JSON lacks the image bytes. Use a backup archive instead when moving
+images. Restoring that archive replaces the database and restores
 the included image files together.
 
 A complete backup includes only images available locally when it is created. If

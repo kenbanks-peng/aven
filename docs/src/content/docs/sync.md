@@ -12,36 +12,8 @@ invitation from a device that already syncs.
 
 The sync server is not a backup. Only your devices hold the decryption keys, so
 if every device is lost, the server cannot restore your data. Keep regular
-[backups](/backups/).
-
-### What encryption protects
-
-Encryption protects synced content, not the readable databases, images, and
-backups on your devices. Use your operating system's account and disk protection
-for those files.
-
-The server still sees device identities, record sizes, counts, timing, and
-connection metadata. It also sees the random IDs of tasks, workspaces, and
-images, which records belong together, and exact image sizes. IDs of recurring
-task proposals derive from the recurrence itself, so someone who already knows
-most of a recurrence can confirm a guess about it.
-
-A malicious server can withhold data or show devices stale or different views.
-Encryption does not guarantee that every device has the latest data, or that
-all devices end up seeing the same thing.
-
-Every paired device has full control of the sync: it can add and remove
-devices, including removing all the others. There are no admin or read-only
-devices, so pair only devices you control.
-
-Each device keeps its sync credentials on disk: owner-only files on Linux, and
-Keychain-protected files on macOS. Aven backups leave them out, but operating
-system backups of your home directory, such as Time Machine, may copy them.
-
-A device's credential cannot decrypt anything, but whoever holds it can upload
-records that stop other devices from syncing or mark records deleted on the
-server. Use HTTPS or a trusted VPN so the credential never crosses an
-unprotected network, and remove a lost device promptly.
+[backups](/backups/). See [what encryption protects](#what-encryption-protects)
+for what the server can still see.
 
 ## Start a server
 
@@ -351,6 +323,28 @@ from the device with the best data:
    aven --db /path/to/new.sqlite sync join
    ```
 
+## What encryption protects
+
+Encryption covers synced content. It does not cover:
+
+- **Your devices.** Databases, images and backups on each device are readable.
+  Rely on your operating system's account and disk protection.
+- **Metadata.** The server sees device identities, record counts and sizes,
+  timing, connection details, the random IDs of tasks, workspaces and images,
+  which records belong together, and exact image sizes. Recurring task IDs
+  derive from the recurrence, so someone who knows most of one can confirm a
+  guess.
+- **Availability.** A malicious server can withhold data or show devices stale
+  or different views.
+- **Device trust.** Every paired device can add and remove devices, including
+  all the others. Pair only devices you control.
+- **Credentials.** Each device stores its sync credential on disk: owner-only
+  files on Linux, Keychain-protected files on macOS. Aven backups leave it out,
+  but home-directory backups such as Time Machine may copy it. A credential
+  cannot decrypt anything, but its holder can upload records that stop other
+  devices from syncing or mark records deleted. Use HTTPS or a trusted VPN, and
+  remove a lost device promptly.
+
 ## Upgrade from unencrypted sync
 
 Earlier releases synced without end-to-end encryption. Encrypted sync can't
@@ -363,7 +357,11 @@ use that server storage, so every device moves to a new sync:
    backup with `aven backup`, and preserve the old server database and image
    storage together. If a device cannot sync, preserve its database and backup;
    its unique edits are not included, so do not erase or replace it.
-2. Upgrade Aven everywhere, including the server.
+2. Upgrade Aven everywhere, including the server. Homebrew and the install
+   script upgrade normally. On a direct install with sync configured,
+   `aven update` refuses because it can't verify sync compatibility and
+   suggests updating the server first. Updating the server doesn't help here,
+   so after step 1 run `aven update --yes --allow-sync-incompatibility`.
 3. Prepare and serve new server storage, as in
    [Start a server](#start-a-server), with a new `--data` path.
 4. On the device with the complete data, run `aven sync setup`.

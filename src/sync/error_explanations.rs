@@ -134,8 +134,9 @@ pub(crate) fn explain(
     if has("e2ee-data-only-import-unavailable") {
         return Some(Explanation {
             code: "e2ee-data-only-import-unavailable",
-            message: "Import is unavailable for a database that takes part in encrypted sync.",
-            next_step: "Import into a new local database instead.",
+            message: "This export came from a database that takes part in encrypted sync, so it \
+                      can't be imported.",
+            next_step: "Restore an aven backup archive into a new database path instead.",
         });
     }
     if has("e2ee-installation-fenced") {

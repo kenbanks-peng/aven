@@ -1320,7 +1320,7 @@ Export portable user and sync metadata as JSON.
 aven export --output <path>
 ```
 
-The export includes tasks, recurring schedules, future-task settings, history, pauses, conflicts, and attachment information. Past dated tasks remain ordinary task rows. Image files are excluded and `blobs_included` is `false`. Parent directories are created as needed. The command reports workspace and task counts and output size.
+The export includes tasks, recurring schedules, future-task settings, history, pauses, conflicts, and attachment information. Past dated tasks remain ordinary task rows. Image files are excluded and `blobs_included` is `false`. Parent directories are created as needed. The command reports workspace and task counts and output size. An export from a database that has set up or joined sync can't be imported; use `aven backup` for synced data.
 
 ```sh
 aven export --output ~/backups/aven.json
@@ -1334,7 +1334,7 @@ Replace local data from an aven JSON export.
 aven import <path> --yes
 ```
 
-Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable. Sync restores images that reached the same server before export. Attachments that were still local-only remain unavailable metadata and are not published after import; use a backup archive when moving them and their image files.
+Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable and are not published by sync; use a backup archive when moving images.
 
 Exports without recurrence sections import every task as nonrecurring data.
 

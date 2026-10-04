@@ -10,6 +10,12 @@ description: Release notes for aven.
 - [List and remove devices](https://aventasks.dev/sync/#manage-devices) with `aven sync device` or **Manage devices** in the TUI Sync dialog. Removing a device rotates the keys for future changes.
 - [`aven sync reset`](https://aventasks.dev/sync/#rebuilding-sync) returns a database to local-only use, keeping its tasks and images.
 - Breaking: Unencrypted sync is removed, and servers refuse storage from earlier releases. Sync every device before upgrading, then follow [Upgrade from unencrypted sync](https://aventasks.dev/sync/#upgrade-from-unencrypted-sync) to move to new server storage.
+- Move tasks to a project in another workspace with [`aven move`](https://aventasks.dev/command-reference/#aven-move). Notes, labels, metadata, attachments, epic subtrees and internal relationships move with them, and refs keep their suffix.
+- On Linux, [`aven daemon install`](https://aventasks.dev/sync/#automate-sync-with-the-daemon) and the other daemon subcommands manage a systemd user service.
+- `aven server` and `aven server setup` store data in a standard location by default, so `--data` is optional.
+- Fix: The daemon restarts on the new version after `brew upgrade` instead of running the old one until Homebrew cleans it up.
+- Fix: Databases, backups, restore staging and log files are created readable only by you.
+- Fix: The TUI shows availability times in recent actions and conflicts in local time.
 
 ## v0.1.44 (2026-09-26)
 
