@@ -1,9 +1,5 @@
 # Testing
 
-For release-specific protocol, security, platform, signing, migration and manual
-gates, see [Desktop E2EE release qualification](RELEASE_CHECKLIST.md). Passing the
-checks here alone does not establish release readiness.
-
 Use focused checks while iterating, then hand off each affected package. Run the
 full gate once on the integrated tree; this routing is a starting heuristic, not
 automatic diff-based selection.
