@@ -28,7 +28,7 @@ only after checking the relevant source, dependencies, and environment for chang
   work, interrupted setup/join, missing credentials, and actionable failure
   states. Include TLS success and certificate/proxy failure cases. Distinguish
   executed current checks from older checks carried forward by source comparison.
-- [ ] **Migration and recovery:** old-release sync before upgrading, current
+- [x] **Migration and recovery:** old-release sync before upgrading, current
   images, backup, fresh server storage, and empty-peer join. Verify missing-image
   refusal, preservation of unavailable devices, interrupted publication/install,
   nonempty-join and bound-target restore/import refusal. Preserve post-cutover
@@ -61,6 +61,29 @@ Recovery kits, self-removal, same-vault restore, hosted service implementation,
 periodic snapshots, compaction, and global ciphertext deduplication are outside
 this desktop release. Notarization and updater signer verification are separate
 follow-ups, not evidence supplied by checksum verification.
+
+## Migration and recovery: October 4, 2026
+
+Executed on `96299e96` on macOS with the official v0.1.44 `darwin-arm64`
+release (checksum verified) and the current debug CLI, following the sync
+guide's upgrade steps. Raw log and harness are under
+`history/2026-10-04-migration-qa/`.
+
+| Area | Result |
+| --- | --- |
+| Before upgrading | Three v0.1.44 devices on plaintext sync: tasks, note, priority edit, three images, one image deleted (server-only), one device left with an unsynced edit. Checkpoint backup taken and old storage preserved. |
+| Upgrade | Current client opens the old database; `sync` reports `[sync-not-set-up]` with next step. Current server refuses old storage with `server-storage-unsupported` and guidance. |
+| New sync | Setup on fresh storage from the complete device; preview reports one image missing on this computer and that the old server stops being used. |
+| Peers | Joining from the old nonempty database is refused with `[sync-join-requires-empty-database]` and data kept. An empty peer receives tasks, note, edit and exact image bytes; the image missing on the starting device is listed as unavailable and `attachment get` refuses; the deleted server-only image is not transferred. |
+| Unavailable device | Upgraded later, keeps its unsynced edit and stays editable; not erased. |
+| Refusals | Restore and JSON import into the syncing database are refused with guidance. |
+| Recovery and rollback | The v0.1.44 backup restores with the current client. Post-cutover work is preserved in a current backup that restores to a new path. v0.1.44 restores its checkpoint backup to a new path and syncs with the preserved old storage. |
+| Interruption | Interrupted setup and join are covered by the desktop manual journey below and the October 2 resume fixtures, on fresh rather than upgraded databases. |
+
+Observations, not fixed: with a local image file deleted, `aven backup` fails
+with only `error backup-blob-missing` and no next step (refusing is intended);
+v0.1.44 cannot open an upgraded database and reports a raw SQL migration error,
+so rollback depends on backups as the guide says.
 
 ## Desktop manual journey: October 4, 2026
 
