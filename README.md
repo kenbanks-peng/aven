@@ -24,7 +24,7 @@ Docs: <https://aventasks.dev/getting-started/>
   <a href="meta/ios-dark.webp#gh-dark-mode-only"><img src="meta/ios-dark.webp" width="24%" alt="Aven iOS queue in dark mode with the TUI demo tasks, priorities, and project labels in an iPhone frame"></a>
 </p>
 
-*Your tasks, away from the terminal. Aven for iOS is coming soon.*
+*Your tasks, away from the terminal. Aven for iOS and Android is coming soon.*
 
 ## Why aven?
 
@@ -37,7 +37,8 @@ and shows what needs action, what is blocked, and what to focus on next.
 Aven keeps tasks in a local SQLite database instead of tracked files inside each project repo. You
 and your agents can capture and update tasks offline, independent of git state, branches, worktrees,
 or checkouts. If you need the same tasks on more than one device, you can
-[sync them through a server you control](https://aventasks.dev/sync/).
+[sync them through a server you control](https://aventasks.dev/sync/). Sync is end-to-end
+encrypted, so the server cannot read your tasks.
 
 Repositories map to projects by default. Aven creates a project when you add its first task, and
 gives each task a short Jira/Linear-style ID such as `APP-7KQ9`. Aven can generate them without a

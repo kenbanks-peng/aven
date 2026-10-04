@@ -14,7 +14,7 @@ aven is a local-first task manager for power users and coding agents. It keeps w
 - Organize and schedule work with priorities, labels, epics, dependencies, due dates, deferred availability, and recurring tasks.
 - Let coding agents work from the same queue you do: they can pick up ready work, capture follow-ups, and leave notes that outlive the chat session.
 - Move quickly through task management in a polished, keyboard-first TUI.
-- Work offline with tasks stored in SQLite. Optional self-hosted sync shares them across machines.
+- Work offline with tasks stored in SQLite. Optional self-hosted sync, end-to-end encrypted, shares them across machines.
 - Keep the details needed to resume work with Jira/Linear-style IDs such as `APP-7KQ9`, Markdown descriptions, notes, and image attachments.
 - Copy a complete task report as Markdown or [publish it as an unlisted GitHub gist](/tui/#publish-a-task-report-as-a-github-gist) when you want to share its context.
 - Separate personal and work tasks into workspaces.
@@ -25,7 +25,7 @@ Taskwarrior is a major inspiration, but aven has its own approach to agents, IDs
 
 The local SQLite database is the working copy for both the TUI and CLI. Sync is optional and lets multiple machines use the same tasks.
 
-Tasks live outside repositories, so they survive branch switches, worktrees, repository clones, and dirty git states. Repositories provide project context without owning the task data. The same store can support the TUI, agent CLI, terminal capture flows, sync clients, and other integrations. A Telegram bot, future iOS app, or similar entrypoint can create project-scoped tasks without cloning every repository. You can run the end-to-end encrypted sync server on a Raspberry Pi or home server over a trusted VPN or behind a TLS reverse proxy; it stores only ciphertext.
+Tasks live outside repositories, so they survive branch switches, worktrees, repository clones, and dirty git states. Repositories provide project context without owning the task data. The same store can support the TUI, agent CLI, terminal capture flows, sync clients, and other integrations. A Telegram bot, the mobile apps, or a similar entrypoint can create project-scoped tasks without cloning every repository. You can run the end-to-end encrypted sync server on a Raspberry Pi or home server over a trusted VPN or behind a TLS reverse proxy; it cannot read your tasks or images.
 
 The CLI is designed for agents and automation. Its output is compact, token-efficient, stable, and explicit. Agents can capture follow-up work, update status, add notes, and leave handoff context without relying on hidden UI state.
 

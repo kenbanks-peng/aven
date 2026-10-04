@@ -20,7 +20,7 @@ const features = [
   { label: 'MARKDOWN · NOTES · IMAGES', title: 'Keep the context attached.', description: 'Markdown, notes, images, epics, and dependencies. Everything you need to pick up where you left off.', color: 'pink', href: '/concepts/' },
   { label: 'KEYS · COMMANDS · UNDO', title: 'Stay on the keyboard.', description: 'Move, filter, edit, and undo without reaching for the mouse. A command palette fills in the gaps.', color: 'blue', href: '/tui/' },
   { label: 'SQLITE · OFFLINE', title: 'Local is the default.', description: 'Your tasks live in SQLite, outside your repositories. Work offline. Switch branches. Keep your data.', color: 'green', href: '/backups/' },
-  { label: 'SYNC · SELF-HOSTED', title: 'Sync you control', description: 'Works fully offline. Need it on more machines? Run the sync server on a Raspberry Pi and connect over your own network.', color: 'yellow', href: '/sync/' },
+  { label: 'SYNC · SELF-HOSTED · E2EE', title: 'Sync you control', description: 'Works fully offline. Need it on more machines? Run the sync server on a Raspberry Pi and connect over your own network. Sync is end-to-end encrypted, so the server cannot read your tasks.', color: 'yellow', href: '/sync/' },
 ];
 const testimonials = [
   { quote: "This is by far the best TUI application I've come across in months.", author: 'Edke', source: 'GitHub', href: 'https://github.com/raine/aven/issues/5#issuecomment-5048980472' },
@@ -74,7 +74,7 @@ const testimonials = [
           <div class="hero-intro">
             <h1 id="hero-heading">Built for focus.<br /><span>Ready for agents.</span></h1>
             <div class="hero-description">
-              <p>Aven is a local-first task manager with a keyboard-driven TUI for you and a compact CLI for your coding agents. Keep tasks and context together across projects. Work offline, with optional self-hosted sync across devices.</p>
+              <p>Aven is a local-first task manager with a keyboard-driven TUI for you and a compact CLI for your coding agents. Keep tasks and context together across projects. Work offline, with optional self-hosted, end-to-end encrypted sync across devices.</p>
               <a class="hero-docs" href="/getting-started/">
                 Read the docs
                 <ArrowRightIcon />
@@ -185,9 +185,9 @@ const testimonials = [
         <section class="section" aria-labelledby="mobile-heading">
           <div class="mobile-preview">
             <div class="mobile-copy">
-              <p class="eyebrow">Coming soon · iOS</p>
+              <p class="eyebrow">Coming soon · iOS and Android</p>
               <h2 id="mobile-heading">Your tasks, away from the terminal.</h2>
-              <p>Aven for iOS shows the same queue, priorities, and project labels, synced through the server you already run.</p>
+              <p>Aven for iPhone and Android shows the same queue, priorities, and project labels, synced through the server you already run.</p>
             </div>
             <img src="/ios-dark.webp" width="1326" height="2742" alt="Aven for iOS showing the synced task queue with priorities and project labels in dark mode." loading="lazy" />
           </div>
