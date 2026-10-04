@@ -84,6 +84,24 @@ No regression: the ranges overlap and the medians differ by under 1%. The
 3.7 s longest writer hold from October 2 does not reproduce on an idle host;
 local edits can wait up to about 1.3 s during a near-cap setup.
 
+Ongoing sync on the same host type (`ba9cd334` against the same baseline, one
+run per case; request counts were identical between versions and runs; raw log
+under `history/2026-10-04-hetzner-sync-bench/`):
+
+| Workload | Push requests / time | Pull requests / time |
+| --- | ---: | ---: |
+| 2,000 tasks + 500 small images, no added latency | 2,040 / 6.7 s base, 7.9 s current | 518 / 3.6 s base, 3.8 s current |
+| Same, 100 ms per request | 2,056 / 217 s base, 219 s current | 518 / 57 s both |
+| 500 tasks + 200 images of 300 KB, 100 ms | 820 / 88 s both | 206 / 23 s both |
+| 2,000 edits with 500 attachments | 25 / 1.5 s base, 2.0 s current | 8 / 1.5 s base, 1.6 s current |
+
+Task changes batch well (2,000 edits in 25 requests), and the attachment
+integrity scan stays under 1 ms. Image uploads take about four sequential
+requests each and downloads about one, so on high-latency links image count
+dominates sync time. Pushing many changes costs roughly 0.5–1.2 s more CPU time
+than the baseline in every push case; that is small next to network time and
+was not investigated.
+
 ## Migration and recovery: October 4, 2026
 
 Executed on `96299e96` on macOS with the official v0.1.44 `darwin-arm64`
