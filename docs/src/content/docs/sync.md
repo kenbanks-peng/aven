@@ -331,9 +331,9 @@ Encryption covers synced content. It does not cover:
   Rely on your operating system's account and disk protection.
 - **Metadata.** The server sees device identities, record counts and sizes,
   timing, connection details, the random IDs of tasks, workspaces and images,
-  which records belong together, and exact image sizes. Recurring task IDs
-  derive from the recurrence, so someone who knows most of one can confirm a
-  guess.
+  which records belong together, and the exact size of each encrypted image.
+  Recurring task IDs derive from the recurrence, so someone who knows most of
+  one can confirm a guess.
 - **Availability.** A malicious server can withhold data or show devices stale
   or different views.
 - **Device trust.** Every paired device can add and remove devices, including
