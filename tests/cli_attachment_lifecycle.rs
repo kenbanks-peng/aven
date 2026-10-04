@@ -210,7 +210,7 @@ fn missing_object_file_is_reported_unavailable_and_blocks_reads() {
 
     let backup = env.path("backup.aven");
     let error = fail(env.aven(&db, ["backup", "--output", backup.to_str().unwrap()]));
-    contains_all(&error, &["error backup-blob-missing"]);
+    contains_all(&error, &["error backup-blob-missing", &sha256, "hint="]);
 
     // Metadata stays intact, so restoring the file restores availability.
     std::fs::write(&object, std::fs::read(&image).unwrap()).unwrap();

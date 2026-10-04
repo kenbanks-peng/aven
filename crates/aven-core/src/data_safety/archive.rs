@@ -109,7 +109,10 @@ where
     for row in rows {
         let source = object_path(blob_dir, &row.sha256)?;
         if !source.exists() {
-            bail!("error backup-blob-missing");
+            bail!(
+                "error backup-blob-missing sha256={} hint=\"the local image file is missing; restore it from a backup or attach the image again, then retry\"",
+                row.sha256
+            );
         }
         let bytes = fs::read(&source).context("error backup-blob-read")?;
         validate_object_bytes(&row.sha256, row.byte_size, &row.media_type, &bytes).await?;
