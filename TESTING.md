@@ -37,8 +37,7 @@ installation identity.
 ## Container packaging
 
 Build the checked-out source and exercise the real container on your host's
-architecture (`linux/amd64` or `linux/arm64`). The smoke script needs Docker
-28 or newer for platform-specific image inspection:
+architecture (`linux/amd64` or `linux/arm64`):
 
 ```sh
 docker build -t aven:local .

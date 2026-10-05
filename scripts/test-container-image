@@ -21,10 +21,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-[[ "$(docker image inspect --platform "$platform" --format '{{.Config.User}}' "$image")" == '65532:65532' ]]
-[[ "$(docker image inspect --platform "$platform" --format '{{.Os}}/{{.Architecture}}' "$image")" == "$platform" ]]
 docker volume create "$volume" >/dev/null
-docker run -d --name "$name" --platform "$platform" -v "$volume:/data" "$image" >/dev/null
+docker create --name "$name" --platform "$platform" -v "$volume:/data" "$image" >/dev/null
+# Inspect the selected image ID, not the host-default platform of a manifest tag.
+image_id="$(docker inspect --format '{{.Image}}' "$name")"
+[[ "$(docker image inspect --format '{{.Config.User}}' "$image_id")" == '65532:65532' ]]
+[[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_id")" == "$platform" ]]
+docker start "$name" >/dev/null
 for ((attempt = 0; attempt < 30; attempt++)); do
   [[ "$(docker inspect --format '{{.State.Running}}' "$name")" == true ]] || break
   sleep 1
