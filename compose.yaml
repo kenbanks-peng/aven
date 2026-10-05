@@ -1,0 +1,12 @@
+name: aven-sync
+services:
+  aven:
+    image: ${AVEN_IMAGE:?Set AVEN_IMAGE to a versioned ghcr.io/raine/aven image or a local build}
+    ports:
+      - "${AVEN_HOST_IP:-127.0.0.1}:3746:3746"
+    volumes:
+      - aven-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+volumes:
+  aven-data:

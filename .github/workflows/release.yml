@@ -252,3 +252,96 @@ jobs:
             git pull --rebase
             git push
           fi
+
+  container-verify:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: aven-linux-*
+          merge-multiple: true
+          path: packages
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Assemble and verify release images
+        env:
+          VERSION: ${{ github.ref_name }}
+          REVISION: ${{ github.sha }}
+        run: |
+          mkdir -p release-bin images
+          for arch in amd64 arm64; do
+            (cd packages && sha256sum -c "aven-linux-$arch.sha256")
+            mkdir -p "release-bin/linux-$arch"
+            tar -xzf "packages/aven-linux-$arch.tar.gz" -C "release-bin/linux-$arch"
+            docker buildx build --load --platform "linux/$arch" --target release \
+              --build-context release-bin=./release-bin \
+              --label "org.opencontainers.image.version=${VERSION#v}" \
+              --label "org.opencontainers.image.revision=$REVISION" \
+              -t "aven:release-$arch" .
+            scripts/test-container-image "aven:release-$arch" "linux/$arch"
+            docker save "aven:release-$arch" | gzip > "images/$arch.tar.gz"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: container-images
+          path: images/*.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  container-publish:
+    needs: [release, container-verify]
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: aven-container-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: container-images
+          path: images
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Publish tested images and verify version manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          image=ghcr.io/raine/aven
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            docker load -i "images/$arch.tar.gz"
+            docker tag "aven:release-$arch" "$image:$version-$arch"
+            docker push "$image:$version-$arch"
+          done
+          docker buildx imagetools create -t "$image:$version" \
+            "$image:$version-amd64" "$image:$version-arm64"
+          docker buildx imagetools inspect --raw "$image:$version" > manifest.json
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64", "arm64"]' manifest.json
+          for arch in amd64 arm64; do
+            docker pull --platform "linux/$arch" "$image:$version"
+            scripts/test-container-image "$image:$version" "linux/$arch"
+          done
+          # An older release rerun must not move latest backwards.
+          latest_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if [[ "$latest_release" == "$VERSION" ]]; then
+            docker buildx imagetools create -t "$image:latest" "$image:$version"
+          fi
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io

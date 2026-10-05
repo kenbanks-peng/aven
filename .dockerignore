@@ -1,0 +1,17 @@
+**
+!Cargo.toml
+!Cargo.lock
+!src/
+!src/**
+!crates/
+!crates/aven-core/
+!crates/aven-core/Cargo.toml
+!crates/aven-core/build.rs
+!crates/aven-core/src/
+!crates/aven-core/src/**
+!crates/aven-core/migrations/
+!crates/aven-core/migrations/**
+!crates/aven-core/.sqlx/
+!crates/aven-core/.sqlx/**
+!.cargo/
+!.cargo/config.toml

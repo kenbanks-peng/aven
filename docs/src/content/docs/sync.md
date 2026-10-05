@@ -74,6 +74,144 @@ location / {
 
 Default Caddy body and timeout settings need no changes.
 
+### Run with Docker
+
+The container runs as a non-root user and stores the server database in
+`/data/sync-server.sqlite`. Mount a named volume at `/data` for both setup and
+serving. Setup is always explicit; starting with unprepared storage fails.
+
+Build the checked-out source locally:
+
+```sh
+docker build -t aven:local .
+export AVEN_IMAGE=aven:local
+```
+
+Stable release images are published by the release workflow to
+`ghcr.io/raine/aven` for Linux amd64 and arm64. Once your chosen release has an
+image available, select its exact version (without the `v` prefix):
+
+```sh
+export AVEN_IMAGE=ghcr.io/raine/aven:VERSION
+```
+
+Replace `VERSION` with the release number. `latest` tracks the current stable
+release, but pin a version or digest for deliberate upgrades.
+
+#### Compose behind an HTTPS proxy
+
+Use the repository's [`compose.yaml`](https://github.com/raine/aven/blob/main/compose.yaml),
+or save this as `compose.yaml`:
+
+```yaml
+name: aven-sync
+services:
+  aven:
+    image: ${AVEN_IMAGE:?Set AVEN_IMAGE to a versioned ghcr.io/raine/aven image or a local build}
+    ports:
+      - "${AVEN_HOST_IP:-127.0.0.1}:3746:3746"
+    volumes:
+      - aven-data:/data
+    restart: unless-stopped
+    stop_grace_period: 15s
+volumes:
+  aven-data:
+```
+
+Configure your externally managed HTTPS proxy on the host to forward to
+`127.0.0.1:3746`, as in [Use a public TLS proxy](#use-a-public-tls-proxy).
+Prepare storage with the HTTPS origin devices will use, without a path prefix:
+
+```sh
+docker compose run --rm --no-deps aven setup --url https://sync.example.com --invitation-only
+docker compose up -d
+docker compose logs -f aven
+```
+
+The setup command prints only the private `aven-setup:` invitation. Use it on
+the starting device as in [Set up sync from one device](#set-up-sync-from-one-device).
+It expires after one hour; before the server is claimed, explicitly run setup
+again if you need a replacement. Never put setup in the service's startup
+command or share its output in logs.
+
+Keep the Compose project name and volume when replacing containers. The volume
+is `aven-sync_aven-data` with the example's project name. `docker compose down`
+keeps it; **`docker compose down --volumes` deletes server storage**.
+
+The image listens on `0.0.0.0` inside the container using Aven's explicit
+wildcard-bind opt-in. Its plaintext warning is expected: host publication, not
+the container bind address, controls host exposure. Do not change the host bind
+to `0.0.0.0` or omit it. Payload encryption does not protect credentials or setup
+invitations. Keep the container network trusted too. A proxy in another
+container cannot reach the host's loopback through its own `127.0.0.1`; arrange
+a private container-network connection instead, without publishing a public
+plaintext port.
+
+For a trusted VPN instead of HTTPS, publish only on the host's VPN address and
+use that origin for setup:
+
+```sh
+export AVEN_HOST_IP=100.100.20.30
+docker compose run --rm --no-deps aven setup --url http://100.100.20.30:3746 --invitation-only
+docker compose up -d
+```
+
+The VPN address must be available when Docker starts the service. Do not run
+setup again on a claimed server just to change its deployment.
+
+#### Plain Docker commands
+
+Use the same volume for setup and serving. This example assumes the host HTTPS
+proxy above:
+
+```sh
+docker volume create aven-data
+docker run --rm -v aven-data:/data "$AVEN_IMAGE" setup --url https://sync.example.com --invitation-only
+docker run -d --name aven-server --restart unless-stopped --stop-timeout 15 \
+  -v aven-data:/data -p 127.0.0.1:3746:3746 "$AVEN_IMAGE"
+```
+
+For direct VPN access, replace `127.0.0.1` in the published port with the
+specific trusted VPN address and use that address in the setup URL. The
+15-second stop timeout allows Aven's ten-second graceful shutdown to finish.
+Aven is the main container process and receives shutdown signals directly.
+
+Fresh named volumes inherit the image directory's ownership. For a host bind
+mount instead, prepare the directory for UID/GID `65532:65532` and owner-only
+access before mounting it at `/data`; the image does not repair permissions.
+Do not work around ownership problems by running the service as root.
+
+#### Upgrade and preserve storage
+
+Read release notes for server and device compatibility before upgrading. Stop
+the service and preserve a cold copy of the **entire volume**, including SQLite
+sidecar files, before allowing the new version to open it:
+
+```sh
+docker compose stop
+```
+
+Use your host's volume-backup tooling while the service is stopped. Storage
+files are owner-only, so backup tooling needs access to UID 65532's files.
+Keep copies private. Server storage can be migrated on startup; running an
+older image against it is not a safe rollback procedure. A saved server volume
+does not promise recovery of the same sync after data loss and does not replace
+[client backups](/backups/): encryption keys live on devices.
+
+Then select the new exact image version, pull it, and recreate the service:
+
+```sh
+export AVEN_IMAGE=ghcr.io/raine/aven:NEW_VERSION
+docker compose pull
+docker compose up -d
+```
+
+The same named volume remains attached. For a local build, build the new source
+with a new tag and select that tag instead of pulling. For plain Docker, stop
+and remove only `aven-server`, preserve `aven-data`, then recreate the container
+with the new image and the same volume/port settings. Do not rerun setup during
+an upgrade. There are no automatic image updates.
+
 ### Run the server as a service
 
 Once sync works, run `aven server` under your operating system's service

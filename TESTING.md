@@ -34,6 +34,53 @@ and opens the copy through `Database::open`. The template omits
 behavior: migrations, historical schemas, WAL handling, backups, restores, or
 installation identity.
 
+## Container packaging
+
+Build the checked-out source and exercise the real container on your host's
+architecture (`linux/amd64` or `linux/arm64`). The smoke script needs Docker
+28 or newer for platform-specific image inspection:
+
+```sh
+docker build -t aven:local .
+scripts/test-container-image aven:local linux/arm64
+AVEN_IMAGE=aven:local docker compose config --quiet
+shellcheck scripts/test-container-image
+actionlint .github/workflows/container.yml .github/workflows/release.yml
+```
+
+The smoke script uses disposable containers and a named volume. It checks
+non-root setup, refusal of unprepared storage, the HTTP router, graceful
+SIGTERM, restart, and replacement-container persistence. Setup invitations are
+captured privately and deleted; do not upload raw setup output as test logs.
+Container CI builds source images on native amd64 and arm64 runners.
+
+The release workflow checksums the existing Linux musl archives, builds the
+Dockerfile's `release` target with the `release-bin` named build context, and
+runs both architectures (arm64 under QEMU). That context contains
+`linux-amd64/aven` and `linux-arm64/aven`. Saved, tested images are passed to
+publication without rebuilding. Hyphenated tags verify images without
+publishing. Stable tags publish exact versions and promote `latest` only after
+both platform pulls pass and GitHub identifies the tag as its latest release.
+
+Registry publication needs separate verification: make the GHCR package
+public, confirm its repository link and both platform descriptors, and pull the
+version anonymously on **both** platforms. Use a temporary empty Docker config
+rather than changing your normal registry credentials:
+
+```sh
+config_dir=$(mktemp -d)
+docker --config "$config_dir" pull --platform linux/amd64 ghcr.io/raine/aven:VERSION
+docker --config "$config_dir" pull --platform linux/arm64 ghcr.io/raine/aven:VERSION
+rm -rf "$config_dir"
+```
+
+Replace `VERSION` with the published version. If Docker uses a custom context,
+set `DOCKER_HOST` to its daemon endpoint first; an empty configuration does not
+include saved contexts. Local builds and authenticated
+workflow pulls do not establish public visibility or anonymous access. Release
+tags and registry publishing are remote mutations; only run them when
+authorized.
+
 ## Affected-package handoff
 
 `just test-package <package>` runs that package's non-documentation test targets.
