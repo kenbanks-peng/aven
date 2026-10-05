@@ -60,7 +60,7 @@ pub(crate) use tui::{
 #[derive(Parser)]
 #[command(name = "aven")]
 #[command(about = "Local-first task manager")]
-#[command(version)]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), "+agent.1"))]
 #[command(styles = STYLES)]
 pub struct Cli {
     #[arg(long, global = true, help = "Use a specific SQLite database path")]
