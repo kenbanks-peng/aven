@@ -1,6 +1,8 @@
 use super::{
-    SidebarEntry, SidebarEntryTarget, SidebarSection, TaskQuery, TaskScopeTarget, TuiStore,
+    SidebarEntry, SidebarEntryTarget, SidebarSection, TaskQuery, TaskScopeTarget, TuiProjection,
+    TuiStore,
 };
+use crate::config::AppConfig;
 
 impl TuiStore {
     pub(crate) async fn collapsed_sidebar_sections(
@@ -18,8 +20,10 @@ impl TuiStore {
             .set_sidebar_section_collapsed(section, collapsed)
             .await
     }
+}
 
-    pub(super) fn rebuild_sidebar(&mut self) {
+impl TuiProjection {
+    pub(super) fn rebuild_sidebar(&mut self, app_config: &AppConfig) {
         let mut entries = vec![
             SidebarEntry {
                 label: "Views".to_string(),
@@ -90,8 +94,7 @@ impl TuiStore {
                 section: true,
             },
         ];
-        let views: Vec<_> = self
-            .app_config
+        let views: Vec<_> = app_config
             .tui
             .sidebar
             .views

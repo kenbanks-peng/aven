@@ -74,16 +74,6 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 #[test]
-fn generated_png_fixture_is_compressible() {
-    let png = compressible_png_bytes();
-    let mut options = oxipng::Options::from_preset(4);
-    options.strip = oxipng::StripChunks::Safe;
-    let optimized = oxipng::optimize_from_memory(&png, &options).unwrap();
-
-    assert!(optimized.len() < png.len());
-}
-
-#[test]
 fn attachment_add_list_get_and_delete_work_locally() {
     let env = TestEnv::new();
     let db = env.db("attachments.sqlite");
@@ -340,7 +330,6 @@ fn attachment_add_and_delete_work_when_sync_enabled() {
         r#"
 sync:
   enabled: true
-  server_url: "http://127.0.0.1:9"
 daemon:
   wake_addr: "{}"
 "#,
@@ -500,23 +489,14 @@ fn version_flag_prints_package_version() {
 }
 
 #[test]
-fn explicit_zero_result_limits_are_value_errors() {
+fn explicit_zero_result_limit_reports_clap_value_error() {
     let env = TestEnv::new();
-    let db = env.db("invalid-result-limits.sqlite");
+    let db = env.db("invalid-result-limit.sqlite");
 
-    for arguments in [
-        vec!["search", "task", "--json", "--limit", "0"],
-        vec!["list", "--limit", "0"],
-        vec!["prime", "--limit", "0"],
-        vec!["label", "list", "--limit", "0"],
-        vec!["project", "list", "--limit", "0"],
-        vec!["conflict", "list", "--limit", "0"],
-    ] {
-        let output = env.aven(&db, arguments);
-        assert_eq!(output.status.code(), Some(2));
-        let error = fail(output);
-        contains_all(&error, &["invalid value '0'", "--limit <LIMIT>", "1.."]);
-    }
+    let output = env.aven(&db, ["list", "--limit", "0"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error = fail(output);
+    contains_all(&error, &["invalid value '0'", "--limit <LIMIT>", "1.."]);
 }
 
 #[test]

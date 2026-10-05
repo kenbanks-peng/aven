@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::{Context, Result, bail};
 use aven_core::choices::TaskSource;
 use aven_core::db::Database;
@@ -6,7 +8,8 @@ use serde::Serialize;
 
 use super::validation::{validate_optional_priority, validate_optional_status, validate_priority};
 use crate::cli::{
-    AddArgs, InternalNaturalAddArgs, ListArgs, RefArgs, ShowArgs, TaskEditArgs, TaskSearchArgs,
+    AddArgs, InternalNaturalAddArgs, ListArgs, MoveArgs, RefArgs, ShowArgs, TaskEditArgs,
+    TaskSearchArgs,
 };
 use crate::config::AppConfig;
 use crate::input::read_optional_text;
@@ -19,7 +22,7 @@ use crate::refs::DisplayRefContext;
 use crate::render::{KvLine, changed_text, print_json_pretty, quote};
 use crate::task_render::{
     TaskLineJson, build_full_task_report, print_full_task_report, print_task_line_item,
-    task_full_json, task_line_json_item,
+    task_full_json, task_line_json_item, task_line_text,
 };
 use crate::types::Task;
 use crate::workspaces::Workspace;
@@ -95,12 +98,13 @@ pub(crate) async fn cmd_add(
         }
         let project =
             resolve_add_project(database, workspace, args.project.as_deref(), routing).await?;
-        let schedule = super::recurrence_schedule(
+        let schedule = crate::recurrence_input::recurrence_schedule(
             rule,
             args.repeat_at.as_deref(),
             args.repeat_due.as_deref(),
             args.time_zone.as_deref(),
             args.repeat_start_on.as_deref(),
+            crate::recurrence_input::RecurrenceClock::system(),
         )?;
         let outcome = database
             .create_recurrence_series(
@@ -334,7 +338,6 @@ pub(crate) async fn cmd_internal_natural_add(
     tracing::info!(
         workspace_id = %args.workspace_id,
         task_id = %task.id,
-        project = %task.project_key,
         "created task from internal natural-add"
     );
     print_created_task(&task, &workspace, &display_refs);
@@ -371,12 +374,13 @@ fn due_on_display(due_on: Option<&str>) -> String {
 pub(crate) async fn cmd_show(
     database: &Database,
     workspace: &Workspace,
+    blob_dir: &std::path::Path,
     args: ShowArgs,
 ) -> Result<()> {
     let task = database.resolve_task_ref(workspace, &args.task_ref).await?;
     if args.full {
         let detail = database.task_detail(&task).await?;
-        let report = build_full_task_report(database, workspace, detail).await?;
+        let report = build_full_task_report(database, workspace, blob_dir, detail).await?;
         if args.json {
             print_json_pretty(&task_full_json(&report))?;
         } else {
@@ -460,8 +464,15 @@ pub(crate) async fn cmd_list(
         let items = items.iter().map(task_line_json_item).collect::<Vec<_>>();
         print_json_pretty(&items)?;
     } else {
+        let stdout = std::io::stdout();
+        let mut output = stdout.lock();
         for item in items {
-            print_task_line_item(&item);
+            if let Err(error) = writeln!(output, "{}", task_line_text(&item)) {
+                if error.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(error.into());
+            }
         }
     }
     Ok(())
@@ -713,6 +724,56 @@ pub(crate) async fn cmd_edit(
     );
     Ok(())
 }
+pub(crate) async fn cmd_move(
+    database: &Database,
+    source_workspace: &Workspace,
+    args: MoveArgs,
+) -> Result<()> {
+    let target_workspace = database
+        .resolve_required_workspace(&args.to_workspace, "--to-workspace")
+        .await?;
+    let mut task_ids = Vec::with_capacity(args.task_refs.len());
+    for task_ref in &args.task_refs {
+        task_ids.push(
+            database
+                .resolve_task_ref(source_workspace, task_ref)
+                .await?
+                .id,
+        );
+    }
+    let outcome = database
+        .move_tasks(
+            source_workspace,
+            aven_core::operations::MoveTasksInput {
+                task_ids,
+                target_workspace: target_workspace.clone(),
+                target_project: args.project,
+            },
+        )
+        .await?;
+    let display_refs = database.display_ref_context(&target_workspace.id).await?;
+    for task_id in &outcome.task_ids {
+        let task = database
+            .resolve_task_ref(&target_workspace, task_id.as_str())
+            .await?;
+        println!(
+            "moved {} workspace={} project={} title={}",
+            display_refs.display_ref(&task),
+            target_workspace.key,
+            task.project_key,
+            quote(&task.title)
+        );
+    }
+    println!(
+        "moved={} from={} to={} project={}",
+        outcome.task_ids.len(),
+        source_workspace.key,
+        target_workspace.key,
+        outcome.target_project_key
+    );
+    Ok(())
+}
+
 pub(crate) async fn cmd_delete_restore(
     database: &Database,
     workspace: &Workspace,

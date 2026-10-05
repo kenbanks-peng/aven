@@ -123,7 +123,7 @@ impl App {
             }
             Err(error) => {
                 state.error = Some(metadata_error(&error));
-                if error.to_string() == "error metadata-field-changed"
+                if crate::sync::error_explanations::has_code(&error, "metadata-field-changed")
                     && let Ok(fields) = self.store.metadata_fields().await
                     && let Some(renamed) = fields
                         .into_iter()
@@ -164,7 +164,7 @@ mod tests {
     #[tokio::test]
     async fn entries_follow_field_ids_and_definition_order_across_renames() {
         let dir = tempfile::tempdir().unwrap();
-        let database = aven_core::db::Database::open(&dir.path().join("test.db"))
+        let (database, _) = crate::test_support::open_database(&dir.path().join("test.db"))
             .await
             .unwrap();
         let mut app = App::new_for_tests(database.clone()).await.unwrap();

@@ -150,7 +150,6 @@ impl TuiStore {
                     epic.epic_id.clone(),
                     TaskCreationUndo::TuiEpicChild {
                         epic_id: epic.epic_id.clone(),
-                        epic_display_ref: epic.display_ref.clone(),
                     },
                 )
                 .with_create_missing_labels(),
@@ -280,7 +279,6 @@ impl TuiStore {
                     epic.epic_id.clone(),
                     TaskCreationUndo::TuiEpicChild {
                         epic_id: epic.epic_id.clone(),
-                        epic_display_ref: epic.display_ref.clone(),
                     },
                 )
                 .with_create_missing_labels(),

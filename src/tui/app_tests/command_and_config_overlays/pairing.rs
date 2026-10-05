@@ -1,159 +1,125 @@
 use super::*;
 
-const TEST_SERVER: &str = "https://sync.example.test:8443/aven";
-const TEST_TOKEN: &str = "pairing-token-fixture-0123456789";
-
-fn configure_pairing(app: &mut App, server: &str, token: &str) {
-    let mut config = AppConfig::default();
-    config.sync.server_url = Some(server.to_string());
-    config.sync.auth_token = Some(token.to_string());
-    app.store.set_config(config);
-}
-
-async fn activate_pairing_command(app: &mut App) {
+async fn activate_add_device(app: &mut App, typed: &str) {
     app.begin_command().await;
-    type_chars(app, "pair-mobile").await;
+    type_chars(app, typed).await;
     app.handle_overlay_key(key(KeyCode::Enter)).await.unwrap();
 }
 
 #[tokio::test]
-async fn command_panel_activates_safe_shared_pairing_presentation() {
-    let mut app = test_app().await;
-    configure_pairing(&mut app, TEST_SERVER, TEST_TOKEN);
-
-    activate_pairing_command(&mut app).await;
-
-    let Some(OverlayState::Pairing(presentation)) = &app.overlay else {
-        panic!("expected pairing overlay");
-    };
-    assert_eq!(
-        presentation.server_identity(),
-        "https://sync.example.test:8443"
-    );
-    let debug = format!("{:?}", app.overlay);
-    assert!(!debug.contains(TEST_TOKEN));
-    assert!(!debug.contains("aven://pair/"));
-}
-
-#[tokio::test]
-async fn missing_pairing_inputs_have_safe_disabled_reasons() {
+async fn add_device_is_disabled_until_sync_is_set_up() {
     let mut app = test_app().await;
     app.begin_command().await;
-    type_chars(&mut app, "pair-mobile").await;
+    type_chars(&mut app, "add-device").await;
     let Some(OverlayState::Command { state }) = &app.overlay else {
         panic!("expected command panel");
     };
     assert_eq!(state.candidates.len(), 1);
     assert_eq!(
         state.candidates[0].availability.reason(),
-        Some("configure sync.server_url")
+        Some("requires sync setup")
     );
 
     app.handle_overlay_key(key(KeyCode::Enter)).await.unwrap();
     assert!(app.overlay.is_none());
+    assert!(!app.invite.work_pending());
     assert_eq!(
         toast_message(&app).as_deref(),
-        Some(":pair-mobile is disabled: configure sync.server_url")
+        Some(":add-device is disabled: requires sync setup")
+    );
+}
+
+#[tokio::test]
+async fn add_device_reports_invitation_failures_on_its_page() {
+    use crate::tui::overlay::PairingOverlay;
+    let mut app = test_app().await;
+    app.store.sync_status.set_up = true;
+
+    activate_add_device(&mut app, "pair").await;
+    assert!(matches!(
+        app.overlay,
+        Some(OverlayState::Pairing(PairingOverlay::Creating { .. }))
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while app.invite.work_pending() {
+            app.poll_invite().await.unwrap();
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("invitation task settles");
+
+    let Some(OverlayState::Pairing(PairingOverlay::Failed(message))) = &app.overlay else {
+        panic!("expected the failure on the Add device page");
+    };
+    assert!(
+        message.contains("Sync isn't set up for this database"),
+        "{message}"
     );
 
-    configure_pairing(&mut app, TEST_SERVER, "");
-    app.begin_command().await;
-    type_chars(&mut app, "pair-mobile").await;
     app.handle_overlay_key(key(KeyCode::Enter)).await.unwrap();
-    assert_eq!(
-        toast_message(&app).as_deref(),
-        Some(":pair-mobile is disabled: configure a nonempty sync.auth_token")
-    );
+    assert!(matches!(
+        app.overlay,
+        Some(OverlayState::Pairing(PairingOverlay::Creating { .. }))
+    ));
+    assert!(app.invite.work_pending());
 }
 
 #[tokio::test]
-async fn invalid_and_loopback_servers_map_shared_secret_safe_errors() {
-    for (server, expected) in [
-        (
-            "ssh://sync.example.test",
-            "pairing unavailable · sync.server_url must be an http or https URL without credentials, query, or fragment",
-        ),
-        (
-            "http://127.0.0.1:3746",
-            "pairing unavailable · sync.server_url must be reachable from the phone",
-        ),
-    ] {
-        let mut app = test_app().await;
-        configure_pairing(&mut app, server, TEST_TOKEN);
-
-        activate_pairing_command(&mut app).await;
-
-        assert!(app.overlay.is_none());
-        let message = toast_message(&app).unwrap();
-        assert_eq!(message, expected);
-        assert!(!message.contains(TEST_TOKEN));
-        assert!(!message.contains("aven://pair/"));
-    }
-}
-
-#[tokio::test]
-async fn oversized_invitation_maps_shared_capacity_error_safely() {
+async fn back_from_a_failed_add_device_returns_to_the_sync_dialog() {
+    use crate::tui::overlay::PairingOverlay;
     let mut app = test_app().await;
-    let token = "t".repeat(3000);
-    configure_pairing(&mut app, TEST_SERVER, &token);
-
-    activate_pairing_command(&mut app).await;
-
-    assert!(app.overlay.is_none());
-    let message = toast_message(&app).unwrap();
-    assert_eq!(
-        message,
-        "pairing unavailable · shorten sync.auth_token or sync.server_url"
-    );
-    assert!(!message.contains(&token));
-    assert!(!message.contains("aven://pair/"));
-}
-
-#[tokio::test]
-async fn escape_closes_the_pairing_overlay() {
-    let mut app = test_app().await;
-    configure_pairing(&mut app, TEST_SERVER, TEST_TOKEN);
-    activate_pairing_command(&mut app).await;
+    app.overlay = Some(OverlayState::Pairing(PairingOverlay::Failed("x".into())));
 
     app.handle_overlay_key(key(KeyCode::Esc)).await.unwrap();
 
-    assert!(app.overlay.is_none());
+    assert!(matches!(app.overlay, Some(OverlayState::Sync(_))));
 }
 
 #[tokio::test]
-async fn detail_surface_reports_pairing_as_list_only() {
+async fn copy_invitation_writes_the_clipboard_only_when_asked() {
     let mut app = test_app().await;
-    configure_pairing(&mut app, TEST_SERVER, TEST_TOKEN);
-    create_and_select_task(&mut app, test_task_draft("Detail pairing target")).await;
-    app.execute(Action::ToggleDetail).await.unwrap();
-
-    activate_pairing_command(&mut app).await;
-
-    assert!(app.overlay.is_none());
-    assert_eq!(
-        toast_message(&app).as_deref(),
-        Some(":pair-mobile is disabled: available only in the task list")
+    let (_, invitation) = crate::sync::encrypted::sample_invitations("https://sync.example.com");
+    let presentation = std::sync::Arc::new(
+        crate::pairing::PairingPresentation::new(
+            "https://sync.example.com",
+            &invitation,
+            0,
+            crate::pairing::QrGlyphs::HalfBlock,
+        )
+        .unwrap(),
     );
-}
+    let before = crate::tui::platform::clipboard_text_for_test();
+    app.invite.show_for_test(presentation, &invitation);
+    app.show_pairing_invitation();
+    assert!(matches!(app.overlay, Some(OverlayState::Pairing(_))));
+    // Showing the QR code writes nothing to the clipboard.
+    assert_eq!(crate::tui::platform::clipboard_text_for_test(), before);
 
-#[tokio::test]
-async fn outside_click_clears_the_pairing_overlay() {
-    let mut app = test_app().await;
-    configure_pairing(&mut app, TEST_SERVER, TEST_TOKEN);
-    activate_pairing_command(&mut app).await;
-    let size = ratatui::layout::Size::new(160, 80);
-    let Some(OverlayState::Pairing(presentation)) = &app.overlay else {
-        panic!("expected pairing overlay");
-    };
-    let area = crate::tui::ui::pairing_layout(
-        ratatui::layout::Rect::new(0, 0, size.width, size.height),
-        presentation.as_ref(),
-    )
-    .area;
-
-    app.dispatch_mouse(left_click(area.x.saturating_sub(1), area.y), size)
+    app.handle_overlay_key(key(KeyCode::Char('c')))
         .await
         .unwrap();
 
-    assert!(app.overlay.is_none());
+    assert!(matches!(app.overlay, Some(OverlayState::Pairing(_))));
+    assert_eq!(
+        crate::tui::platform::clipboard_text_for_test().as_deref(),
+        Some(invitation.as_str())
+    );
+    let message = toast_message(&app).unwrap();
+    assert!(message.contains("grants access"), "{message}");
+    assert!(!message.contains("aven://"), "{message}");
+}
+
+#[tokio::test]
+async fn copy_invitation_without_a_waiting_invitation_copies_nothing() {
+    let mut app = test_app().await;
+    let before = crate::tui::platform::clipboard_text_for_test();
+
+    app.copy_pairing_invitation();
+
+    assert_eq!(crate::tui::platform::clipboard_text_for_test(), before);
+    assert_eq!(
+        toast_message(&app).as_deref(),
+        Some("no invitation is waiting")
+    );
 }

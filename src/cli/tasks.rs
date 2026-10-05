@@ -398,6 +398,19 @@ pub(crate) struct NoteDeleteArgs {
 }
 
 #[derive(Args)]
+pub(crate) struct MoveArgs {
+    /// Task refs in the active source workspace
+    #[arg(required = true)]
+    pub(crate) task_refs: Vec<String>,
+    /// Existing destination workspace by name or key
+    #[arg(long, value_name = "WORKSPACE")]
+    pub(crate) to_workspace: String,
+    /// Existing project in the destination workspace
+    #[arg(long, value_name = "PROJECT")]
+    pub(crate) project: String,
+}
+
+#[derive(Args)]
 pub(crate) struct RefArgs {
     /// Task ref, such as APP-7KQ9 or an unambiguous suffix
     pub(crate) task_ref: String,

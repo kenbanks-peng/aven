@@ -10,7 +10,9 @@ use crate::metadata::{
 use crate::sync::wire::ChangeWire;
 use crate::types::MutableEntityType;
 
-use super::shared::{str_payload, task_id, workspace_id_payload};
+use super::shared::{
+    str_payload, task_id, task_operation_workspace_id_payload, workspace_id_payload,
+};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct MetadataValuePayload {
@@ -313,7 +315,7 @@ async fn apply_task_value(
     change: &ChangeWire,
     present: bool,
 ) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let task_id = task_id(change)?;
     let remote_id: MetadataFieldId = str_payload(&change.payload, "field_id")?.parse()?;
     let key = str_payload(&change.payload, "key")?;
@@ -346,21 +348,6 @@ async fn apply_task_value(
     }
     if present {
         let value = str_payload(&change.payload, "value")?;
-        let (count, bytes): (i64, i64) = sqlx::query_as(
-            "SELECT COUNT(*), COALESCE(SUM(length(CAST(value AS BLOB))), 0)
-             FROM task_metadata
-             WHERE workspace_id = ? AND task_id = ? AND field_id != ?",
-        )
-        .bind(&workspace_id)
-        .bind(&task_id)
-        .bind(&field.id)
-        .fetch_one(&mut *conn)
-        .await?;
-        if count + 1 > crate::metadata::MAX_METADATA_VALUES as i64
-            || bytes + value.len() as i64 > crate::metadata::MAX_METADATA_TOTAL_BYTES as i64
-        {
-            bail!("error invalid-sync-change task-metadata-limit");
-        }
         sqlx::query(
             "INSERT INTO task_metadata(
                  workspace_id, task_id, field_id, value, created_at, updated_at
@@ -541,6 +528,105 @@ pub(super) async fn apply_initial_task_values(
     Ok(())
 }
 
+/// Moves a generated task's untouched metadata from the baseline generation to an
+/// earlier accepted one. A value whose version is not the baseline's (explicitly
+/// set or removed since generation) is kept and reported as an ordinary conflict.
+pub(super) async fn adopt_generated_values(
+    conn: &mut SqliteConnection,
+    workspace_id: &WorkspaceId,
+    task_id: &TaskId,
+    baseline: &ChangeWire,
+    accepted: &ChangeWire,
+) -> Result<()> {
+    let seed = |change: &ChangeWire| str_payload(&change.payload, "task_field_version_seed");
+    let (baseline_seed, accepted_seed) = (seed(baseline)?, seed(accepted)?);
+    let mut fields: Vec<(MetadataField, Option<String>, Option<String>)> = Vec::new();
+    for (change, accepted_side) in [(baseline, false), (accepted, true)] {
+        let values: Vec<MetadataValuePayload> =
+            serde_json::from_value(change.payload["metadata"].clone())?;
+        for value in values {
+            let field = ensure_remote_field(
+                conn,
+                workspace_id,
+                &value.field_id,
+                &value.key,
+                &change.created_at,
+            )
+            .await?;
+            let index = match fields.iter().position(|(known, ..)| known.id == field.id) {
+                Some(index) => index,
+                None => {
+                    fields.push((field, None, None));
+                    fields.len() - 1
+                }
+            };
+            if accepted_side {
+                fields[index].2 = Some(value.value);
+            } else {
+                fields[index].1 = Some(value.value);
+            }
+        }
+    }
+    for (field, in_baseline, value) in fields {
+        let identity = format!("metadata:{}", field.id);
+        let current = field_version(conn, task_id, &identity).await?;
+        let untouched = match &in_baseline {
+            Some(_) => current.as_deref() == Some(baseline_seed.as_str()),
+            None => current.is_none(),
+        };
+        if !untouched {
+            create_task_conflict(
+                conn,
+                accepted,
+                workspace_id,
+                task_id,
+                &field,
+                value.as_deref(),
+                current.as_deref(),
+            )
+            .await?;
+            continue;
+        }
+        if let Some(value) = &value {
+            sqlx::query(
+                "INSERT INTO task_metadata(
+                     workspace_id, task_id, field_id, value, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(workspace_id, task_id, field_id)
+                 DO UPDATE SET value = excluded.value",
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(&field.id)
+            .bind(value)
+            .bind(&accepted.created_at)
+            .bind(&accepted.created_at)
+            .execute(&mut *conn)
+            .await?;
+            set_field_version(conn, task_id, &identity, &accepted_seed).await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM task_metadata WHERE workspace_id = ? AND task_id = ? AND field_id = ?",
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(&field.id)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "DELETE FROM field_versions
+                 WHERE workspace_id = ? AND entity_type = 'task' AND entity_id = ? AND field = ?",
+            )
+            .bind(workspace_id)
+            .bind(task_id)
+            .bind(&identity)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn ensure_remote_field(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
@@ -561,19 +647,35 @@ pub(super) async fn ensure_remote_field(
         insert_field_alias(conn, workspace_id, remote_id, &field.id).await?;
         return Ok(field);
     }
+    let occupied: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metadata_fields WHERE id = ?)")
+            .bind(remote_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let local_id = if occupied {
+        use sha2::Digest;
+        let digest =
+            sha2::Sha256::digest(format!("aven/moved-metadata/{workspace_id}/{remote_id}"));
+        crate::ids::encode_crockford(digest[..10].try_into()?).parse()?
+    } else {
+        remote_id.clone()
+    };
     sqlx::query(
         "INSERT INTO metadata_fields(id, workspace_id, key, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?)",
     )
-    .bind(remote_id)
+    .bind(&local_id)
     .bind(workspace_id)
     .bind(&key)
     .bind(created_at)
     .bind(created_at)
     .execute(&mut *conn)
     .await?;
+    if local_id != *remote_id {
+        insert_field_alias(conn, workspace_id, remote_id, &local_id).await?;
+    }
     Ok(MetadataField {
-        id: remote_id.clone(),
+        id: local_id,
         workspace_id: workspace_id.clone(),
         key,
         created_at: created_at.to_string(),

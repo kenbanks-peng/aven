@@ -5,16 +5,21 @@ use crate::ids::TaskId;
 use crate::operations::canonical_related_pair;
 use crate::sync::wire::ChangeWire;
 
-use super::shared::{str_payload, task_id, workspace_id_payload};
+use super::shared::{
+    relationship_endpoint_is_current, str_payload, task_id, task_operation_workspace_id_payload,
+};
 
 pub(super) async fn apply_related(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
     linked: bool,
 ) -> Result<()> {
-    let workspace_id = workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let initiating_task_id = task_id(change)?;
     let related_task_id: TaskId = str_payload(&change.payload, "related_task_id")?.parse()?;
+    if !relationship_endpoint_is_current(conn, &workspace_id, &related_task_id).await? {
+        return Ok(());
+    }
     let (task_a_id, task_b_id) = canonical_related_pair(&initiating_task_id, &related_task_id)?;
     let existing_tasks: i64 =
         sqlx::query_scalar("SELECT count(*) FROM tasks WHERE workspace_id = ? AND id IN (?, ?)")
@@ -31,27 +36,69 @@ pub(super) async fn apply_related(
         );
     }
 
-    let incoming_seq = change
-        .server_seq
-        .context("error invalid-sync-change related mutation missing server_seq")?;
-    let current = sqlx::query(
-        "SELECT c.server_seq
+    reduce_related(
+        conn,
+        change,
+        &workspace_id,
+        task_a_id,
+        task_b_id,
+        linked,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn replay_related(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
+    let workspace = task_operation_workspace_id_payload(conn, change).await?;
+    let task = task_id(change)?;
+    let other: TaskId = str_payload(&change.payload, "related_task_id")?.parse()?;
+    if !relationship_endpoint_is_current(conn, &workspace, &other).await? {
+        return Ok(());
+    }
+    let (a, b) = canonical_related_pair(&task, &other)?;
+    reduce_related(
+        conn,
+        change,
+        &workspace,
+        a,
+        b,
+        change.op_type == crate::change_log::op_type::RELATED_ADD,
+        true,
+    )
+    .await
+}
+
+async fn reduce_related(
+    conn: &mut SqliteConnection,
+    change: &ChangeWire,
+    workspace_id: &crate::ids::WorkspaceId,
+    task_a_id: &TaskId,
+    task_b_id: &TaskId,
+    linked: bool,
+    ordered: bool,
+) -> Result<()> {
+    if !ordered {
+        let incoming_seq = change
+            .server_seq
+            .context("error invalid-sync-change related mutation missing server_seq")?;
+        let current = sqlx::query(
+            "SELECT c.server_seq
          FROM task_related_links r
          JOIN changes c ON c.change_id = r.last_change_id
          WHERE r.workspace_id = ? AND r.task_a_id = ? AND r.task_b_id = ?",
-    )
-    .bind(&workspace_id)
-    .bind(task_a_id)
-    .bind(task_b_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if let Some(current) = current {
-        let current_seq: Option<i64> = current.get("server_seq");
-        if current_seq.is_none() || current_seq.is_some_and(|seq| seq >= incoming_seq) {
-            return Ok(());
+        )
+        .bind(workspace_id)
+        .bind(task_a_id)
+        .bind(task_b_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(current) = current {
+            let current_seq: Option<i64> = current.get("server_seq");
+            if current_seq.is_none() || current_seq.is_some_and(|seq| seq >= incoming_seq) {
+                return Ok(());
+            }
         }
     }
-
     sqlx::query(
         "INSERT INTO task_related_links(
              workspace_id, task_a_id, task_b_id, linked, last_change_id
@@ -60,7 +107,7 @@ pub(super) async fn apply_related(
              linked = excluded.linked,
              last_change_id = excluded.last_change_id",
     )
-    .bind(&workspace_id)
+    .bind(workspace_id)
     .bind(task_a_id)
     .bind(task_b_id)
     .bind(i64::from(linked))

@@ -10,6 +10,13 @@ use crate::operations::{
 use crate::types::Project;
 use crate::workspaces::Workspace;
 
+mod blank_database;
+pub mod encrypted_sync;
+pub mod worker;
+pub mod writer_timing;
+
+pub use blank_database::{blank_database_template, open_blank_database};
+
 pub fn task_id(value: &str) -> TaskId {
     let mut encoded = value
         .bytes()
@@ -27,6 +34,11 @@ pub fn task_id(value: &str) -> TaskId {
 
 pub async fn acquire(database: &Database) -> Result<PoolConnection<Sqlite>> {
     database.acquire_reader().await
+}
+
+/// Shares the database's own connection pool for raw SQL in tests.
+pub fn pool(database: &Database) -> sqlx::SqlitePool {
+    database.pool().clone()
 }
 
 pub async fn ensure_default_workspace(conn: &mut SqliteConnection) -> Result<Workspace> {
@@ -150,9 +162,36 @@ pub async fn set_meta(conn: &mut SqliteConnection, key: &str, value: &str) -> Re
 #[cfg(test)]
 pub async fn test_conn() -> (tempfile::TempDir, PoolConnection<Sqlite>) {
     let temp = tempfile::tempdir().unwrap();
-    let database = Database::open(&temp.path().join("test.sqlite"))
+    let database = open_blank_database(&temp.path().join("test.sqlite"))
         .await
         .unwrap();
     let conn = database.acquire_reader().await.unwrap();
     (temp, conn)
+}
+
+/// Author a historical pause through the same transaction as the database API.
+pub async fn pause_recurrence_series_at(
+    database: &Database,
+    workspace: &Workspace,
+    series_id: &crate::recurrence::RecurrenceSeriesId,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<crate::operations::RecurrenceStateOutcome> {
+    let mut conn = database.acquire_writer().await?;
+    crate::operations::recurrence::pause_recurrence_series(
+        &mut conn,
+        workspace,
+        series_id,
+        &at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
+    .await
+}
+
+/// Meta key that makes a bound test database generate occurrence-form recurrence
+/// records. Their identities ignore template content, which lets tests produce
+/// unequal generations that share an ID.
+pub const OCCURRENCE_FORM_GENERATION: &str = "test_occurrence_form_generation";
+
+pub async fn use_occurrence_form_generation(database: &Database) -> Result<()> {
+    let mut conn = database.acquire_writer().await?;
+    crate::db::set_meta(&mut conn, OCCURRENCE_FORM_GENERATION, "1").await
 }

@@ -1,0 +1,70 @@
+[package]
+name = "aven-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+aven-core = { path = "../crates/aven-core", features = ["test-support"] }
+libfuzzer-sys = "0.4"
+
+# Not part of the main workspace, so normal builds and tests skip it.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "tail"
+path = "fuzz_targets/tail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tail_apply"
+path = "fuzz_targets/tail_apply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attachment"
+path = "fuzz_targets/attachment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "membership"
+path = "fuzz_targets/membership.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bootstrap"
+path = "fuzz_targets/bootstrap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invitation"
+path = "fuzz_targets/invitation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false

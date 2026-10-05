@@ -10,8 +10,8 @@ use crate::tui::store::deleted_picker_items;
 use crate::tui::store::{ConflictTarget, TaskQuery};
 
 pub(crate) const CONFLICT_FIELD_TITLE: &str = "Conflict: field";
-pub(crate) const CONFLICT_CONFIRM_LOCAL_TITLE: &str = "Resolve conflict: local";
-pub(crate) const CONFLICT_CONFIRM_REMOTE_TITLE: &str = "Resolve conflict: remote";
+pub(crate) const CONFLICT_CONFIRM_LOCAL_TITLE: &str = "Resolve conflict: current";
+pub(crate) const CONFLICT_CONFIRM_REMOTE_TITLE: &str = "Resolve conflict: incoming";
 pub(crate) const CONFLICT_MANUAL_TITLE: &str = "Resolve conflict: manual";
 pub(crate) const CONFLICT_DETAILS_TITLE: &str = "Conflict details";
 
@@ -69,15 +69,16 @@ impl App {
         }
         let mut lines = Vec::new();
         for target in &targets {
-            lines.push(format!("field={}", target.field));
+            lines.push(target.field.clone());
             lines.push(format!(
-                "local {}: {}",
-                target.variant_a, target.local_value
+                "current: {}",
+                crate::tui::time::conflict_value_display(&target.field, &target.local_value)
             ));
             lines.push(format!(
-                "remote {}: {}",
-                target.variant_b, target.remote_value
+                "incoming: {}",
+                crate::tui::time::conflict_value_display(&target.field, &target.remote_value)
             ));
+            lines.push("resolve: c a current · c r incoming · c m manual".to_string());
             lines.push(String::new());
         }
         if lines.last().is_some_and(String::is_empty) {
@@ -217,10 +218,17 @@ impl App {
             ConflictResolutionChoice::Local => CONFLICT_CONFIRM_LOCAL_TITLE,
             ConflictResolutionChoice::Remote => CONFLICT_CONFIRM_REMOTE_TITLE,
         };
+        let side = match choice {
+            ConflictResolutionChoice::Local => "current",
+            ConflictResolutionChoice::Remote => "incoming",
+        };
         let prompt = format!(
-            "Resolve field={} with {}?",
+            "Keep the {side} {}? {}",
             target.field,
-            truncate_value_preview(&value, 60)
+            truncate_value_preview(
+                &crate::tui::time::conflict_value_display(&target.field, &value),
+                60
+            )
         );
         self.overlay = Some(OverlayState::confirm(
             ConfirmIntent::ResolveConflict { target, value },

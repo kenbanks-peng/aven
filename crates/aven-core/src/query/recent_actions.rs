@@ -15,6 +15,14 @@ impl RecentActionItem {
             .summary
             .strip_suffix(&format!(": {}", task_title))
             .unwrap_or(&self.summary);
+        // Clients render available_at themselves, so the instant stays out of
+        // the text.
+        let summary = match self.task_activity_available_at() {
+            Some(available_at) => summary
+                .strip_suffix(&format!(" to {available_at}"))
+                .unwrap_or(summary),
+            None => summary,
+        };
         let Some(detail) = self.task_activity_detail() else {
             return summary.to_string();
         };
@@ -41,11 +49,23 @@ impl RecentActionItem {
             | crate::change_log::op_type::REMOVE_TASK_METADATA => true,
             crate::change_log::op_type::SET_FIELD => !matches!(
                 self.field.as_deref(),
-                Some("description" | "status" | "priority" | "deleted" | "is_epic")
+                Some(
+                    "description" | "status" | "priority" | "deleted" | "is_epic" | "available_at"
+                )
             ),
             _ => false,
         };
         include.then_some(detail)
+    }
+
+    pub fn task_activity_available_at(&self) -> Option<String> {
+        (matches!(
+            self.op_type.as_str(),
+            crate::change_log::op_type::SET_FIELD | crate::change_log::op_type::RESOLVE_FIELD
+        ) && self.field.as_deref() == Some("available_at"))
+        .then(|| self.detail.clone())
+        .flatten()
+        .filter(|detail| !detail.is_empty())
     }
 
     fn establishes_queue_activity(&self) -> bool {
@@ -1159,6 +1179,51 @@ mod tests {
             None,
         );
         assert_eq!(resolution.1, "resolved status conflict to todo: subject");
+    }
+
+    #[test]
+    fn availability_conflict_resolution_reports_instant_as_structured_data() {
+        let (verb, summary, detail, accent) = action_text(
+            "task",
+            op_type::RESOLVE_FIELD,
+            Some("available_at"),
+            &json!({"value": "2026-07-20T06:00:00Z"}),
+            Some("subject"),
+            None,
+        );
+        let action = RecentActionItem {
+            change_id: "change".to_string(),
+            entity_type: "task".to_string(),
+            entity_id: "task".to_string(),
+            op_type: op_type::RESOLVE_FIELD.to_string(),
+            field: Some("available_at".to_string()),
+            created_at: "2026-07-19T12:00:00Z".to_string(),
+            synced: false,
+            target: RecentActionTarget {
+                display_ref: None,
+                title: Some("subject".to_string()),
+                project_key: None,
+                status: None,
+                deleted: false,
+            },
+            verb,
+            summary,
+            detail,
+            accent,
+            grouped_change_count: 1,
+        };
+        assert_eq!(
+            action.summary,
+            "resolved availability conflict to 2026-07-20T06:00:00Z: subject"
+        );
+        assert_eq!(
+            action.task_activity_summary("subject"),
+            "resolved availability conflict"
+        );
+        assert_eq!(
+            action.task_activity_available_at().as_deref(),
+            Some("2026-07-20T06:00:00Z")
+        );
     }
 
     #[test]

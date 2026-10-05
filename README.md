@@ -24,7 +24,7 @@ Docs: <https://aventasks.dev/getting-started/>
   <a href="meta/ios-dark.webp#gh-dark-mode-only"><img src="meta/ios-dark.webp" width="24%" alt="Aven iOS queue in dark mode with the TUI demo tasks, priorities, and project labels in an iPhone frame"></a>
 </p>
 
-*Your tasks, away from the terminal. Aven for iOS is coming soon.*
+*Your tasks, away from the terminal. Aven for iOS and Android is coming soon.*
 
 ## Why aven?
 
@@ -37,7 +37,8 @@ and shows what needs action, what is blocked, and what to focus on next.
 Aven keeps tasks in a local SQLite database instead of tracked files inside each project repo. You
 and your agents can capture and update tasks offline, independent of git state, branches, worktrees,
 or checkouts. If you need the same tasks on more than one device, you can
-[sync them through a server you control](https://aventasks.dev/sync/).
+[sync them through a server you control](https://aventasks.dev/sync/). Sync is end-to-end
+encrypted, so the server cannot read your tasks.
 
 Repositories map to projects by default. Aven creates a project when you add its first task, and
 gives each task a short Jira/Linear-style ID such as `APP-7KQ9`. Aven can generate them without a
@@ -60,6 +61,10 @@ Inspired by Taskwarrior. See [aven and Taskwarrior](https://aventasks.dev/taskwa
 
 - *"This is by far the best TUI application I've come across in months."* -
   [Edke on GitHub](https://github.com/raine/aven/issues/5#issuecomment-5048980472)
+- *"I am really impressed by the functionality at this early stage. Became a
+  default tool for me already and serves also as shared memory and persistent
+  learnings for my agents."* -
+  [André Schemaitat on LinkedIn](https://www.linkedin.com/posts/schemaitat_tool-recommendation-for-local-task-management-share-7486060060650016768-5WRG/)
 - *"I'm having a blast using the TUI, UX is perfect."* -
   [xe6 on GitHub](https://github.com/raine/aven/pull/19#issuecomment-5455250814)
 - *"It's a genuinely beautiful TUI and a really promising task manager."* -

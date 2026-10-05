@@ -34,15 +34,39 @@ pub fn config_file_path() -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn default_db_path() -> Result<PathBuf> {
+fn state_dir_path() -> Result<PathBuf> {
     let mut dir = env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
         .or_else(|| dirs::home_dir().map(|home| home.join(".local/state")))
         .context("could not find state directory")?;
-    dir.push("aven");
-    dir.push("db.sqlite");
+    dir.push(APP_DIR);
     Ok(dir)
+}
+
+pub fn default_db_path() -> Result<PathBuf> {
+    Ok(state_dir_path()?.join("db.sqlite"))
+}
+
+/// Sync server storage: the first `$STATE_DIRECTORY` entry when systemd
+/// provides one, otherwise a `server` directory under the user state directory.
+pub fn default_server_data_path() -> Result<PathBuf> {
+    default_server_data_path_from(env::var_os("STATE_DIRECTORY"), state_dir_path)
+}
+
+fn default_server_data_path_from(
+    systemd_state: Option<std::ffi::OsString>,
+    user_state: impl FnOnce() -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    let systemd_dir = systemd_state
+        .as_deref()
+        .and_then(|dirs| env::split_paths(dirs).next())
+        .filter(|path| path.is_absolute());
+    let dir = match systemd_dir {
+        Some(dir) => dir,
+        None => user_state()?.join("server"),
+    };
+    Ok(dir.join("sync-server.sqlite"))
 }
 
 pub fn resolve_db_path(flag: Option<PathBuf>, config: &AppConfig) -> Result<PathBuf> {
@@ -105,54 +129,25 @@ pub fn resolve_blob_dir(db_path: &Path, config: &AppConfig) -> Result<PathBuf> {
     }
 }
 
-pub fn resolve_sync_server(flag: Option<&str>, config: &AppConfig) -> Result<String> {
-    let environment = env::var("AVEN_SYNC_SERVER").ok();
-    resolve_sync_server_from(flag, environment.as_deref(), config)
-}
-
-pub(crate) fn resolve_sync_server_from(
-    flag: Option<&str>,
-    environment: Option<&str>,
-    config: &AppConfig,
-) -> Result<String> {
-    if let Some(server) = flag {
-        return Ok(server.to_string());
-    }
-    if let Some(server) = environment {
-        return Ok(server.to_string());
-    }
-    if let Some(server) = &config.sync.server_url {
-        return Ok(server.clone());
-    }
-    bail!("error sync-server-required hint=\"pass --server or configure sync.server_url\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sync_server_resolution_uses_flag_environment_then_config() {
-        let mut config = AppConfig::default();
-        config.sync.server_url = Some("https://configured.example.test".to_string());
-
+    fn server_data_prefers_systemd_state_directory() {
+        let user = || Ok(PathBuf::from("/home/u/.local/state/aven"));
         assert_eq!(
-            resolve_sync_server_from(
-                Some("https://explicit.example.test"),
-                Some("https://environment.example.test"),
-                &config,
-            )
-            .unwrap(),
-            "https://explicit.example.test"
-        );
-        assert_eq!(
-            resolve_sync_server_from(None, Some("https://environment.example.test"), &config)
+            default_server_data_path_from(Some("/var/lib/aven:/var/lib/other".into()), user)
                 .unwrap(),
-            "https://environment.example.test"
+            PathBuf::from("/var/lib/aven/sync-server.sqlite")
         );
         assert_eq!(
-            resolve_sync_server_from(None, None, &config).unwrap(),
-            "https://configured.example.test"
+            default_server_data_path_from(Some("relative".into()), user).unwrap(),
+            PathBuf::from("/home/u/.local/state/aven/server/sync-server.sqlite")
+        );
+        assert_eq!(
+            default_server_data_path_from(None, user).unwrap(),
+            PathBuf::from("/home/u/.local/state/aven/server/sync-server.sqlite")
         );
     }
 

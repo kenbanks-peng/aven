@@ -6,7 +6,7 @@ use super::picker::visible_picker_indices;
 use super::state::{
     AddTaskMode, HeaderMenuItem, HeaderMenuKind, HeaderMenuState, MultilineInputMode,
     MultilineIntent, OrderMenuState, OverlayState, OverlayState::*, PickerIntent, PickerItem,
-    PickerMode, SearchIntent, SearchResultItem, SyncStatusState, TagComboboxIntent, TextIntent,
+    PickerMode, SearchIntent, SearchResultItem, TagComboboxIntent, TextIntent,
 };
 use super::tag_combobox::{tag_combobox_completion, tag_combobox_matches};
 
@@ -117,9 +117,9 @@ pub(crate) enum OverlayView<'a> {
         markdown: &'a str,
         scroll: u16,
     },
-    Pairing(std::sync::Arc<crate::pairing::PairingPresentation>),
+    Pairing(super::PairingOverlay),
     RecurrenceHistory(RecurrenceHistoryView<'a>),
-    SyncStatus(Box<SyncStatusView<'a>>),
+    Sync(Box<SyncDialogView<'a>>),
     DatabaseStats {
         stats: &'a TuiDatabaseStats,
         scroll: u16,
@@ -128,11 +128,12 @@ pub(crate) enum OverlayView<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SyncStatusView<'a> {
-    pub(crate) state: SyncStatusState,
+pub(crate) struct SyncDialogView<'a> {
+    pub(crate) state: &'a super::sync_dialog::SyncDialogState,
     pub(crate) status: &'a TuiSyncStatus,
-    pub(crate) syncing: bool,
-    pub(crate) now: time::OffsetDateTime,
+    pub(crate) activity: &'a crate::tui::sync_operations::SyncActivity,
+    /// When a manual sync started, while it runs.
+    pub(crate) syncing: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -483,8 +484,8 @@ impl<'a> RecurrenceHistoryView<'a> {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct OverlayViewContext<'a> {
     pub(crate) sync_status: &'a TuiSyncStatus,
-    pub(crate) syncing: bool,
-    pub(crate) now: time::OffsetDateTime,
+    pub(crate) sync_activity: &'a crate::tui::sync_operations::SyncActivity,
+    pub(crate) syncing: Option<std::time::Instant>,
     pub(crate) status_prefix_active: bool,
     pub(crate) priority_prefix_active: bool,
 }
@@ -590,15 +591,15 @@ impl<'a> OverlayView<'a> {
                 markdown: &state.markdown,
                 scroll: state.scroll,
             },
-            Pairing(presentation) => Self::Pairing(presentation.clone()),
+            Pairing(pairing) => Self::Pairing(pairing.clone()),
             RecurrenceHistory(state) => {
                 Self::RecurrenceHistory(RecurrenceHistoryView::from_state(state))
             }
-            SyncStatus(state) => Self::SyncStatus(Box::new(SyncStatusView {
-                state: state.clone(),
+            Sync(state) => Self::Sync(Box::new(SyncDialogView {
+                state,
                 status: context.sync_status,
+                activity: context.sync_activity,
                 syncing: context.syncing,
-                now: context.now,
             })),
             DatabaseStats { stats, scroll } => Self::DatabaseStats {
                 stats,
@@ -626,12 +627,13 @@ mod tests {
             false,
         ));
         let sync_status = TuiSyncStatus::default();
+        let sync_activity = crate::tui::sync_operations::SyncActivity::default();
         let picker = OverlayView::project(
             &state,
             OverlayViewContext {
                 sync_status: &sync_status,
-                syncing: false,
-                now: time::OffsetDateTime::UNIX_EPOCH,
+                sync_activity: &sync_activity,
+                syncing: None,
                 status_prefix_active: false,
                 priority_prefix_active: false,
             },
@@ -667,12 +669,13 @@ mod tests {
                 mode: PickerMode::Filter,
             });
             let sync_status = TuiSyncStatus::default();
+            let sync_activity = crate::tui::sync_operations::SyncActivity::default();
             let picker = OverlayView::project(
                 &state,
                 OverlayViewContext {
                     sync_status: &sync_status,
-                    syncing: false,
-                    now: time::OffsetDateTime::UNIX_EPOCH,
+                    sync_activity: &sync_activity,
+                    syncing: None,
                     status_prefix_active: false,
                     priority_prefix_active: false,
                 },

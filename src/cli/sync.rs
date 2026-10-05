@@ -13,23 +13,19 @@ Inspect both variants before resolving. Variant tokens come from `conflict show`
 --use takes precedence over explicit values. Without --use, supply exactly one
 of --value, --value-file, or --value-stdin."#;
 
-pub(super) const SERVER_HELP: &str = r#"Loopback binds may run without authentication. Private and public binds require
-sync.auth_token in the configuration file. Public binds also require
---unsafe-public-bind. Aven does not provide TLS termination."#;
+pub(super) const SERVER_HELP: &str = r#"Prepare storage with `aven server setup` first. The server does not terminate
+TLS. Bind it directly to a trusted VPN address for HTTP, or use a TLS reverse
+proxy. Public and wildcard binds require --unsafe-public-bind.
 
-pub(super) const SYNC_HELP: &str = r#"The server URL comes from --server, AVEN_SYNC_SERVER, or sync.server_url, in
-that order. Authentication and other sync settings live in the configuration
-file. Run `aven config show` to inspect the active file and `aven doctor` to
-diagnose routing and sync configuration."#;
+Storage defaults to $STATE_DIRECTORY/sync-server.sqlite when systemd sets
+StateDirectory=, otherwise ~/.local/state/aven/server/sync-server.sqlite
+(honoring $XDG_STATE_HOME). Pass the same --data PATH to setup and the server
+to use another location."#;
 
-pub(super) const PAIR_HELP: &str = r#"Pairing reads configuration and produces an invitation without opening a task
-database or contacting the sync server. The invitation requires a nonempty
-sync.auth_token and a phone-reachable HTTP or HTTPS server URL. Use --server
-when the configured URL is loopback or available only from the desktop.
-
-Use --copy on the local desktop to put the invitation on the clipboard instead
-of displaying a QR code. The invitation contains credentials; clipboard history
-and sharing services may retain it. SSH clipboard copying is not supported."#;
+pub(super) const SYNC_HELP: &str = r#"Sync is end-to-end encrypted. Start it on one device with `aven sync setup`
+and add other devices with `aven sync invite` and `aven sync join`. The server
+is the one chosen during setup or join. Set sync.enabled to let the daemon sync
+automatically."#;
 
 #[derive(Args)]
 pub(crate) struct ConflictCommand {
@@ -130,43 +126,104 @@ pub(crate) struct DaemonInstallArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write this executable path into the LaunchAgent"
+        help = "Write this executable path into the service file"
     )]
     pub(crate) program: Option<PathBuf>,
 }
 
 #[derive(Args)]
 pub(crate) struct DaemonRepairArgs {
-    #[arg(long, help = "Succeed without changes when the LaunchAgent is absent")]
+    #[arg(long, help = "Succeed without changes when the service is absent")]
     pub(crate) if_installed: bool,
     #[arg(
         long,
         value_name = "PATH",
-        help = "Write this executable path into the LaunchAgent"
+        help = "Write this executable path into the service file"
     )]
     pub(crate) program: Option<PathBuf>,
 }
 
 #[derive(Args)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    override_help = SERVER_COMMAND_HELP
+)]
 pub(crate) struct ServerArgs {
-    /// Listen address; port 0 asks the OS to choose a free port
-    #[arg(long, default_value = "127.0.0.1:0")]
+    #[command(subcommand)]
+    pub(crate) command: Option<ServerSubcommand>,
+    /// Listen address; defaults to loopback
+    #[arg(long, default_value = "127.0.0.1:3746")]
     pub(crate) bind: SocketAddr,
-    /// SQLite path; blobs use local.blob_dir or a path derived from this path
-    #[arg(long)]
-    pub(crate) data: PathBuf,
-    /// Confirm an authenticated public bind without built-in TLS
+    /// Allow a public or wildcard bind
     #[arg(long)]
     pub(crate) unsafe_public_bind: bool,
+    /// SQLite path of storage prepared by `server setup`
+    #[arg(long)]
+    pub(crate) data: Option<PathBuf>,
 }
+
+#[derive(Subcommand)]
+pub(crate) enum ServerSubcommand {
+    /// Prepare server storage and print its setup invitation
+    #[command(after_long_help = SERVER_SETUP_HELP)]
+    Setup(ServerSetupArgs),
+}
+
+#[derive(Args)]
+pub(crate) struct ServerSetupArgs {
+    /// SQLite path of the server storage; defaults to the standard location
+    /// described in `aven server --help`
+    #[arg(long)]
+    pub(crate) data: Option<PathBuf>,
+    /// HTTP or HTTPS origin that devices use to reach the server
+    #[arg(long)]
+    pub(crate) url: String,
+    /// Print only the setup invitation
+    #[arg(long)]
+    pub(crate) invitation_only: bool,
+}
+
+pub(super) const SERVER_SETUP_HELP: &str = r#"The setup invitation lets one device claim this server and set up sync from
+its database. It expires after one hour; until a device has claimed the
+server, running setup again replaces it. The replacement keeps the server's
+setup identity, so a device whose setup was interrupted resumes with the new
+invitation. Serve the storage with `aven server --bind ADDRESS`;
+setup prints a suggested command. Bind the server directly to its trusted VPN
+address for HTTP, or put a TLS reverse proxy in front of it. Public and wildcard
+binds require --unsafe-public-bind."#;
+
+const SERVER_COMMAND_HELP: &str = r#"Run the sync server
+
+Usage: aven server [OPTIONS]
+       aven server <COMMAND>
+
+Commands:
+  setup  Prepare server storage and print its setup invitation
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --bind <BIND>             Listen address [default: 127.0.0.1:3746]
+      --unsafe-public-bind      Allow a public or wildcard bind
+      --data <DATA>             SQLite path of storage prepared by `server setup`
+  -h, --help                    Print help
+
+Prepare storage with `aven server setup` first. The server does not terminate
+TLS. Bind it directly to a trusted VPN address for HTTP, or use a TLS reverse
+proxy. Public and wildcard binds require --unsafe-public-bind. Device
+credentials and setup invitations are not protected by Aven's end-to-end
+payload encryption.
+
+Storage defaults to $STATE_DIRECTORY/sync-server.sqlite when systemd sets
+StateDirectory=, otherwise ~/.local/state/aven/server/sync-server.sqlite
+(honoring $XDG_STATE_HOME). Pass the same --data PATH to setup and the server
+to use another location.
+"#;
 
 #[derive(Args)]
 pub(crate) struct SyncArgs {
     #[command(subcommand)]
     pub(crate) command: Option<SyncSubcommand>,
-    /// Override the configured sync server URL
-    #[arg(long)]
-    pub(crate) server: Option<String>,
     /// Emit the versioned sync result as JSON
     #[arg(long)]
     pub(crate) json: bool,
@@ -174,26 +231,139 @@ pub(crate) struct SyncArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum SyncSubcommand {
-    /// Produce a pairing invitation for Aven iOS onboarding
-    #[command(after_long_help = PAIR_HELP)]
-    Pair(PairArgs),
-    /// Report sync configuration, health, progress, and pending work
+    /// Report local sync state and pending work
     Status(StatusArgs),
+    /// Set up sync from this database with a server setup invitation
+    #[command(after_long_help = SETUP_HELP)]
+    Setup(SetupArgs),
+    /// Invite another device to sync and wait until it joins
+    #[command(after_long_help = INVITE_HELP)]
+    Invite(InviteArgs),
+    /// Join sync from an empty database with a device invitation
+    #[command(after_long_help = JOIN_HELP)]
+    Join(JoinArgs),
+    /// List or remove the devices that take part in sync
+    #[command(after_long_help = DEVICE_HELP)]
+    Device(DeviceCommand),
+    /// Stop syncing this database and keep its data as a local database
+    #[command(after_long_help = RESET_HELP)]
+    Reset(ResetArgs),
 }
 
 #[derive(Args)]
-pub(crate) struct PairArgs {
-    /// Use a phone-reachable server URL for this invitation
+pub(crate) struct InviteArgs {
+    /// Cancel the open invitation instead of creating or resuming one
     #[arg(long)]
-    pub(crate) server: Option<String>,
-    /// Copy the invitation to the local clipboard instead of displaying a QR code
+    pub(crate) cancel: bool,
+}
+
+pub(super) const DEVICE_HELP: &str = r#"Examples:
+  aven sync device list --json
+  aven sync device remove DEVICE_ID_OR_PREFIX --json
+
+Both commands contact the server. Remove a device from any other device in
+sync, using its full ID or a unique prefix of at least four hexadecimal
+characters. Removal stops the device from syncing and rotates the keys for
+future changes; it does not erase data the device already downloaded. Rerun an
+interrupted removal with the same full device ID to resume it."#;
+
+#[derive(Args)]
+pub(crate) struct DeviceCommand {
+    #[command(subcommand)]
+    pub(crate) command: DeviceSubcommand,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DeviceSubcommand {
+    /// List devices in sync, marking the current device
+    List {
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    /// Remove another device from sync and rotate keys for future changes
+    Remove {
+        /// Full device ID, or a unique prefix of at least 4 hex characters
+        device_id: String,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+}
+
+pub(super) const SETUP_HELP: &str = r#"Paste the invitation printed by `aven server setup`, or pipe it to standard
+input. Setup previews this database and asks for confirmation; use --yes when
+standard input is not a terminal. This database becomes the starting point of
+the synced data. Rerun the same command to resume an interrupted setup."#;
+
+pub(super) const INVITE_HELP: &str = r#"The invitation, which begins with `AVEN:`, is printed to standard output.
+Anyone with it can access all synced data and manage devices. Keep this command running until the other
+device joins; it stops when the invitation expires after ten minutes. Sync keeps
+running meanwhile. Rerunning resumes an open invitation and reports its real
+expiry.
+
+Use --cancel to retire an invitation before keys have been sent. If keys may
+already have been sent, it remains open until expiry and the next sync changes
+keys before uploading new changes; that device can still read anything it
+received before."#;
+
+pub(super) const JOIN_HELP: &str = r#"Paste the `AVEN:` invitation printed by `aven sync invite`, or pipe it to
+standard input, while the inviting device waits. Letter case doesn't matter. The database must be empty. Joining
+shows the server and asks for confirmation; use --yes when standard input is
+not a terminal. It downloads the synced data and then its images. Rerun the
+same command to resume an interrupted join without pasting the invitation again.
+
+If the invitation expired before the inviting device added this device, create a
+new invitation on that same device and pass it with --new-invitation. The
+earlier invitation is kept, so an admission that already happened still
+completes the join. Resuming can complete the join with any retained invitation."#;
+
+#[derive(Args)]
+pub(crate) struct JoinArgs {
+    /// Continue an unfinished join with a new invitation from the same inviting device
     #[arg(long)]
-    pub(crate) copy: bool,
+    pub(crate) new_invitation: bool,
+    /// Skip the server confirmation prompt
+    #[arg(long)]
+    pub(crate) yes: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct SetupArgs {
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    pub(crate) yes: bool,
 }
 
 #[derive(Args)]
 pub(crate) struct StatusArgs {
     /// Emit the versioned status report as JSON
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+pub(super) const RESET_HELP: &str = r#"Deletes this database's sync state, unsent sync queue and protected sync keys.
+Tasks, images and history stay and remain editable. Reset doesn't contact the
+server or remove this device from other devices' lists; remove it there with
+`aven sync device remove`.
+
+Afterwards the database is a local database that never synced: `aven sync
+setup` can start a new sync from it, and `aven sync join` still needs an empty
+database. Changes made here and not yet uploaded don't reach the old sync.
+
+Reset is refused while joining or an invitation is unfinished. An unfinished
+setup can be abandoned with --force when its original server storage or
+invitation is no longer available. This may orphan a server that accepted the
+setup. Reset asks for confirmation; use --yes when standard input is not a
+terminal."#;
+
+#[derive(Args)]
+pub(crate) struct ResetArgs {
+    /// Skip the confirmation prompt
+    #[arg(long)]
+    pub(crate) yes: bool,
+    /// Abandon an unfinished setup that cannot be resumed
+    #[arg(long)]
+    pub(crate) force: bool,
+    /// Emit the result as JSON
     #[arg(long)]
     pub(crate) json: bool,
 }

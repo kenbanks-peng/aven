@@ -13,7 +13,7 @@ pub mod matching;
 pub mod metadata;
 mod mutation;
 pub mod operations;
-mod pairing;
+pub mod private_fs;
 pub mod projects;
 pub mod query;
 pub mod queue;

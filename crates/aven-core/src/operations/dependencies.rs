@@ -35,12 +35,11 @@ impl Database {
         let outcome =
             add_task_dependency_in_transaction(&mut tx, workspace, task_id, depends_on_id).await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::AddTaskDependency {
                         task_id: outcome.task.id.clone(),
@@ -77,12 +76,11 @@ impl Database {
             remove_task_dependency_in_transaction(&mut tx, workspace, task_id, depends_on_id)
                 .await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::RemoveTaskDependency {
                         task_id: outcome.task.id.clone(),

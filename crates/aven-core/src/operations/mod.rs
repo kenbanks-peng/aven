@@ -7,13 +7,14 @@ mod labels;
 mod projects;
 pub(crate) mod recurrence;
 mod related;
+mod task_moves;
 mod tasks;
 
 #[cfg(feature = "test-support")]
 pub use attachments::attachment_read_items_by_task;
 pub use attachments::{
     AttachmentAddInput, AttachmentAddOutcome, AttachmentOutcome, AttachmentReadItem,
-    PreparedAttachment, TaskAttachmentAddInput,
+    PreparedAttachment, TaskAttachmentAddInput, local_object_missing,
 };
 pub use conflicts::{ConflictDetail, ConflictListItem, ConflictOutcome, ConflictResolutionOutcome};
 pub(crate) use conflicts::{
@@ -48,6 +49,7 @@ pub use related::RelatedOutcome;
 pub(crate) use related::{
     canonical_related_pair, set_task_related_link_in_transaction, task_has_related_state,
 };
+pub use task_moves::{MoveTasksInput, MoveTasksOutcome};
 pub(crate) use tasks::ConsumerTaskMutation;
 pub(crate) use tasks::update_task_labels_in_workspace;
 pub use tasks::{

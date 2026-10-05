@@ -197,6 +197,147 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap()
     }
 
+    async fn loopback_install(
+        archive: Vec<u8>,
+        checksum: String,
+        target: &Path,
+        version: &str,
+    ) -> Result<InstallSuccess> {
+        use axum::{Router, routing::get};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let router = Router::new()
+            .route(
+                "/archive",
+                get(move || {
+                    let body = archive.clone();
+                    async move { body }
+                }),
+            )
+            .route(
+                "/checksum",
+                get(move || {
+                    let body = checksum.clone();
+                    async move { body }
+                }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let (progress, _receiver) = watch::channel(UpdateProgress {
+            phase: UpdatePhase::Downloading,
+        });
+        let plan = InstallPlan {
+            release: crate::update::Release {
+                version: Version::parse(version)?,
+                tag: format!("v{version}"),
+                archive_name: "aven-test.tar.gz".to_string(),
+                archive_url: format!("http://{address}/archive"),
+                checksum_url: format!("http://{address}/checksum"),
+            },
+            method: crate::update::InstallMethod::Direct {
+                target: target.to_path_buf(),
+            },
+        };
+        let result = install_direct(
+            reqwest::Client::builder().no_proxy().build()?,
+            plan,
+            progress,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        server.abort();
+        result
+    }
+
+    fn archive_checksum(archive: &[u8]) -> String {
+        format!(
+            "{}  aven-test.tar.gz\n",
+            hex::encode(Sha256::digest(archive))
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_install_downloads_validates_and_replaces_exact_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("aven");
+        std::fs::write(&target, b"old executable").unwrap();
+        let binary = b"#!/bin/sh\nprintf 'aven 1.2.3\\n'\n";
+        let archive = archive_with("aven", binary);
+        let checksum = archive_checksum(&archive);
+        let installed = loopback_install(archive, checksum, &target, "1.2.3")
+            .await
+            .unwrap();
+        assert_eq!(installed.version, Version::parse("1.2.3").unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), binary);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn direct_install_rejections_preserve_existing_binary() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("aven");
+        let original = b"old executable";
+        std::fs::write(&target, original).unwrap();
+        let archive = archive_with("aven", b"#!/bin/sh\nprintf 'aven 1.2.3\\n'\n");
+        for (checksum, version, expected_error) in [
+            (
+                format!("{}  aven-test.tar.gz\n", "0".repeat(64)),
+                "1.2.3",
+                "release checksum does not match",
+            ),
+            (archive_checksum(&archive), "1.2.4", "expected v1.2.4"),
+        ] {
+            let error = loopback_install(archive.clone(), checksum, &target, version)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error:#}");
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+            assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires independently signed macOS baseline and candidate CI artifacts"]
+    async fn signed_macos_artifact_round_trip() {
+        let baseline = std::env::var_os("AVEN_MACOS_QUALIFICATION_BASELINE")
+            .expect("set AVEN_MACOS_QUALIFICATION_BASELINE to the signed baseline binary");
+        let archive_path = std::env::var_os("AVEN_MACOS_QUALIFICATION_ARCHIVE")
+            .expect("set AVEN_MACOS_QUALIFICATION_ARCHIVE to the signed candidate archive");
+        let verifier = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/verify-macos-release");
+        assert!(
+            std::process::Command::new(&verifier)
+                .arg(&baseline)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("aven");
+        let baseline_bytes = std::fs::read(baseline).unwrap();
+        std::fs::write(&target, &baseline_bytes).unwrap();
+        let archive = std::fs::read(archive_path).unwrap();
+        let candidate_bytes = extract_binary(&archive).unwrap();
+        assert_ne!(baseline_bytes, candidate_bytes);
+        let checksum = archive_checksum(&archive);
+        loopback_install(archive, checksum, &target, crate::update::CURRENT_VERSION)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), candidate_bytes);
+        assert!(
+            std::process::Command::new(verifier)
+                .arg(&target)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn checksum_requires_hash_and_expected_filename() {
         let archive = b"archive";

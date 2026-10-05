@@ -179,6 +179,65 @@ async fn filesystem_lookalike_keeps_wal_and_concurrent_connections() {
     pool.close().await;
 }
 
+#[tokio::test]
+async fn file_connections_limit_retained_wal_after_large_transaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("wal-limit.sqlite");
+    let database = Database::open(&path).await.unwrap();
+    let mut connections = Vec::new();
+    for _ in 0..FILE_DATABASE_CONNECTIONS {
+        let mut conn = database.pool().acquire().await.unwrap();
+        let limit: i64 = sqlx::query_scalar("PRAGMA journal_size_limit")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(limit, WAL_JOURNAL_SIZE_LIMIT as i64);
+        connections.push(conn);
+    }
+    let conn = &mut *connections[0];
+    // Keep the oversized WAL observable before explicitly checkpointing it.
+    sqlx::query("PRAGMA wal_autocheckpoint=0")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE wal_payload(id INTEGER PRIMARY KEY, data BLOB NOT NULL)")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let payload_size = (WAL_JOURNAL_SIZE_LIMIT * 4) as i64;
+    let mut tx = begin_immediate(conn).await.unwrap();
+    sqlx::query("INSERT INTO wal_payload(data) VALUES (zeroblob(?))")
+        .bind(payload_size)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let wal = wal_path(&path);
+    assert!(fs::metadata(&wal).unwrap().len() > WAL_JOURNAL_SIZE_LIMIT * 4);
+
+    let (busy, frames, checkpointed): (i64, i64, i64) =
+        sqlx::query_as("PRAGMA wal_checkpoint(PASSIVE)")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(busy, 0);
+    assert!(frames > 0);
+    assert_eq!(checkpointed, frames);
+    // SQLite applies journal_size_limit on the first commit reusing the WAL.
+    sqlx::query("INSERT INTO wal_payload(data) VALUES (x'01')")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(fs::metadata(&wal).unwrap().len() <= WAL_JOURNAL_SIZE_LIMIT);
+    let stored_size: i64 = sqlx::query_scalar("SELECT length(data) FROM wal_payload WHERE id = 1")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(stored_size, payload_size);
+    drop(connections);
+    database.close().await;
+}
+
 #[test]
 fn concurrent_first_opens_of_one_file_all_succeed() {
     for _ in 0..20 {
@@ -282,4 +341,174 @@ async fn recurrence_migration_enforces_schedule_immutability_and_task_conflict_c
         identity,
         ("task".to_string(), "7KQ9A1X4MV2P8D6T".to_string())
     );
+}
+
+const PRE_ENCRYPTED_SYNC: i64 = 20260913105309;
+
+#[tokio::test]
+async fn pre_encrypted_sync_database_keeps_its_data_through_the_upgrade() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pre-e2ee.sqlite");
+    let options = SqliteConnectOptions::from_str(&path.to_string_lossy())
+        .unwrap()
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let pool = SqlitePool::connect_with(options).await.unwrap();
+    MIGRATOR.run_to(PRE_ENCRYPTED_SYNC, &pool).await.unwrap();
+    sqlx::raw_sql(
+        "INSERT INTO meta VALUES ('client_id', 'C1'), ('sync_cursor', '7'),
+             ('local_seq', '2'), ('sync_generation', '3');
+         INSERT INTO projects(id, key, name, prefix, created_at, updated_at)
+             VALUES ('7KQ9A1X4MV2P8D6S', 'app', 'App', 'APP', 't', 't');
+         INSERT INTO tasks(id, title, description, project_id, status, priority,
+                 created_at, updated_at, source)
+             VALUES ('7KQ9A1X4MV2P8D6T', 'first', 'body', '7KQ9A1X4MV2P8D6S',
+                     'todo', 'high', 't', 't', 'ios'),
+                    ('7KQ9A1X4MV2P8D6V', 'second', '', '7KQ9A1X4MV2P8D6S',
+                     'done', 'none', 't', 't', 'cli');
+         INSERT INTO task_dependencies
+             VALUES ('0000000000000000', '7KQ9A1X4MV2P8D6T', '7KQ9A1X4MV2P8D6V', 't');
+         INSERT INTO changes(change_id, client_id, local_seq, entity_type, entity_id,
+                 field, op_type, payload, created_at, server_seq)
+             VALUES ('X1', 'C1', 1, 'task', '7KQ9A1X4MV2P8D6T', 'title', 'set',
+                     '\"first\"', 't', 5),
+                    ('X2', 'C1', 2, 'task', '7KQ9A1X4MV2P8D6T', NULL, 'add_note',
+                     '{}', 't', NULL);
+         INSERT INTO notes(id, task_id, body, created_at, change_id)
+             VALUES ('N1', '7KQ9A1X4MV2P8D6T', 'note', 't', 'X2');",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let dump = "SELECT group_concat(v, '|') FROM (
+        SELECT key || '=' || value AS v FROM meta
+            WHERE key IN ('client_id', 'sync_cursor', 'local_seq', 'sync_generation')
+        UNION ALL SELECT id || title || description || status || priority || source FROM tasks
+        UNION ALL SELECT task_id || depends_on_task_id FROM task_dependencies
+        UNION ALL SELECT change_id || local_seq || payload || ifnull(server_seq, '-') FROM changes
+        UNION ALL SELECT id || body || change_id FROM notes
+        ORDER BY 1)";
+    let before: String = sqlx::query_scalar(dump).fetch_one(&pool).await.unwrap();
+    pool.close().await;
+
+    let database = Database::open(&path).await.unwrap();
+    let mut conn = database.acquire_reader().await.unwrap();
+    let after: String = sqlx::query_scalar(dump)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+    assert_eq!(
+        current_schema_version(&mut conn).await.unwrap(),
+        MIGRATOR.iter().last().unwrap().version
+    );
+    sqlx::query("UPDATE changes SET server_seq = 6 WHERE change_id = 'X2'")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn membership_sequence_schema_bounds_match_protocol_limits() {
+    let (_temp, mut conn) = crate::test_support::test_conn().await;
+    let highest = crate::sync::seed_claim::membership::MAX_TRANSITIONS as i64 + 1;
+    for (table, insert) in [
+        (
+            "server_membership_transitions",
+            "INSERT INTO server_membership_transitions VALUES (?, NULL, x'01')",
+        ),
+        (
+            "local_membership_checkpoint",
+            "INSERT OR REPLACE INTO local_membership_checkpoint
+             VALUES (1, zeroblob(32), ?, zeroblob(32), zeroblob(32))",
+        ),
+    ] {
+        sqlx::query(insert)
+            .bind(highest)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query(insert)
+                .bind(highest + 1)
+                .execute(&mut *conn)
+                .await
+                .is_err(),
+            "{table}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn capture_documents_migration_moves_documents_out_of_the_journal() {
+    use sqlx::Connection;
+    const DOCUMENTS: i64 = 20260928083339;
+    let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+        .await
+        .unwrap();
+    let run = async |conn: &mut sqlx::SqliteConnection, migration: &sqlx::migrate::Migration| {
+        sqlx::raw_sql(migration.sql.clone())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    };
+    for migration in MIGRATOR.iter().filter(|m| m.version < DOCUMENTS) {
+        run(&mut conn, migration).await;
+    }
+    sqlx::query(
+        "INSERT INTO local_shared_capture_journal(
+             singleton, candidate_id, stream_id, internal_version, snapshot_json,
+             local_seq_floor, sync_generation, created_at, source_history, source_provenance
+         ) VALUES (1, 'c', 's', 1, '{\"snapshot\":1}', 0, 1, 't', '[\"h\"]', '[\"p\"]')",
+    )
+    .execute(&mut conn)
+    .await
+    .unwrap();
+    run(
+        &mut conn,
+        MIGRATOR.iter().find(|m| m.version == DOCUMENTS).unwrap(),
+    )
+    .await;
+
+    let moved: (String, String, String, String) = sqlx::query_as(
+        "SELECT candidate_id, snapshot, source_history, source_provenance
+         FROM local_shared_capture_documents",
+    )
+    .fetch_one(&mut conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        moved,
+        (
+            "c".into(),
+            "{\"snapshot\":1}".into(),
+            "[\"h\"]".into(),
+            "[\"p\"]".into()
+        )
+    );
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('local_shared_capture_journal')")
+            .fetch_all(&mut conn)
+            .await
+            .unwrap();
+    assert!(
+        !columns
+            .iter()
+            .any(|c| ["snapshot_json", "source_history", "source_provenance"].contains(&c.as_str())),
+        "{columns:?}"
+    );
+
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM local_shared_capture_journal")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM local_shared_capture_documents")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
 }

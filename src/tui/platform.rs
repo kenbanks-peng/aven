@@ -4,11 +4,10 @@ mod gist;
 mod terminal;
 mod viewer;
 
+pub(crate) use crate::clipboard::read_text as read_clipboard_text;
 #[cfg(test)]
 pub(crate) use clipboard::clipboard_text_for_test;
-pub(crate) use clipboard::{
-    ClipboardImage, copy_to_clipboard, read_clipboard_image, read_clipboard_text,
-};
+pub(crate) use clipboard::{ClipboardImage, copy_to_clipboard, read_clipboard_image};
 #[cfg(test)]
 pub(crate) use editor::fail_next_external_editor;
 pub(crate) use editor::{

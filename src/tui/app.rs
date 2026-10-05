@@ -244,6 +244,8 @@ pub(crate) struct App {
     pub(super) search: crate::tui::app_search::SearchController,
     pub(super) update: crate::tui::app_update::UpdateController,
     pub(super) sync: SyncController,
+    pub(super) invite: crate::tui::app_pairing::InviteController,
+    pub(super) sync_ops: crate::tui::sync_operations::SyncOperations,
     pub(super) gist: GistController,
     pub(super) changelog: crate::tui::changelog::ChangelogController,
     pub(super) next_refresh_at: Instant,
@@ -329,6 +331,8 @@ impl App {
             search: crate::tui::app_search::SearchController::new(),
             update: crate::tui::app_update::UpdateController::new(config.update.automatic_checks),
             sync: SyncController::new(),
+            invite: crate::tui::app_pairing::InviteController::new(),
+            sync_ops: crate::tui::sync_operations::SyncOperations::new(),
             gist: GistController::new(),
             changelog: crate::tui::changelog::ChangelogController::new(),
             next_refresh_at,
@@ -611,9 +615,9 @@ impl App {
                 }
             }));
         }
-        if let Some(reason) = self.pairing_missing_config_reason() {
+        if let Some(reason) = self.pairing_unavailable_reason() {
             unavailable.push(crate::tui::overlay::CommandAvailabilityOverride {
-                action: crate::tui::event::Action::PairMobile,
+                action: crate::tui::event::Action::AddDevice,
                 reason,
             });
         }
@@ -781,8 +785,16 @@ impl App {
                 skipped = true;
                 continue;
             };
-            self.store.view_state = target.view_state.clone();
-            let selected = self.store.refresh(Some(&target.task_id)).await?;
+            let selected = self
+                .store
+                .restore_view_state(
+                    target.view_state.clone(),
+                    Some(&crate::tui::store::MainRowSelection::Task(
+                        target.task_id.clone(),
+                    )),
+                )
+                .await?
+                .selected;
             let index = if let Some(index) = selected.filter(|&index| {
                 self.store
                     .tasks
@@ -870,7 +882,7 @@ impl App {
                 self.detail = crate::tui::detail_session::DetailSession::open(anchor.scroll);
                 self.overlay = None;
             } else {
-                self.store.recurrence_detail = None;
+                self.store.clear_recurrence_detail();
                 self.detail.close();
                 self.overlay = None;
                 self.set_warning("recurring series is hidden by the restored filters");
@@ -967,7 +979,7 @@ impl App {
 
     pub(super) fn set_mutation_success(&mut self, message: impl Into<String>) {
         let mut message = message.into();
-        if let Some(entry_id) = self.store.new_undo_entry_id.take()
+        if let Some(entry_id) = self.store.take_new_undo_entry_id()
             && self
                 .store
                 .available_undo()

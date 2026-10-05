@@ -129,6 +129,16 @@ pub(crate) async fn reconcile_child(
     workspace_id: &str,
     child_id: &str,
 ) -> Result<()> {
+    if get_meta(conn, "e2ee_association").await?.is_some()
+        && crate::sync::encrypted_tail::graphs::owns_graphs(conn).await?
+    {
+        return Ok(());
+    }
+    let moved: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM changes c, json_each(c.payload, '$.tasks') t WHERE c.op_type = 'move_tasks' AND json_extract(t.value, '$.task_id') = ?)")
+        .bind(child_id).fetch_one(&mut *conn).await?;
+    if moved {
+        return Ok(());
+    }
     let operations = sqlx::query_as::<_, Operation>(
         "SELECT op_type, json_extract(payload, '$.epic_task_id') AS epic_task_id,
                 COALESCE(json_extract(payload, '$.created_at'), created_at) AS created_at
@@ -472,9 +482,14 @@ mod tests {
                 .unwrap();
             assert_eq!(changes, 6);
         }
-        let facts = database.sync_facts().await.unwrap();
-        assert_eq!(facts.pending_changes, 0);
-        assert!(facts.metadata_caught_up);
+        assert_eq!(
+            database
+                .sync_persistence_status()
+                .await
+                .unwrap()
+                .pending_changes,
+            0
+        );
         let integrity = database.database_integrity_report().await.unwrap();
         assert!(integrity.quick_check_ok);
         assert!(
@@ -565,76 +580,89 @@ mod tests {
 
     #[tokio::test]
     async fn within_page_demotion_checks_reconciled_pending_membership() {
-        use crate::sync::ApplySyncPage;
-        use crate::sync::wire::{ChangeWire, SYNC_PROTOCOL_VERSION, SyncRequest, SyncResponse};
+        use crate::operations::{TaskDraft, TaskUpdate};
+        use crate::test_support::encrypted_sync::EncryptedSyncServer;
 
-        let (_temp, database) = database().await;
-        {
-            let mut conn = database.acquire_writer().await.unwrap();
-            history(&mut conn, CHILD, FIRST, true, 1).await;
-            snapshot(&mut conn, CHILD, FIRST).await;
-            set_meta(&mut conn, "sync_cursor", "1").await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let local = crate::db::Database::open(&root.path().join("local.sqlite"))
+            .await
+            .unwrap();
+        let remote = crate::db::Database::open(&root.path().join("remote.sqlite"))
+            .await
+            .unwrap();
+        let server = EncryptedSyncServer::new().await;
+        let workspace = local.list_workspaces().await.unwrap().remove(0);
+        let mut ids = Vec::new();
+        for title in ["child", "epic"] {
+            let task = local
+                .create_task(
+                    &workspace,
+                    TaskDraft {
+                        title: title.into(),
+                        description: String::new(),
+                        project: Some("app".into()),
+                        status: "todo".into(),
+                        priority: "none".into(),
+                        source: crate::choices::TaskSource::Cli,
+                        labels: vec![],
+                        metadata: vec![],
+                        available_at: None,
+                        due_on: None,
+                        is_epic: title == "epic",
+                    },
+                )
+                .await
+                .unwrap()
+                .task;
+            ids.push(task.id);
         }
-        let workspace = crate::workspaces::Workspace::default();
-        database
-            .remove_task_from_epic(&workspace, &CHILD.parse().unwrap(), &FIRST.parse().unwrap())
+        let (child, epic) = (&ids[0], &ids[1]);
+        local
+            .add_task_to_epic(&workspace, child, epic)
             .await
             .unwrap();
-        database
-            .add_task_to_epic(&workspace, &CHILD.parse().unwrap(), &FIRST.parse().unwrap())
+        server.sync(&local).await.unwrap();
+        server.sync(&remote).await.unwrap();
+
+        // The remote removal and demotion arrive together in one page.
+        remote
+            .remove_task_from_epic(&workspace, child, epic)
             .await
             .unwrap();
-        let remove = ChangeWire {
-            change_id: crate::ids::new_id(),
-            client_id: "remote".to_string(),
-            local_seq: 2,
-            entity_type: "task".to_string(),
-            entity_id: CHILD.to_string(),
-            field: Some("epics".to_string()),
-            op_type: op_type::EPIC_LINK_REMOVE.to_string(),
-            payload: serde_json::json!({
-                "workspace_id": WORKSPACE, "workspace_key": "default", "epic_task_id": FIRST,
-            }),
-            base_version: None,
-            created_at: "2026-09-06T00:00:00Z".to_string(),
-            server_seq: Some(2),
-        };
-        let demote = ChangeWire {
-            change_id: crate::ids::new_id(),
-            entity_id: FIRST.to_string(),
-            field: Some("is_epic".to_string()),
-            op_type: op_type::SET_FIELD.to_string(),
-            payload: serde_json::json!({
-                "workspace_id": WORKSPACE, "workspace_key": "default", "value": "0",
-            }),
-            local_seq: 3,
-            server_seq: Some(3),
-            ..remove.clone()
-        };
-        database
-            .apply_client_sync_page(ApplySyncPage {
-                request: SyncRequest {
-                    protocol_version: Some(SYNC_PROTOCOL_VERSION),
-                    client_id: "local".to_string(),
-                    after: 1,
-                    pull_limit: Some(100),
-                    changes: Vec::new(),
+        remote
+            .update_task(
+                &workspace,
+                epic,
+                TaskUpdate {
+                    is_epic: Some(false),
+                    ..Default::default()
                 },
-                response: SyncResponse {
-                    protocol_version: SYNC_PROTOCOL_VERSION,
-                    cursor: 3,
-                    has_more: false,
-                    push_acks: Vec::new(),
-                    changes: vec![remove, demote],
-                },
-                attempted_at: "2026-09-06T00:00:00Z".to_string(),
-                previous_pushed: 0,
-                previous_pulled: 0,
-            })
+            )
             .await
             .unwrap();
-        let mut conn = database.acquire_reader().await.unwrap();
-        assert_eq!(parent(&mut conn, CHILD).await.as_deref(), Some(FIRST));
+        server.sync(&remote).await.unwrap();
+        local
+            .remove_task_from_epic(&workspace, child, epic)
+            .await
+            .unwrap();
+        local
+            .add_task_to_epic(&workspace, child, epic)
+            .await
+            .unwrap();
+        let page = server.fetch(&local, 256).await.unwrap();
+        let fields: Vec<_> = page
+            .records
+            .iter()
+            .map(|record| server.open(record).field)
+            .collect();
+        assert_eq!(fields, [Some("epics".into()), Some("is_epic".into())]);
+        server.apply(&local, &page).await.unwrap();
+
+        let mut conn = local.acquire_reader().await.unwrap();
+        assert_eq!(
+            parent(&mut conn, child.as_str()).await.as_deref(),
+            Some(epic.as_str())
+        );
         let conflicts: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM conflicts WHERE field = 'is_epic' AND resolved = 0",
         )
@@ -643,7 +671,7 @@ mod tests {
         .unwrap();
         assert_eq!(conflicts, 1);
         let is_epic: bool = sqlx::query_scalar("SELECT is_epic FROM tasks WHERE id = ?")
-            .bind(FIRST)
+            .bind(epic)
             .fetch_one(&mut *conn)
             .await
             .unwrap();

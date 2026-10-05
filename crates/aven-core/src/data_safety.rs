@@ -1,23 +1,25 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::db::{self, Database};
 
 mod archive;
-mod export_types;
+pub(crate) mod export_types;
 mod import;
 mod integrity;
 mod scan;
-mod tables;
-mod validation;
+pub(crate) mod tables;
+pub(crate) mod validation;
 
 pub use export_types::{
     AvenExport, BlobInventoryExportRow, ChangeRow, ConflictRow, ExportTables, FieldVersionRow,
     LabelRow, MetaRow, MetadataFieldIdAliasRow, MetadataFieldRow, NoteRow, ProjectIdAliasRow,
     ProjectPathRow, ProjectRow, RecurrenceOccurrenceRow, RecurrencePauseIntervalRow,
-    RecurrenceSeriesLabelRow, RecurrenceSeriesMetadataRow, RecurrenceSeriesRow, TaskAttachmentRow,
-    TaskDependencyRow, TaskEpicLinkRow, TaskLabelRow, TaskMetadataRow, TaskRelatedLinkRow, TaskRow,
-    WorkspaceRow,
+    RecurrenceSeriesLabelRow, RecurrenceSeriesMetadataRow, RecurrenceSeriesRow,
+    SharedHistoryProvenanceRow, TaskAttachmentRow, TaskDependencyRow, TaskEpicLinkRow,
+    TaskLabelRow, TaskMetadataRow, TaskRelatedLinkRow, TaskRow, WorkspaceRow,
 };
 use export_types::{EXPORT_FORMAT, EXPORT_VERSION};
 
@@ -39,42 +41,102 @@ pub(crate) fn ensure_integrity_ok(report: &IntegrityReport) -> Result<()> {
     integrity::ensure_ok(report)
 }
 
+pub(crate) async fn integrity_report_in_transaction(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<IntegrityReport> {
+    integrity::database_report(conn).await
+}
+
+pub(crate) async fn scan_export_tables(conn: &mut sqlx::SqliteConnection) -> Result<ExportTables> {
+    Ok(ExportTables {
+        workspaces: scan::scan_workspaces(conn).await?,
+        projects: scan::scan_projects(conn).await?,
+        project_paths: scan::scan_project_paths(conn).await?,
+        project_id_aliases: scan::scan_project_id_aliases(conn).await?,
+        labels: scan::scan_labels(conn).await?,
+        metadata_fields: scan::scan_metadata_fields(conn).await?,
+        metadata_field_id_aliases: scan::scan_metadata_field_id_aliases(conn).await?,
+        tasks: scan::scan_tasks(conn).await?,
+        task_metadata: scan::scan_task_metadata(conn).await?,
+        task_labels: scan::scan_task_labels(conn).await?,
+        notes: scan::scan_notes(conn).await?,
+        task_dependencies: scan::scan_task_dependencies(conn).await?,
+        task_epic_links: scan::scan_task_epic_links(conn).await?,
+        task_related_links: scan::scan_task_related_links(conn).await?,
+        task_attachments: scan::scan_task_attachments(conn).await?,
+        blob_inventory: scan::scan_blob_inventory(conn).await?,
+        recurrence_series: scan::scan_recurrence_series(conn).await?,
+        recurrence_series_labels: scan::scan_recurrence_series_labels(conn).await?,
+        recurrence_series_metadata: scan::scan_recurrence_series_metadata(conn).await?,
+        recurrence_occurrences: scan::scan_recurrence_occurrences(conn).await?,
+        recurrence_pause_intervals: scan::scan_recurrence_pause_intervals(conn).await?,
+        changes: scan::scan_changes(conn).await?,
+        shared_history_provenance: scan::scan_shared_history_provenance(conn).await?,
+        field_versions: scan::scan_field_versions(conn).await?,
+        conflicts: scan::scan_conflicts(conn).await?,
+        meta: scan::scan_meta(conn).await?,
+    })
+}
+
+/// Writes a portable export as an owner-only file, atomically replacing an
+/// existing regular file while refusing any other existing file type.
+pub fn write_export_file(output: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        crate::private_fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    match fs::symlink_metadata(output) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            bail!("error export-output-not-regular path={}", output.display());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("could not inspect export destination {}", output.display())
+            });
+        }
+    }
+
+    let mut temp = crate::private_fs::sibling_tempfile(output)
+        .with_context(|| format!("could not create temporary file for {}", output.display()))?;
+    temp.write_all(bytes)
+        .with_context(|| format!("could not write temporary export file {}", output.display()))?;
+    temp.persist(output)
+        .map(|_| ())
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not replace export file {}", output.display()))
+}
+
 impl Database {
     pub async fn export_data(&self, exported_at: String) -> Result<AvenExport> {
         let mut conn = self.acquire_writer().await?;
         let mut tx = db::begin_immediate(&mut conn).await?;
         let schema_version = db::current_schema_version(&mut tx).await?;
-        let tables = ExportTables {
-            workspaces: scan::scan_workspaces(&mut tx).await?,
-            projects: scan::scan_projects(&mut tx).await?,
-            project_paths: scan::scan_project_paths(&mut tx).await?,
-            project_id_aliases: scan::scan_project_id_aliases(&mut tx).await?,
-            labels: scan::scan_labels(&mut tx).await?,
-            metadata_fields: scan::scan_metadata_fields(&mut tx).await?,
-            metadata_field_id_aliases: scan::scan_metadata_field_id_aliases(&mut tx).await?,
-            tasks: scan::scan_tasks(&mut tx).await?,
-            task_metadata: scan::scan_task_metadata(&mut tx).await?,
-            task_labels: scan::scan_task_labels(&mut tx).await?,
-            notes: scan::scan_notes(&mut tx).await?,
-            task_dependencies: scan::scan_task_dependencies(&mut tx).await?,
-            task_epic_links: scan::scan_task_epic_links(&mut tx).await?,
-            task_related_links: scan::scan_task_related_links(&mut tx).await?,
-            task_attachments: scan::scan_task_attachments(&mut tx).await?,
-            blob_inventory: scan::scan_blob_inventory(&mut tx).await?,
-            recurrence_series: scan::scan_recurrence_series(&mut tx).await?,
-            recurrence_series_labels: scan::scan_recurrence_series_labels(&mut tx).await?,
-            recurrence_series_metadata: scan::scan_recurrence_series_metadata(&mut tx).await?,
-            recurrence_occurrences: scan::scan_recurrence_occurrences(&mut tx).await?,
-            recurrence_pause_intervals: scan::scan_recurrence_pause_intervals(&mut tx).await?,
-            changes: scan::scan_changes(&mut tx).await?,
-            field_versions: scan::scan_field_versions(&mut tx).await?,
-            conflicts: scan::scan_conflicts(&mut tx).await?,
-            meta: scan::scan_meta(&mut tx).await?,
-        };
-        let version = if tables.task_related_links.is_empty() {
+        let mut tables = scan_export_tables(&mut tx).await?;
+        let bound: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM local_seed_source) OR EXISTS(SELECT 1 FROM local_peer_enrollment)")
+            .fetch_one(&mut *tx)
+            .await?;
+        if bound {
+            tables.meta.retain(|m| {
+                m.key != "sync_server_url"
+                    && m.key != "e2ee_association"
+                    && m.key != "e2ee_data_only"
+            });
+            tables.meta.push(MetaRow {
+                key: "e2ee_data_only".into(),
+                value: "1".into(),
+            });
+        }
+        let version = if !tables.shared_history_provenance.is_empty() {
+            EXPORT_VERSION
+        } else if tables.task_related_links.is_empty() {
             2
         } else {
-            EXPORT_VERSION
+            export_types::RELATED_LINKS_EXPORT_VERSION
         };
         tx.commit().await?;
         Ok(AvenExport {
@@ -94,6 +156,7 @@ impl Database {
     }
 
     pub async fn import_data(&self, export: &AvenExport) -> Result<IntegrityReport> {
+        let _installation = self.import_installation_guard()?;
         let mut conn = self.acquire_writer().await?;
         validation::ensure_supported_export(&mut conn, export).await?;
         validation::validate_export_snapshot(export)?;
@@ -101,6 +164,7 @@ impl Database {
             .await?
             .context("missing target client_id")?;
         let mut tx = db::begin_immediate(&mut conn).await?;
+        crate::sync::shared_state::ensure_no_active_local_shared_capture(&mut tx).await?;
         import::replace_from_export(&mut tx, export, &target_client_id).await?;
         let report = integrity::database_report(&mut tx).await?;
         ensure_integrity_ok(&report)?;
@@ -123,6 +187,7 @@ impl Database {
     }
 
     pub async fn create_backup_archive(&self, blob_dir: &Path, output: &Path) -> Result<()> {
+        let _installation = self.backup_installation_guard()?;
         let mut conn = self.acquire_writer().await?;
         let hashes: Vec<String> = sqlx::query_scalar(
             "SELECT sha256 FROM blob_inventory WHERE available = 1 ORDER BY sha256",
@@ -167,4 +232,65 @@ pub async fn restore_backup_archive(
     source: &Path,
 ) -> Result<PathBuf> {
     archive::restore_backup_archive(db_path, blob_dir, source).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_export_file;
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_is_owner_only_under_permissive_umask() {
+        use crate::private_fs::test_umask::{Umask, mode};
+
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("new-parent").join("export.json");
+        write_export_file(&output, b"{}\n").unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), b"{}\n");
+        assert_eq!(mode(&output), 0o600);
+        assert_eq!(mode(output.parent().unwrap()), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_replaces_existing_regular_file_and_remains_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use crate::private_fs::test_umask::{Umask, mode};
+
+        let _umask = Umask::set(0o022);
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("export.json");
+        write_export_file(&output, b"first export").unwrap();
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_export_file(&output, b"second export").unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), b"second export");
+        assert_eq!(mode(&output), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_file_refuses_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("victim");
+        let output = temp.path().join("export.json");
+        fs::write(&target, b"sentinel").unwrap();
+        symlink(&target, &output).unwrap();
+
+        assert!(write_export_file(&output, b"export").is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"sentinel");
+        assert!(
+            fs::symlink_metadata(&output)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
 }

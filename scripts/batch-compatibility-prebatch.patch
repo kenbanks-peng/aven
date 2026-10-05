@@ -1,0 +1,46 @@
+--- a/src/encrypted_tail_http/tests.rs
++++ b/src/encrypted_tail_http/tests.rs
+@@ -1639,6 +1639,43 @@
+     child
+ }
+ #[tokio::test]
++#[ignore = "pre-batch singleton client interoperability worker"]
++async fn batch_compatibility_old_client_worker() {
++    #[derive(serde::Deserialize)]
++    struct Input {
++        origin: String,
++        context: aven_core::sync::encrypted_tail::Context,
++        bearer: Vec<u8>,
++        record: Vec<u8>,
++    }
++
++    let input_path = std::env::var_os("AVEN_BATCH_CLIENT_INPUT").unwrap();
++    let input: Input = serde_json::from_slice(&std::fs::read(input_path).unwrap()).unwrap();
++    let bearer = aven_core::sync::seed_claim::Secret::new(input.bearer.try_into().unwrap());
++    let driver = crate::sync_http::HttpDriver::new().unwrap();
++    let reply = driver
++        .run(move |link| async move {
++            let client = aven_core::sync::client::tail::Client::new(&input.origin, link)?;
++            client
++                .exchange(
++                    &input.context,
++                    &bearer,
++                    aven_core::sync::encrypted_tail::Operation::Append {
++                        ticket: None,
++                        record: input.record,
++                    },
++                )
++                .await
++        })
++        .await
++        .unwrap();
++    assert!(matches!(
++        reply,
++        aven_core::sync::encrypted_tail::Reply::Appended(_)
++    ));
++}
++
++#[tokio::test]
+ #[ignore = "subprocess encrypted tail server"]
+ async fn server_worker() {
+     let root = std::path::PathBuf::from(std::env::var_os("AVEN_TAIL_ROOT").unwrap());

@@ -1,16 +1,26 @@
-mod apply;
+pub(crate) mod apply;
+pub mod base64_bytes;
 mod blob;
+pub mod bootstrap_staging;
+pub mod client;
+mod codec;
+mod crash;
+mod device_labels;
+pub mod encrypted_tail;
+#[cfg(feature = "test-support")]
+pub mod fuzz;
+pub mod invitation_text;
 mod persistence;
-mod planner;
+pub(crate) use persistence::changes::canonical_equal;
 pub mod protocol;
-mod session;
+pub mod seed_claim;
+pub(crate) mod shared_state;
 pub mod wire;
 
-pub use persistence::{
-    ApplySyncPage, ClientSyncPage, ServerSyncPage, ServerSyncResult, SyncPersistenceStatus,
-};
-pub use session::{
-    PairingConnectionValidationResponse, PreparedSyncRequest, SyncHttpHeader, SyncHttpResponse,
-    SyncPageOutcome, SyncRequestContext, SyncRequestTimeout, SyncRetryDecision, SyncSession,
-    SyncSessionSummary, classify_pairing_connection_validation_response,
+pub use persistence::SyncPersistenceStatus;
+pub use shared_state::adoption::{SeedPublicationIntent, SeedSourceAuthority};
+pub use shared_state::bootstrap_format;
+pub use shared_state::{
+    EncryptedLocalSharedStatePackage, LocalSharedStatePackageContext, LocalSharedStatePackageKey,
+    NeverDispatchedLocalSharedCapture, SharedStateCapture, SharedStateInstallReport,
 };

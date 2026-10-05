@@ -58,6 +58,7 @@ aven show APP-7KQ9 --full
 ```sh
 aven edit APP-7KQ9 --status active --agent claude
 aven edit APP-7KQ9 --title "Clearer title" --priority medium
+aven --workspace personal move APP-7KQ9 --to-workspace work --project app
 aven note APP-7KQ9 --stdin <<'EOF'
 Implemented the parser and documented the remaining edge case.
 EOF
@@ -65,6 +66,9 @@ aven edit APP-7KQ9 --status done
 ```
 
 - Mark work `active` when starting it and `done` only when the work is complete.
+- `move` preserves task IDs and associated data. Its destination project must
+  already exist, and linked tasks must move together so relationships do not
+  cross workspace boundaries.
 - Identify the coding agent that is doing the work with
   `aven edit <TASK> --agent <AGENT>`. Use `claude` (Claude Code), `codex` (Codex),
   `copilot` (GitHub Copilot), or `pi` (Pi) for a dedicated TUI icon. Other agent

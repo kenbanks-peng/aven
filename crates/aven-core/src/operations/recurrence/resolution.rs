@@ -17,6 +17,7 @@ use crate::task_fields::TaskField;
 use crate::types::{MutableEntityType, RecurrenceOccurrence, RecurrenceSeries};
 use crate::workspaces::Workspace;
 
+use super::projection::{generated_creates, generates_proposals};
 use super::{
     RecurrenceResolveOutcome, format_local_time, load_occurrence, load_occurrence_for_task,
     load_projected_occurrence, load_series, load_series_labels, load_series_metadata,
@@ -338,6 +339,11 @@ pub(crate) async fn undo_recurrence_resolution(
             .bind(&status_change_id)
             .fetch_one(&mut *conn)
             .await?;
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(
+        conn,
+        &[outcome_change_id, &status_change_id],
+    )
+    .await?;
 
     let successor = load_projected_occurrence(conn, workspace_id, &series.id).await?;
     match series.state {
@@ -349,8 +355,10 @@ pub(crate) async fn undo_recurrence_resolution(
                 successor.slot_on == expected_slot,
                 "error recurrence-undo-successor-changed"
             );
-            ensure_successor_untouched(conn, workspace_id, &series, &successor).await?;
-            remove_materialized_occurrence(conn, workspace_id, &series, &successor).await?;
+            let generated =
+                ensure_successor_untouched(conn, workspace_id, &series, &successor).await?;
+            remove_materialized_occurrence(conn, workspace_id, &series, &successor, &generated)
+                .await?;
         }
         RecurrenceSeriesState::Paused | RecurrenceSeriesState::Stopped => {
             ensure!(
@@ -487,7 +495,7 @@ async fn ensure_successor_untouched(
     workspace_id: &WorkspaceId,
     series: &RecurrenceSeries,
     occurrence: &RecurrenceOccurrence,
-) -> Result<()> {
+) -> Result<[String; 2]> {
     let task_id = occurrence
         .task_id
         .as_ref()
@@ -511,14 +519,40 @@ async fn ensure_successor_untouched(
     )
     .await
     .map_err(|_| anyhow::anyhow!("error recurrence-undo-successor-touched"))?;
-    ensure_change_unsynced(conn, &identity.task_change_id).await?;
-    ensure_change_unsynced(conn, &identity.occurrence_change_id).await?;
+    // Only this device's own generation may be removed; another generation of the
+    // occurrence means it has already been shared.
+    let creates = generated_creates(conn, task_id).await?;
+    let [create] = creates.as_slice() else {
+        anyhow::bail!("error recurrence-undo-successor-touched");
+    };
+    // Workspace label renames and deletions change a bound successor's labels
+    // without task history, so they are compared with its generation. Local-only
+    // databases compare them with the template above.
+    if generates_proposals(conn).await? {
+        let labels: Vec<String> = sqlx::query_scalar(
+            "SELECT label FROM task_labels WHERE workspace_id = ? AND task_id = ? ORDER BY label",
+        )
+        .bind(workspace_id)
+        .bind(task_id)
+        .fetch_all(&mut *conn)
+        .await?;
+        ensure!(
+            serde_json::to_value(&labels)? == create.payload["labels"],
+            "error recurrence-undo-successor-touched"
+        );
+    }
+    let generated = [
+        create.change_id.clone(),
+        create.occurrence_change_id().to_owned(),
+    ];
+    ensure_change_unsynced(conn, &generated[0]).await?;
+    ensure_change_unsynced(conn, &generated[1]).await?;
     let extra_changes: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM changes
          WHERE entity_type = 'task' AND entity_id = ? AND change_id != ?",
     )
     .bind(task_id)
-    .bind(&identity.task_change_id)
+    .bind(&generated[0])
     .fetch_one(&mut *conn)
     .await?;
     let notes: i64 =
@@ -570,7 +604,7 @@ async fn ensure_successor_untouched(
             && related == 0,
         "error recurrence-undo-successor-touched"
     );
-    Ok(())
+    Ok(generated)
 }
 
 async fn remove_materialized_occurrence(
@@ -578,17 +612,17 @@ async fn remove_materialized_occurrence(
     workspace_id: &WorkspaceId,
     series: &RecurrenceSeries,
     occurrence: &RecurrenceOccurrence,
+    generated: &[String; 2],
 ) -> Result<()> {
     let task_id = occurrence
         .task_id
         .as_ref()
         .expect("verified successor has task");
-    let identity = derive_occurrence_identity(
-        workspace_id,
-        &series.id,
-        &series.schedule(),
-        occurrence.slot_on,
-    )?;
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(
+        conn,
+        &[&generated[0], &generated[1]],
+    )
+    .await?;
     sqlx::query(
         "DELETE FROM recurrence_occurrences
          WHERE workspace_id = ? AND series_id = ? AND slot_on = ?",
@@ -617,8 +651,8 @@ async fn remove_materialized_occurrence(
         .execute(&mut *conn)
         .await?;
     sqlx::query("DELETE FROM changes WHERE change_id IN (?, ?)")
-        .bind(&identity.task_change_id)
-        .bind(&identity.occurrence_change_id)
+        .bind(&generated[0])
+        .bind(&generated[1])
         .execute(&mut *conn)
         .await?;
     Ok(())

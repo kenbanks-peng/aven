@@ -75,14 +75,7 @@ impl TuiStore {
                 .push((field.id.clone(), field.key.clone()));
         }
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    Some(format!("metadata {}", selection.targets()[0].display_ref)),
-                    "metadata",
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let message = if report.changed_count() == 0 {
             "Metadata unchanged"
@@ -147,16 +140,7 @@ impl TuiStore {
             ..TaskUpdate::default()
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("status {}", selection.targets()[0].display_ref)),
-                    "status",
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -206,20 +190,7 @@ impl TuiStore {
                 ))
             })
             .collect();
-        let report = self
-            .apply_task_updates(
-                updates,
-                UndoContext::tui_task_mutation(
-                    selection.is_single().then(|| {
-                        format!(
-                            "move {} between columns",
-                            selection.targets()[0].display_ref
-                        )
-                    }),
-                    "move between columns",
-                ),
-            )
-            .await?;
+        let report = self.apply_task_updates(updates, UndoContext::tui()).await?;
         let changed = report.changed_count();
         let message = if changed == 0 {
             format!("column unchanged on {} tasks", selection.len())
@@ -246,16 +217,7 @@ impl TuiStore {
             },
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("priority {}", selection.targets()[0].display_ref)),
-                    "priority",
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -302,10 +264,7 @@ impl TuiStore {
             ),
         };
         let report = self
-            .apply_task_updates(
-                vec![(item.task.id.clone(), update)],
-                UndoContext::tui(format!("{field_name} {}", item.display_ref)),
-            )
+            .apply_task_updates(vec![(item.task.id.clone(), update)], UndoContext::tui())
             .await?;
         let verb = if report.changed_count() == 0 {
             "unchanged"
@@ -339,16 +298,7 @@ impl TuiStore {
             TaskDateField::Due => "due date",
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("{field_name} {}", selection.targets()[0].display_ref)),
-                    field_name,
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -378,16 +328,7 @@ impl TuiStore {
             ..TaskUpdate::default()
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("project {}", selection.targets()[0].display_ref)),
-                    "project",
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -417,16 +358,7 @@ impl TuiStore {
             ..TaskUpdate::default()
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("labels {}", selection.targets()[0].display_ref)),
-                    "labels",
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -461,16 +393,7 @@ impl TuiStore {
             .collect();
         let report = self
             .database
-            .mutate_tasks(
-                &self.active_workspace,
-                updates,
-                UndoContext::tui_task_mutation(
-                    selection
-                        .is_single()
-                        .then(|| format!("epic container {}", selection.targets()[0].display_ref)),
-                    "epic container state",
-                ),
-            )
+            .mutate_tasks(&self.active_workspace, updates, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let state = if is_epic { "yes" } else { "no" };
@@ -506,20 +429,7 @@ impl TuiStore {
             ..TaskUpdate::default()
         };
         let report = self
-            .apply_uniform_task_update(
-                selection,
-                update,
-                UndoContext::tui_task_mutation(
-                    selection.is_single().then(|| {
-                        format!(
-                            "{} {}",
-                            if deleted { "delete" } else { "restore" },
-                            selection.targets()[0].display_ref
-                        )
-                    }),
-                    if deleted { "delete" } else { "restore" },
-                ),
-            )
+            .apply_uniform_task_update(selection, update, UndoContext::tui())
             .await?;
         let changed = report.changed_count();
         let message = if selection.is_single() {
@@ -567,7 +477,7 @@ impl TuiStore {
                 Some(index) => Some(index),
                 None => {
                     let index = selection.anchor_index().min(self.tasks.len());
-                    self.tasks.insert(index, item);
+                    self.insert_task(index, item);
                     Some(index)
                 }
             };
@@ -625,7 +535,7 @@ impl TuiStore {
                 &self.active_workspace,
                 task_id,
                 depends_on_task_id,
-                UndoContext::tui(format!("dependency {task_ref}")),
+                UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();
@@ -669,7 +579,7 @@ impl TuiStore {
                 &self.active_workspace,
                 &item.task.id,
                 related_task_id,
-                UndoContext::tui(format!("related link {}", item.display_ref)),
+                UndoContext::tui(),
             )
             .await?;
         if outcome.changed {
@@ -722,7 +632,7 @@ impl TuiStore {
                 &self.active_workspace,
                 &item.task.id,
                 related_task_id,
-                UndoContext::tui(format!("related link {}", item.display_ref)),
+                UndoContext::tui(),
             )
             .await?;
         if outcome.changed {
@@ -775,7 +685,7 @@ impl TuiStore {
                 &self.active_workspace,
                 &item.task.id,
                 depends_on_task_id,
-                UndoContext::tui(format!("dependency {}", item.display_ref)),
+                UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();

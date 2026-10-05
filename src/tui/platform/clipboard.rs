@@ -407,21 +407,6 @@ pub(crate) fn read_clipboard_image() -> Result<Option<ClipboardImage>> {
     Ok(None)
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn read_clipboard_text() -> Result<Option<String>> {
-    let output = ProcessCommand::new("pbpaste").output()?;
-    if !output.status.success() {
-        anyhow::bail!("pbpaste exited with {}", output.status);
-    }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok((!text.trim().is_empty()).then_some(text))
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn read_clipboard_text() -> Result<Option<String>> {
-    Ok(None)
-}
-
 #[cfg(all(not(test), target_os = "macos"))]
 pub(crate) fn copy_to_clipboard(value: &str) -> Result<()> {
     let mut child = ProcessCommand::new("pbcopy")

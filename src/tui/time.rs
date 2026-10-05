@@ -99,8 +99,71 @@ pub(crate) fn available_in_label(available_at: &str, now_seconds: i64) -> Option
 }
 
 pub(crate) fn local_datetime_label(seconds: i64) -> Option<String> {
-    let local = Local.timestamp_opt(seconds, 0).single()?;
+    datetime_label_in(&Local, seconds)
+}
+
+fn datetime_label_in<Tz: TimeZone>(zone: &Tz, seconds: i64) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let local = zone.timestamp_opt(seconds, 0).single()?;
     Some(local.format("%a %b %-d %-I:%M %p %Z").to_string())
+}
+
+/// Formats an RFC 3339 availability instant in the local zone, keeping values
+/// that do not parse.
+pub(crate) fn available_at_display(available_at: &str) -> String {
+    unix_seconds(available_at)
+        .and_then(local_datetime_label)
+        .unwrap_or_else(|| available_at.to_string())
+}
+
+/// Recent action summary with any availability instant shown in local time.
+pub(crate) fn action_summary_display(action: &crate::query::RecentActionItem) -> String {
+    match action_available_at(action) {
+        Some(available_at) => {
+            action
+                .summary
+                .replacen(available_at, &available_at_display(available_at), 1)
+        }
+        None => action.summary.clone(),
+    }
+}
+
+/// Recent action detail with an availability instant shown in local time.
+pub(crate) fn action_detail_display(action: &crate::query::RecentActionItem) -> Option<String> {
+    match action_available_at(action) {
+        Some(available_at) => Some(available_at_display(available_at)),
+        None => action.detail.clone(),
+    }
+}
+
+/// Task activity summary with the availability instant appended in local time.
+pub(crate) fn task_activity_summary_display(
+    action: &crate::query::RecentActionItem,
+    task_title: &str,
+) -> String {
+    let summary = action.task_activity_summary(task_title);
+    match action.task_activity_available_at() {
+        Some(available_at) => format!("{summary} · {}", available_at_display(&available_at)),
+        None => summary,
+    }
+}
+
+fn action_available_at(action: &crate::query::RecentActionItem) -> Option<&str> {
+    (action.field.as_deref() == Some("available_at"))
+        .then_some(action.detail.as_deref())
+        .flatten()
+        .filter(|detail| !detail.is_empty())
+}
+
+/// Conflict value for display, formatting availability instants in local time.
+pub(crate) fn conflict_value_display(field: &str, value: &str) -> String {
+    if field == "available_at" && !value.is_empty() {
+        available_at_display(value)
+    } else {
+        value.to_string()
+    }
 }
 
 pub(crate) fn compact_duration(seconds: i64) -> String {
@@ -130,6 +193,28 @@ fn local_date(seconds: i64) -> Option<chrono::NaiveDate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn datetime_label_formats_instant_in_given_zone() {
+        let zone = chrono::FixedOffset::east_opt(3 * 3600).unwrap();
+        let seconds = unix_seconds("2026-09-28T06:00:00Z").unwrap();
+        assert_eq!(
+            datetime_label_in(&zone, seconds).as_deref(),
+            Some("Mon Sep 28 9:00 AM +03:00")
+        );
+    }
+
+    #[test]
+    fn available_at_display_uses_local_label_and_keeps_unparsed_values() {
+        let seconds = unix_seconds("2026-09-28T06:00:00Z").unwrap();
+        assert_eq!(
+            available_at_display("2026-09-28T06:00:00Z"),
+            local_datetime_label(seconds).unwrap()
+        );
+        assert_eq!(available_at_display("not-a-time"), "not-a-time");
+        assert_eq!(conflict_value_display("status", "todo"), "todo");
+        assert_eq!(conflict_value_display("available_at", ""), "");
+    }
 
     #[test]
     fn compact_duration_formats_minutes_hours_days_weeks_and_months() {

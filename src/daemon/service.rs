@@ -1,19 +1,25 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Command;
+#[cfg(not(target_os = "linux"))]
 use std::process::Output;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use anyhow::Context;
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::config;
 use crate::config::AppConfig;
+
+#[cfg(any(target_os = "linux", test))]
+mod systemd;
 
 #[cfg(target_os = "macos")]
 const LABEL: &str = "com.raine.aven.daemon";
@@ -50,33 +56,83 @@ pub struct ServiceStatus {
     pub installed: bool,
     pub loaded: Option<bool>,
     pub running: Option<bool>,
-    pub plist_path: PathBuf,
+    pub service_path: PathBuf,
     pub program: Option<PathBuf>,
     pub current_executable: PathBuf,
     pub program_matches_current: Option<bool>,
     pub stdout_path: Option<PathBuf>,
     pub stderr_path: Option<PathBuf>,
 }
-pub fn install(args: ServiceInstallArgs) -> Result<()> {
+
+/// Where an installed service lives and where its output goes.
+#[derive(Debug)]
+pub struct InstalledService {
+    pub path: PathBuf,
+    pub logs: String,
+}
+
+impl InstalledService {
+    pub fn print(&self) {
+        println!("installed {}", self.path.display());
+        println!("logs {}", self.logs);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install(args: ServiceInstallArgs) -> Result<InstalledService> {
     install_with_runner(args, &SystemRunner, &SystemSleeper)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn uninstall() -> Result<()> {
     uninstall_with_runner(&SystemRunner)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn restart() -> Result<()> {
     restart_with_runner(&SystemRunner)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn repair(args: ServiceRepairArgs) -> Result<()> {
     repair_with_runner(args, &SystemRunner, &SystemSleeper)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn status_snapshot() -> Result<ServiceStatus> {
     status_with_runner(&SystemRunner)
 }
 
+#[cfg(target_os = "linux")]
+pub fn install(args: ServiceInstallArgs) -> Result<InstalledService> {
+    let spec = systemd::UnitSpec::from_install_args(args.db_path.clone(), args.program.clone())?;
+    systemd::install_with_runner(args, &spec, &systemd::SystemSystemctl)
+}
+
+#[cfg(target_os = "linux")]
+pub fn uninstall() -> Result<()> {
+    let spec = systemd::UnitSpec::from_install_args(config::default_db_path()?, None)?;
+    systemd::uninstall_with_runner(&spec, &systemd::SystemSystemctl)
+}
+
+#[cfg(target_os = "linux")]
+pub fn restart() -> Result<()> {
+    systemd::restart_with_runner(&systemd::SystemSystemctl)
+}
+
+#[cfg(target_os = "linux")]
+pub fn repair(args: ServiceRepairArgs) -> Result<()> {
+    let spec = systemd::UnitSpec::from_install_args(args.db_path.clone(), args.program.clone())?;
+    systemd::repair_with_runner(args, &spec, &systemd::SystemSystemctl)
+}
+
+#[cfg(target_os = "linux")]
+pub fn status_snapshot() -> Result<ServiceStatus> {
+    let spec = systemd::UnitSpec::from_install_args(config::default_db_path()?, None)?;
+    systemd::status_with_runner(&spec, &systemd::SystemSystemctl)
+}
+
+#[cfg(not(target_os = "linux"))]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 trait LaunchctlRunner {
     fn run(&self, args: &[&str]) -> Result<Output>;
@@ -87,7 +143,9 @@ trait Sleeper {
     fn sleep(&self, duration: Duration);
 }
 
+#[cfg(not(target_os = "linux"))]
 struct SystemRunner;
+#[cfg(not(target_os = "linux"))]
 struct SystemSleeper;
 
 #[cfg(target_os = "macos")]
@@ -107,7 +165,7 @@ impl LaunchctlRunner for SystemRunner {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl LaunchctlRunner for SystemRunner {
     fn run(&self, _args: &[&str]) -> Result<Output> {
         unreachable!("launchctl is only available on macOS")
@@ -119,22 +177,23 @@ fn install_with_runner(
     args: ServiceInstallArgs,
     runner: &impl LaunchctlRunner,
     sleeper: &impl Sleeper,
-) -> Result<()> {
+) -> Result<InstalledService> {
     validate_install_config(&args.config)?;
     let spec = ServiceSpec::from_install_args(args.db_path, args.program)?;
     let plist = render_plist(&spec);
     reload_service(runner, sleeper, &spec, &plist)?;
-    println!("installed {}", spec.plist_path.display());
-    println!("logs {}", spec.log_dir.display());
-    Ok(())
+    Ok(InstalledService {
+        path: spec.plist_path,
+        logs: spec.log_dir.display().to_string(),
+    })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn install_with_runner(
     args: ServiceInstallArgs,
     _runner: &impl LaunchctlRunner,
     _sleeper: &SystemSleeper,
-) -> Result<()> {
+) -> Result<InstalledService> {
     let ServiceInstallArgs {
         db_path,
         config,
@@ -162,7 +221,7 @@ fn uninstall_with_runner(runner: &impl LaunchctlRunner) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn uninstall_with_runner(_runner: &impl LaunchctlRunner) -> Result<()> {
     bail!(
         "error unsupported-platform command=daemon-uninstall platform={}",
@@ -178,7 +237,7 @@ fn restart_with_runner(runner: &impl LaunchctlRunner) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn restart_with_runner(_runner: &impl LaunchctlRunner) -> Result<()> {
     bail!(
         "error unsupported-platform command=daemon-restart platform={}",
@@ -213,7 +272,7 @@ fn repair_with_runner(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn repair_with_runner(
     args: ServiceRepairArgs,
     _runner: &impl LaunchctlRunner,
@@ -246,7 +305,7 @@ fn status_with_runner(runner: &impl LaunchctlRunner) -> Result<ServiceStatus> {
         installed: spec.plist_path.exists(),
         loaded: Some(runtime.loaded),
         running: runtime.running,
-        plist_path: spec.plist_path,
+        service_path: spec.plist_path,
         program,
         current_executable,
         program_matches_current,
@@ -255,14 +314,14 @@ fn status_with_runner(runner: &impl LaunchctlRunner) -> Result<ServiceStatus> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn status_with_runner(_runner: &impl LaunchctlRunner) -> Result<ServiceStatus> {
     Ok(ServiceStatus {
         platform_supported: false,
         installed: false,
         loaded: None,
         running: None,
-        plist_path: PathBuf::new(),
+        service_path: PathBuf::new(),
         program: None,
         current_executable: std::env::current_exe().unwrap_or_default(),
         program_matches_current: None,
@@ -271,15 +330,9 @@ fn status_with_runner(_runner: &impl LaunchctlRunner) -> Result<ServiceStatus> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_install_config(config: &AppConfig) -> Result<()> {
     config.ensure_automatic_sync_enabled()?;
-    config
-        .sync
-        .server_url
-        .as_deref()
-        .filter(|server| !server.trim().is_empty())
-        .context("error sync-server-required hint=\"set sync.server_url in config.yaml\"")?;
     config.wake_addr()?;
     Ok(())
 }
@@ -291,6 +344,7 @@ struct ServiceSpec {
     executable: PathBuf,
     db_path: PathBuf,
     config_dir: Option<PathBuf>,
+    state_home: Option<PathBuf>,
     path_env: String,
     log_dir: PathBuf,
     stdout_path: PathBuf,
@@ -318,6 +372,9 @@ impl ServiceSpec {
             .map(PathBuf::from)
             .map(absolute_path)
             .transpose()?;
+        let state_home = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
         let current_exe = std::env::current_exe().context("resolve current executable")?;
         let executable = match program {
             Some(program) => absolute_path(program)?,
@@ -328,6 +385,7 @@ impl ServiceSpec {
             executable,
             db_path: absolute_path(db_path)?,
             config_dir,
+            state_home,
             path_env: std::env::var("PATH").unwrap_or_else(|_| DEFAULT_PATH.to_string()),
             stdout_path: log_dir.join("daemon.out.log"),
             stderr_path: log_dir.join("daemon.err.log"),
@@ -345,7 +403,7 @@ impl ServiceSpec {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn absolute_path(path: PathBuf) -> Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path);
@@ -368,7 +426,7 @@ fn stable_program_path(current_exe: &Path) -> PathBuf {
     stable_program_path_from_candidates(current_exe, candidates)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn stable_program_path_from_candidates(
     current_exe: &Path,
     candidates: impl IntoIterator<Item = PathBuf>,
@@ -379,7 +437,7 @@ fn stable_program_path_from_candidates(
         .unwrap_or_else(|| current_exe.to_path_buf())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn paths_resolve_to_same_file(left: &Path, right: &Path) -> bool {
     let Ok(left) = left.canonicalize() else {
         return false;
@@ -585,6 +643,9 @@ fn render_plist(spec: &ServiceSpec) -> String {
     if let Some(path) = &spec.config_dir {
         env.push(("AVEN_CONFIG_DIR", path_str(path)));
     }
+    if let Some(path) = &spec.state_home {
+        env.push(("XDG_STATE_HOME", path_str(path)));
+    }
 
     let env_xml = env
         .into_iter()
@@ -686,6 +747,7 @@ mod tests {
             executable: PathBuf::from("/bin/aven&test"),
             db_path: PathBuf::from("/tmp/db.sqlite"),
             config_dir: Some(PathBuf::from("/tmp/config")),
+            state_home: Some(PathBuf::from("/tmp/state")),
             path_env: "/usr/bin:/bin".to_string(),
             log_dir: PathBuf::from("/tmp/logs"),
             stdout_path: PathBuf::from("/tmp/logs/out.log"),
@@ -701,6 +763,8 @@ mod tests {
         assert!(plist.contains("<string>/tmp/db.sqlite</string>"));
         assert!(plist.contains("<string>daemon</string>"));
         assert!(plist.contains("<key>AVEN_CONFIG_DIR</key>"));
+        assert!(plist.contains("<key>XDG_STATE_HOME</key>"));
+        assert!(plist.contains("<string>/tmp/state</string>"));
         assert!(plist.contains("<key>StandardErrorPath</key>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
@@ -930,6 +994,7 @@ mod tests {
             executable: PathBuf::from("/bin/aven"),
             db_path: PathBuf::from("/tmp/db.sqlite"),
             config_dir: None,
+            state_home: None,
             path_env: DEFAULT_PATH.to_string(),
             log_dir: dir.join("logs"),
             stdout_path: dir.join("logs/out.log"),

@@ -28,6 +28,7 @@ mod app_projects;
 mod app_recurrence;
 mod app_relationships;
 mod app_search;
+mod app_sync_dialog;
 mod app_update;
 mod app_workspaces;
 mod attachment_controller;
@@ -56,6 +57,8 @@ mod preview_controller;
 mod shortcut_buffer;
 mod store;
 mod sync_controller;
+mod sync_errors;
+mod sync_operations;
 mod task_selection;
 mod terminal_command;
 #[cfg(test)]

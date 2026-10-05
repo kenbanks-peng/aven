@@ -319,17 +319,21 @@ pub(crate) async fn parsed_output_to_result_with_database(
                 }
                 return Ok(None);
             };
-            crate::commands::recurrence_schedule(
+            crate::recurrence_input::recurrence_schedule(
                 &rule,
                 recurrence_options[0],
                 recurrence_options[1],
                 recurrence_options[2],
                 recurrence_options[3],
+                crate::recurrence_input::RecurrenceClock::system(),
             )
             .map(Some)
         })
         .transpose()
-        .context("error task-intake-recurrence-invalid")?
+        .map_err(|error| {
+            let context = format!("error task-intake-recurrence-invalid: {error}");
+            error.context(context)
+        })?
         .flatten();
     let description = parsed.description.trim().to_string();
     let available_at = parsed

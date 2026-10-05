@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use aven_core::db::Database;
+use aven_core::sync::client::errors::is_access_refusal;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, sleep_until};
 
@@ -13,21 +14,27 @@ use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
 use crate::signals::shutdown_signal;
-use crate::sync::wire::{DAEMON_INCOMPLETE_RESCHEDULE_MS, DAEMON_SYNC_PAGE_BUDGET};
-use crate::sync::{DaemonSyncOutcome, SyncHttpClient};
+use crate::sync::encrypted::{self, DaemonRound};
 
 mod service;
 
 pub use service::{
-    ServiceInstallArgs, ServiceRepairArgs, ServiceStatus, install, repair, restart,
-    status_snapshot, uninstall,
+    InstalledService, ServiceInstallArgs, ServiceRepairArgs, ServiceStatus, install, repair,
+    restart, status_snapshot, uninstall,
 };
 
 const BINARY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const DAEMON_CONTENTION_RESCHEDULE: Duration = Duration::from_secs(1);
+/// Bounded sync rounds per daemon wake.
+const DAEMON_ROUND_BUDGET: usize = 8;
+/// Delay before continuing a wake that stopped at its round budget.
+const DAEMON_INCOMPLETE_RESCHEDULE: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BinaryFingerprint {
+    /// Path the daemon was started through, resolved again on every check so
+    /// a package manager repointing a symlink counts as a change.
+    launch_path: PathBuf,
     path: PathBuf,
     len: u64,
     modified_ns: Option<u128>,
@@ -44,69 +51,46 @@ pub struct DaemonRunArgs {
 
 pub async fn run(args: DaemonRunArgs) -> Result<()> {
     args.config.ensure_automatic_sync_enabled()?;
-    let server = args
-        .config
-        .sync
-        .server_url
-        .clone()
-        .context("error sync-server-required hint=\"set sync.server_url in config.yaml\"")?;
     let wake_addr = args.config.wake_addr()?;
     let interval_seconds = args.config.sync_interval_seconds();
     let database = Database::open(&args.db_path).await?;
     let socket = UdpSocket::bind(wake_addr).await.with_context(|| {
         format!("could not bind daemon wake address {wake_addr}; is another daemon running?")
     })?;
-    info!(
-        db = %args.db_path.display(),
-        server = %server,
-        wake_addr = %wake_addr,
-        interval_seconds,
-        "daemon starting"
-    );
-    println!(
-        "daemon db={} server={} wake={}",
-        args.db_path.display(),
-        server,
-        wake_addr
-    );
-
+    println!("daemon db={} wake={}", args.db_path.display(), wake_addr);
     let blob_dir = crate::config::resolve_blob_dir(&args.db_path, &args.config)?;
     let lifecycle_policy = args.config.local.attachment_lifecycle.policy();
     let binary_fingerprint = current_binary_fingerprint()?;
-    let client = SyncHttpClient::new().context("build daemon sync HTTP client")?;
-    info!(server = %server, http_client_id = %client.id(), "daemon sync client ready");
     run_loop(
         database,
-        server,
+        &args.config,
         socket,
         interval_seconds,
-        args.config.sync_auth_token().map(str::to_string),
         blob_dir,
         lifecycle_policy,
-        client,
         binary_fingerprint,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     database: Database,
-    server: String,
+    config: &AppConfig,
     socket: UdpSocket,
     interval_seconds: u64,
-    auth_token: Option<String>,
     blob_dir: PathBuf,
     lifecycle_policy: aven_core::attachments::LifecyclePolicy,
-    client: SyncHttpClient,
     binary_fingerprint: BinaryFingerprint,
 ) -> Result<()> {
     let mut wake_buf = [0_u8; 16];
     let mut backoff_seconds = 1_u64;
     let mut next_sync = Instant::now();
     let mut retry_not_before = None;
+    let mut awaiting_setup = false;
+    let mut access_refused = false;
     let mut next_attachment_maintenance = Instant::now();
     let mut next_binary_check = Instant::now() + BINARY_CHECK_INTERVAL;
+    let mut sync = encrypted::DaemonSync::default();
     loop {
         tokio::select! {
             _ = shutdown_signal() => {
@@ -116,7 +100,6 @@ async fn run_loop(
             result = socket.recv_from(&mut wake_buf) => {
                 if let Err(err) = result {
                     warn!(error = %err, "daemon wake receive failed");
-                    eprintln!("daemon wake failed: {err}");
                 } else {
                     debug!("daemon wake received");
                 }
@@ -128,7 +111,6 @@ async fn run_loop(
             }
             _ = sleep_until(next_binary_check) => {
                 if binary_changed(&binary_fingerprint)? {
-                    info!(path = %binary_fingerprint.path.display(), "daemon executable changed");
                     println!("daemon-executable-changed path={}", binary_fingerprint.path.display());
                     break;
                 }
@@ -141,43 +123,47 @@ async fn run_loop(
             }
             _ = sleep_until(next_sync) => {
                 retry_not_before = None;
-                match sync_once(
-                    &database,
-                    &blob_dir,
-                    lifecycle_policy,
-                    &server,
-                    auth_token.as_deref(),
-                    &client,
-                )
-                .await
-                {
-                    Ok(DaemonSyncOutcome::Completed(summary)) => {
+                match sync_once(&database, config, &mut sync).await {
+                    Ok(DaemonRound::Completed(outcome)) => {
                         backoff_seconds = 1;
-                        next_sync = if summary.complete {
-                            Instant::now() + Duration::from_secs(interval_seconds)
+                        awaiting_setup = false;
+                        access_refused = false;
+                        next_sync = if outcome.more_work_ready() {
+                            Instant::now() + DAEMON_INCOMPLETE_RESCHEDULE
                         } else {
-                            Instant::now() + Duration::from_millis(DAEMON_INCOMPLETE_RESCHEDULE_MS)
+                            Instant::now() + Duration::from_secs(interval_seconds)
                         };
                     }
-                    Ok(DaemonSyncOutcome::Deferred) => {
+                    Ok(DaemonRound::NotSetUp) => {
+                        access_refused = false;
+                        if !awaiting_setup {
+                            awaiting_setup = true;
+                            println!("daemon-sync-not-set-up hint=\"run `aven sync setup` or `aven sync join`\"");
+                        }
+                        backoff_seconds = 1;
+                        next_sync = Instant::now() + Duration::from_secs(interval_seconds);
+                    }
+                    Ok(DaemonRound::Deferred) => {
                         debug!("daemon sync deferred");
                         next_sync = Instant::now() + DAEMON_CONTENTION_RESCHEDULE;
                     }
+                    // Refusals persist until the user acts elsewhere, so
+                    // backing off only repeats the warning.
+                    Err(err) if is_access_refusal(&err) => {
+                        if !access_refused {
+                            access_refused = true;
+                            warn!(error = %err, "daemon sync refused by server");
+                        }
+                        backoff_seconds = 1;
+                        next_sync = Instant::now() + Duration::from_secs(interval_seconds);
+                        retry_not_before = Some(next_sync);
+                    }
                     Err(err) => {
-                        let retry_seconds = if err
-                            .downcast_ref::<aven_core::sync::protocol::SyncCompatibilityError>()
-                            .is_some()
-                        {
-                            interval_seconds
-                        } else {
-                            let delay = backoff_seconds;
-                            backoff_seconds = (backoff_seconds * 2).min(300);
-                            delay
-                        };
+                        let retry_seconds = backoff_seconds;
+                        backoff_seconds = (backoff_seconds * 2).min(300);
                         next_sync = Instant::now() + Duration::from_secs(retry_seconds);
                         retry_not_before = Some(next_sync);
-                        warn!(error = %err, retry_seconds, "daemon sync failed");
-                        eprintln!("daemon sync failed: {err}");
+                        warn!(error = %daemon_error(&err), retry_seconds, "daemon sync failed");
                     }
                 }
             }
@@ -186,17 +172,42 @@ async fn run_loop(
     Ok(())
 }
 
+fn daemon_error(error: &anyhow::Error) -> String {
+    match crate::sync::error_explanations::explain(
+        crate::sync::error_explanations::ErrorAction::General,
+        crate::sync::error_explanations::ErrorSurface::Cli,
+        error,
+    ) {
+        Some(explanation) => format!(
+            "{} [{}] Next: {} Cause: {error:#}",
+            explanation.message, explanation.code, explanation.next_step
+        ),
+        None => error.to_string(),
+    }
+}
+
 fn current_binary_fingerprint() -> Result<BinaryFingerprint> {
-    let path = std::env::current_exe().context("resolve current executable")?;
-    binary_fingerprint(&path)
+    let current = std::env::current_exe().context("resolve current executable")?;
+    let launch_path = std::env::args_os()
+        .next()
+        .map(PathBuf::from)
+        .filter(|argv0| argv0.is_absolute() && same_file(argv0, &current))
+        .unwrap_or(current);
+    binary_fingerprint(&launch_path)
+}
+
+fn same_file(left: &Path, right: &Path) -> bool {
+    matches!((left.canonicalize(), right.canonicalize()), (Ok(left), Ok(right)) if left == right)
 }
 
 fn binary_changed(initial: &BinaryFingerprint) -> Result<bool> {
-    Ok(binary_fingerprint(&initial.path)? != *initial)
+    Ok(binary_fingerprint(&initial.launch_path)? != *initial)
 }
 
-fn binary_fingerprint(path: &Path) -> Result<BinaryFingerprint> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+fn binary_fingerprint(launch_path: &Path) -> Result<BinaryFingerprint> {
+    let path = launch_path
+        .canonicalize()
+        .unwrap_or_else(|_| launch_path.to_path_buf());
     let metadata = std::fs::metadata(&path)
         .with_context(|| format!("read executable metadata {}", path.display()))?;
     let modified_ns = metadata
@@ -205,6 +216,7 @@ fn binary_fingerprint(path: &Path) -> Result<BinaryFingerprint> {
         .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|duration| duration.as_nanos());
     Ok(BinaryFingerprint {
+        launch_path: launch_path.to_path_buf(),
         path,
         len: metadata.len(),
         modified_ns,
@@ -221,56 +233,20 @@ fn drain_wakes(socket: &UdpSocket, wake_buf: &mut [u8]) {
 
 async fn sync_once(
     database: &Database,
-    blob_dir: &Path,
-    lifecycle_policy: aven_core::attachments::LifecyclePolicy,
-    server: &str,
-    auth_token: Option<&str>,
-    client: &SyncHttpClient,
-) -> Result<DaemonSyncOutcome> {
-    let summary = match crate::sync::try_run_daemon_sync_with_page_budget(
-        database,
-        blob_dir,
-        server,
-        auth_token,
-        DAEMON_SYNC_PAGE_BUDGET,
-        client,
-        lifecycle_policy,
-    )
-    .await?
-    {
-        DaemonSyncOutcome::Completed(summary) => summary,
-        deferred @ DaemonSyncOutcome::Deferred => return Ok(deferred),
-    };
-    info!(
-        pushed = summary.pushed,
-        pulled = summary.pulled,
-        cursor = summary.cursor,
-        complete = summary.complete,
-        pages = summary.pages,
-        request_bytes = summary.request_bytes,
-        request_wire_bytes = summary.request_wire_bytes,
-        response_decoded_bytes = summary.response_decoded_bytes,
-        response_compression = summary.response_compression,
-        apply_ms = summary.apply_ms,
-        "daemon sync completed"
-    );
-    println!(
-        "daemon-synced pushed={} pulled={} blob_uploaded={} blob_uploaded_bytes={} blob_downloaded={} blob_downloaded_bytes={} blob_upload_remaining={} blob_upload_remaining_bytes={} blob_download_remaining={} blob_download_remaining_bytes={} cursor={} complete={} pages={}",
-        summary.pushed,
-        summary.pulled,
-        summary.blob_uploaded,
-        summary.blob_uploaded_bytes,
-        summary.blob_downloaded,
-        summary.blob_downloaded_bytes,
-        summary.blob_upload_remaining,
-        summary.blob_upload_remaining_bytes,
-        summary.blob_download_remaining,
-        summary.blob_download_remaining_bytes,
-        summary.cursor,
-        summary.complete,
-        summary.pages,
-    );
-    Ok(DaemonSyncOutcome::Completed(summary))
+    config: &AppConfig,
+    sync: &mut encrypted::DaemonSync,
+) -> Result<DaemonRound> {
+    let round = sync.round(database, config, DAEMON_ROUND_BUDGET).await?;
+    match &round {
+        DaemonRound::Completed(outcome) => {
+            println!(
+                "daemon-synced rounds={} metadata_caught_up={} images={}",
+                outcome.rounds, outcome.metadata_caught_up, outcome.images
+            );
+        }
+        DaemonRound::NotSetUp | DaemonRound::Deferred => {}
+    }
+    Ok(round)
 }
 
 async fn maintain_attachments(
@@ -283,13 +259,6 @@ async fn maintain_attachments(
         .await
     {
         Ok(summary) => {
-            info!(
-                eligible = summary.eligible.count,
-                eligible_bytes = summary.eligible.bytes,
-                pruned = summary.pruned.count,
-                pruned_bytes = summary.pruned.bytes,
-                "attachment maintenance completed"
-            );
             println!(
                 "daemon-maintained eligible={} eligible_bytes={} pruned={} pruned_bytes={}",
                 summary.eligible.count,
@@ -373,6 +342,18 @@ mod tests {
     }
 
     #[test]
+    fn protected_storage_daemon_errors_are_actionable() {
+        let error = anyhow::Error::new(
+            crate::protected_local_keys::ProtectedLocalKeyStoreError::new(
+                crate::protected_local_keys::ProtectedLocalKeyStoreErrorKind::MissingAuthority,
+            ),
+        );
+        let message = daemon_error(&error);
+        assert!(message.contains("protected-key-storage-missing"));
+        assert!(message.contains("Do not replace them with new keys"));
+    }
+
+    #[test]
     fn binary_fingerprint_changes_when_file_changes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("aven");
@@ -380,6 +361,25 @@ mod tests {
         let initial = binary_fingerprint(&path).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         std::fs::write(&path, "two-two").unwrap();
+        assert!(binary_changed(&initial).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_fingerprint_changes_when_launch_symlink_is_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("0.1.0");
+        let new = dir.path().join("0.2.0");
+        std::fs::write(&old, "same").unwrap();
+        std::fs::write(&new, "same").unwrap();
+        let link = dir.path().join("aven");
+        std::os::unix::fs::symlink(&old, &link).unwrap();
+        let initial = binary_fingerprint(&link).unwrap();
+        assert!(!binary_changed(&initial).unwrap());
+
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&new, &link).unwrap();
+        assert!(old.exists());
         assert!(binary_changed(&initial).unwrap());
     }
 }

@@ -658,59 +658,49 @@ pub(crate) struct TuiDatabaseStats {
     pub(crate) latest_updated_at: Option<String>,
 }
 
+/// Local sync state read from the database, configuration, and protected
+/// membership; contacts no server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TuiSyncStatus {
+    pub(crate) devices: Option<usize>,
+    /// Automatic sync by the daemon is configured.
     pub(crate) enabled: bool,
     pub(crate) runtime_allowed: bool,
-    pub(crate) config_error: Option<String>,
-    pub(crate) configured_server: Option<SyncStatusCheck>,
-    pub(crate) pinned_server: Option<String>,
-    pub(crate) server_match: Option<SyncStatusCheck>,
-    pub(crate) daemon_server: Option<SyncStatusCheck>,
-    pub(crate) auth_token_configured: bool,
+    /// The database was set up or joined, including an unfinished attempt.
+    pub(crate) set_up: bool,
+    pub(crate) phase: crate::sync::encrypted::LocalPhase,
     pub(crate) interval_seconds: u64,
     pub(crate) daemon_wake: SyncStatusCheck,
+    pub(crate) protected_storage: SyncStatusCheck,
     pub(crate) pending_changes: i64,
     pub(crate) conflicts: i64,
     pub(crate) sync_cursor: Option<String>,
     pub(crate) local_sequence: Option<String>,
-    pub(crate) last_attempt: Option<String>,
-    pub(crate) last_success: Option<String>,
-    pub(crate) last_error: Option<String>,
-    pub(crate) last_pushed: Option<String>,
-    pub(crate) last_pulled: Option<String>,
-    pub(crate) last_cursor: Option<String>,
+    /// The associated sync server, once setup or joining has recorded it.
+    pub(crate) server: Option<String>,
+    pub(crate) invitation: Option<crate::sync::encrypted::InvitationStatus>,
+    /// Time of the latest server authentication refusal, cleared by a successful sync.
+    pub(crate) access_refused_at: Option<String>,
 }
 
 impl Default for TuiSyncStatus {
     fn default() -> Self {
         Self {
+            devices: None,
             enabled: false,
             runtime_allowed: true,
-            config_error: None,
-            configured_server: None,
-            pinned_server: None,
-            server_match: None,
-            daemon_server: None,
-            auth_token_configured: false,
+            set_up: false,
+            phase: crate::sync::encrypted::LocalPhase::NotSetUp,
             interval_seconds: 30,
             daemon_wake: SyncStatusCheck::new(true, "not checked"),
+            protected_storage: SyncStatusCheck::new(true, "available"),
             pending_changes: 0,
             conflicts: 0,
             sync_cursor: None,
             local_sequence: None,
-            last_attempt: None,
-            last_success: None,
-            last_error: None,
-            last_pushed: None,
-            last_pulled: None,
-            last_cursor: None,
+            server: None,
+            invitation: None,
+            access_refused_at: None,
         }
-    }
-}
-
-impl TuiSyncStatus {
-    pub(crate) fn last_error_value(&self) -> Option<&str> {
-        self.last_error.as_deref().filter(|error| !error.is_empty())
     }
 }

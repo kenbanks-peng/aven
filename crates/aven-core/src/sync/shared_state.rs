@@ -1,0 +1,996 @@
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use crate::data_safety::export_types::{
+    AvenExport, EXPORT_FORMAT, EXPORT_VERSION, RELATED_LINKS_EXPORT_VERSION,
+    SharedHistoryProvenanceRow,
+};
+use crate::data_safety::{self, tables, validation};
+use crate::db::{self, Database};
+use anyhow::{Context, Result, ensure};
+
+pub mod adoption;
+pub(crate) mod package;
+mod peer_install;
+pub(crate) mod validated;
+
+pub use package::publication as bootstrap_format;
+
+pub use package::{
+    EncryptedLocalSharedStatePackage, LocalSharedStatePackageContext, LocalSharedStatePackageKey,
+};
+
+const LOCAL_CAPTURE_VERSION: i64 = 1;
+
+/// Per-thread work counters, so parallel tests observe only their own passes.
+#[cfg(test)]
+pub(crate) mod counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        static KEYED_PASSES: Cell<u32> = const { Cell::new(0) };
+        static SNAPSHOT_PARSES: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn keyed_pass() {
+        KEYED_PASSES.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(crate) fn snapshot_parse() {
+        SNAPSHOT_PARSES.with(|c| c.set(c.get() + 1));
+    }
+
+    /// Returns and resets (keyed passes, snapshot parses).
+    pub(crate) fn take() -> (u32, u32) {
+        (
+            KEYED_PASSES.with(|c| c.replace(0)),
+            SNAPSHOT_PARSES.with(|c| c.replace(0)),
+        )
+    }
+}
+
+/// A consistent, installation-ready copy of shared domain state and retained history.
+///
+/// This value has no serialized wire representation; the encrypted package
+/// layer defines the protocol format.
+#[derive(Debug)]
+pub struct SharedStateCapture {
+    snapshot: AvenExport,
+}
+
+/// A durable local capture that has never been made available to a dispatcher.
+///
+/// Cancellation of this type is local-only. Publication code must use a separate
+/// state machine with a server-confirmed cancellation fence.
+#[derive(Debug)]
+pub struct NeverDispatchedLocalSharedCapture {
+    candidate_id: String,
+    stream_id: String,
+    capture: SharedStateCapture,
+    images: Vec<PersistedCaptureImage>,
+    /// SHA-256 of the exact stored snapshot document this value was decoded
+    /// from or encoded as.
+    snapshot_digest: [u8; 32],
+}
+
+impl NeverDispatchedLocalSharedCapture {
+    pub fn candidate_id(&self) -> &str {
+        &self.candidate_id
+    }
+
+    pub fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    pub fn shared_state(&self) -> &SharedStateCapture {
+        &self.capture
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct PersistedLocalCapture {
+    candidate_id: String,
+    stream_id: String,
+    images: Vec<PersistedCaptureImage>,
+    snapshot: AvenExport,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct PersistedCaptureImage {
+    sha256: String,
+    classification: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedStateInstallReport {
+    pub prefix_count: u64,
+    pub attachment_count: u64,
+}
+
+impl Database {
+    /// Captures materialized shared state and retained history in one SQLite read boundary.
+    ///
+    /// The source database is not acknowledged, renumbered, or associated with a
+    /// different server. Device-private metadata and attachment availability are
+    /// excluded from the captured value.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn capture_shared_state(&self) -> Result<SharedStateCapture> {
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = db::begin_immediate(&mut conn).await?;
+        let schema_version = db::current_schema_version(&mut tx).await?;
+        let tables = data_safety::scan_export_tables(&mut tx).await?;
+        let capture = SharedStateCapture::from_tables(schema_version, tables)?;
+        tx.commit().await?;
+        Ok(capture)
+    }
+
+    /// Creates or resumes the one durable, never-dispatched local capture.
+    ///
+    /// The snapshot, exact history map, stable candidate and stream identities,
+    /// image classification, ownership pins, counter floor, and sync fence commit
+    /// in one immediate transaction. An existing capture is resumed without
+    /// reading current domain rows or attachment bytes again.
+    pub async fn capture_local_shared_state_never_dispatched(
+        &self,
+    ) -> Result<NeverDispatchedLocalSharedCapture> {
+        self.capture_local_shared_state_never_dispatched_inner(None)
+            .await
+    }
+
+    /// Captures setup state while checking that inventory marked available is
+    /// still present on disk. Files missing at this boundary are published as
+    /// unavailable; other filesystem failures remain explicit errors.
+    pub async fn capture_local_shared_state_for_setup(
+        &self,
+        blob_dir: &Path,
+    ) -> Result<NeverDispatchedLocalSharedCapture> {
+        self.capture_local_shared_state_never_dispatched_inner(Some(blob_dir))
+            .await
+    }
+
+    async fn capture_local_shared_state_never_dispatched_inner(
+        &self,
+        blob_dir: Option<&Path>,
+    ) -> Result<NeverDispatchedLocalSharedCapture> {
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = db::begin_immediate(&mut conn).await?;
+        adoption::ensure_no_intent(&mut tx).await?;
+        if let Some(capture) = load_persisted_local_capture(&mut tx).await? {
+            tx.commit().await?;
+            return Ok(capture);
+        }
+
+        let schema_version = db::current_schema_version(&mut tx).await?;
+        let tables = data_safety::scan_export_tables(&mut tx).await?;
+        let source_history = adoption::pack_history(&tables.changes)?;
+        let mut source_provenance = tables.shared_history_provenance.iter().collect::<Vec<_>>();
+        source_provenance.sort_by(|a, b| a.change_id.cmp(&b.change_id));
+        let source_provenance = pack_document(&source_provenance)?;
+        let image_classes = classify_images(&tables, blob_dir)?;
+        let capture = SharedStateCapture::from_tables(schema_version, tables)?;
+        let candidate_id = random_cryptographic_id()?;
+        let stream_id = random_cryptographic_id()?;
+        let created_at = crate::ids::now();
+        let local_seq_floor = capture
+            .snapshot
+            .tables
+            .changes
+            .iter()
+            .map(|row| row.local_seq)
+            .max()
+            .unwrap_or(0);
+        let existing_floor = db::get_meta(&mut tx, "local_seq")
+            .await?
+            .unwrap_or_else(|| "0".to_string())
+            .parse::<i64>()?;
+        db::set_meta(
+            &mut tx,
+            "local_seq",
+            &existing_floor.max(local_seq_floor).to_string(),
+        )
+        .await?;
+        let sync_generation = db::get_meta(&mut tx, "sync_generation")
+            .await?
+            .unwrap_or_else(|| "0".to_string())
+            .parse::<i64>()?
+            .checked_add(1)
+            .context("sync generation overflow")?;
+        db::set_meta(&mut tx, "sync_generation", &sync_generation.to_string()).await?;
+
+        let persisted = PersistedLocalCapture {
+            candidate_id: candidate_id.clone(),
+            stream_id: stream_id.clone(),
+            images: image_classes
+                .into_iter()
+                .map(|(sha256, classification)| PersistedCaptureImage {
+                    sha256,
+                    classification: classification.to_string(),
+                })
+                .collect(),
+            snapshot: capture.snapshot,
+        };
+        let snapshot = pack_document(&persisted)?;
+        let snapshot_digest = crate::sync::codec::hash(&snapshot);
+        sqlx::query(
+            "INSERT INTO local_shared_capture_journal(
+                 singleton, candidate_id, stream_id, internal_version,
+                 local_seq_floor, sync_generation, created_at, source_authority
+             ) VALUES (1, ?, ?, ?, ?, ?, ?,
+                       (SELECT authority FROM local_seed_source WHERE singleton = 1))",
+        )
+        .bind(&candidate_id)
+        .bind(&stream_id)
+        .bind(LOCAL_CAPTURE_VERSION)
+        .bind(local_seq_floor)
+        .bind(sync_generation)
+        .bind(&created_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO local_shared_capture_documents(
+                 candidate_id, snapshot, source_history, source_provenance
+             ) VALUES (?, ?, ?, ?)",
+        )
+        .bind(&candidate_id)
+        .bind(snapshot)
+        .bind(source_history)
+        .bind(source_provenance)
+        .execute(&mut *tx)
+        .await?;
+        let provenance_by_id = persisted
+            .snapshot
+            .tables
+            .shared_history_provenance
+            .iter()
+            .map(|row| (row.change_id.as_str(), row))
+            .collect::<HashMap<_, _>>();
+        let mut rank_rows = Vec::with_capacity(persisted.snapshot.tables.changes.len());
+        for change in &persisted.snapshot.tables.changes {
+            let provenance = provenance_by_id
+                .get(change.change_id.as_str())
+                .context("shared history provenance is missing")?;
+            rank_rows.push((
+                change.change_id.as_str(),
+                change
+                    .server_seq
+                    .context("shared history rank is missing")?,
+                provenance.source_server_seq,
+                provenance.source_pending_rank,
+            ));
+        }
+        // One statement over a JSON array; per-row inserts cost several
+        // times the write itself.
+        sqlx::query(
+            "INSERT INTO local_shared_capture_changes(
+                 candidate_id, change_id, prefix_rank, source_server_seq,
+                 source_pending_rank
+             )
+             SELECT ?, json_extract(value, '$[0]'), json_extract(value, '$[1]'),
+                    json_extract(value, '$[2]'), json_extract(value, '$[3]')
+             FROM json_each(?)",
+        )
+        .bind(&candidate_id)
+        .bind(serde_json::to_string(&rank_rows)?)
+        .execute(&mut *tx)
+        .await?;
+        for image in &persisted.images {
+            sqlx::query(
+                "INSERT INTO local_shared_capture_images(candidate_id, sha256, classification)
+                 VALUES (?, ?, ?)",
+            )
+            .bind(&candidate_id)
+            .bind(&image.sha256)
+            .bind(&image.classification)
+            .execute(&mut *tx)
+            .await?;
+            if image.classification != "unavailable" {
+                sqlx::query(
+                    "INSERT INTO local_shared_capture_pins(candidate_id, sha256) VALUES (?, ?)",
+                )
+                .bind(&candidate_id)
+                .bind(&image.sha256)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        validate_persisted_local_capture(
+            &mut tx,
+            &candidate_id,
+            &persisted.images,
+            &persisted.snapshot,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(NeverDispatchedLocalSharedCapture {
+            candidate_id,
+            stream_id,
+            capture: SharedStateCapture {
+                snapshot: persisted.snapshot,
+            },
+            images: persisted.images,
+            snapshot_digest,
+        })
+    }
+
+    /// Reopens the durable local capture without consulting newer domain rows.
+    pub async fn resume_local_shared_state_never_dispatched(
+        &self,
+    ) -> Result<Option<NeverDispatchedLocalSharedCapture>> {
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = db::begin_immediate(&mut conn).await?;
+        adoption::ensure_no_intent(&mut tx).await?;
+        let capture = load_persisted_local_capture(&mut tx).await?;
+        tx.commit().await?;
+        Ok(capture)
+    }
+
+    /// Cancels only the given candidate's never-dispatched capture and releases its pins.
+    ///
+    /// Repeating cancellation after success is harmless. A different active
+    /// candidate fails closed. Domain rows and later edits are never removed.
+    pub async fn cancel_local_shared_state_never_dispatched(
+        &self,
+        candidate_id: &str,
+    ) -> Result<bool> {
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = db::begin_immediate(&mut conn).await?;
+        adoption::ensure_no_intent(&mut tx).await?;
+        let active: Option<String> = sqlx::query_scalar(
+            "SELECT candidate_id FROM local_shared_capture_journal WHERE singleton = 1",
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(active) = active else {
+            tx.commit().await?;
+            return Ok(false);
+        };
+        ensure!(
+            active == candidate_id,
+            "error local-shared-capture-candidate-mismatch"
+        );
+        let deleted = sqlx::query(
+            "DELETE FROM local_shared_capture_journal WHERE singleton = 1 AND candidate_id = ?",
+        )
+        .bind(candidate_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted == 1)
+    }
+
+    /// Atomically installs captured shared state into a fresh database.
+    ///
+    /// The target keeps its own client identity and local settings. Retained
+    /// history receives dense effective prefix ranks, while source ordering
+    /// provenance remains separate. Attachment metadata is installed without
+    /// claiming that image bytes are locally available.
+    pub async fn install_shared_state(
+        &self,
+        capture: &SharedStateCapture,
+    ) -> Result<SharedStateInstallReport> {
+        capture.validate()?;
+        let _installation = self.plaintext_installation_guard()?;
+        let mut conn = self.acquire_writer().await?;
+        let mut tx = db::begin_immediate(&mut conn).await?;
+        ensure_empty_target(&mut tx).await?;
+
+        let report = install_in_transaction(&mut tx, capture).await?;
+        tx.commit().await?;
+
+        Ok(report)
+    }
+}
+
+async fn install_in_transaction(
+    conn: &mut sqlx::SqliteConnection,
+    capture: &SharedStateCapture,
+) -> Result<SharedStateInstallReport> {
+    let identity = db::get_meta(conn, "client_id")
+        .await?
+        .context("missing target client identity")?;
+    ensure!(
+        !capture
+            .snapshot
+            .tables
+            .changes
+            .iter()
+            .any(|row| row.client_id == identity),
+        "error shared-state-install target identity is not distinct"
+    );
+
+    sqlx::query("DELETE FROM workspaces")
+        .execute(&mut *conn)
+        .await?;
+    let t = &capture.snapshot.tables;
+    tables::import_workspaces(conn, &t.workspaces).await?;
+    tables::import_projects(conn, &t.projects).await?;
+    tables::import_project_id_aliases(conn, &t.project_id_aliases).await?;
+    tables::import_labels(conn, &t.labels).await?;
+    tables::import_metadata_fields(conn, &t.metadata_fields).await?;
+    tables::import_metadata_field_id_aliases(conn, &t.metadata_field_id_aliases).await?;
+    tables::import_tasks(conn, &t.tasks).await?;
+    tables::import_task_metadata(conn, &t.task_metadata).await?;
+    tables::import_task_labels(conn, &t.task_labels).await?;
+    tables::import_notes(conn, &t.notes).await?;
+    tables::import_task_dependencies(conn, &t.task_dependencies).await?;
+    tables::import_task_epic_links(conn, &t.task_epic_links).await?;
+    tables::import_blob_inventory(conn, &t.blob_inventory).await?;
+    tables::import_task_attachments(conn, &t.task_attachments).await?;
+    tables::import_recurrence_series(conn, &t.recurrence_series).await?;
+    tables::import_recurrence_series_labels(conn, &t.recurrence_series_labels).await?;
+    tables::import_recurrence_series_metadata(conn, &t.recurrence_series_metadata).await?;
+    tables::import_recurrence_occurrences(conn, &t.recurrence_occurrences).await?;
+    tables::import_recurrence_pause_intervals(conn, &t.recurrence_pause_intervals).await?;
+    tables::import_changes(conn, &t.changes).await?;
+    tables::import_task_related_links(conn, &t.task_related_links).await?;
+    tables::import_field_versions(conn, &t.field_versions).await?;
+    tables::import_conflicts(conn, &t.conflicts).await?;
+    tables::import_shared_history_provenance(conn, &t.shared_history_provenance).await?;
+    for row in &t.meta {
+        db::set_meta(conn, &row.key, &row.value).await?;
+    }
+    let local_seq = t.changes.iter().map(|row| row.local_seq).max().unwrap_or(0);
+    db::set_meta(conn, "local_seq", &local_seq.to_string()).await?;
+    crate::sync::apply::rebuild_task_placements(conn).await?;
+    data_safety::ensure_integrity_ok(
+        &crate::data_safety::integrity_report_in_transaction(conn).await?,
+    )?;
+    Ok(SharedStateInstallReport {
+        prefix_count: u64::try_from(t.changes.len())?,
+        attachment_count: u64::try_from(t.task_attachments.len())?,
+    })
+}
+
+impl SharedStateCapture {
+    fn from_tables(
+        schema_version: i64,
+        mut tables: crate::data_safety::export_types::ExportTables,
+    ) -> Result<Self> {
+        let stored = std::mem::take(&mut tables.shared_history_provenance)
+            .into_iter()
+            .map(|row| (row.change_id.clone(), row))
+            .collect::<HashMap<_, _>>();
+
+        tables.project_paths.clear();
+        tables
+            .meta
+            .retain(|row| row.key.starts_with("epic_membership_baseline:"));
+        for blob in &mut tables.blob_inventory {
+            blob.available = 0;
+            blob.last_verified_at = None;
+        }
+
+        let mut accepted = tables
+            .changes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| row.server_seq.map(|seq| (seq, index)))
+            .collect::<Vec<_>>();
+        accepted.sort_by_key(|(seq, _)| *seq);
+        let mut pending = tables
+            .changes
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.server_seq.is_none())
+            .map(|(index, row)| {
+                (
+                    row.local_seq,
+                    row.created_at.clone(),
+                    row.change_id.clone(),
+                    index,
+                )
+            })
+            .collect::<Vec<_>>();
+        pending.sort();
+
+        let pending_ranks = pending
+            .iter()
+            .enumerate()
+            .map(|(rank, (_, _, _, index))| (*index, rank + 1))
+            .collect::<HashMap<_, _>>();
+        let order = accepted
+            .iter()
+            .map(|(_, index)| *index)
+            .chain(pending.iter().map(|(_, _, _, index)| *index));
+        let mut provenance = Vec::with_capacity(tables.changes.len());
+        for (position, index) in order.enumerate() {
+            let row = &mut tables.changes[index];
+            let source = if let Some(stored) = stored.get(&row.change_id) {
+                SharedHistoryProvenanceRow {
+                    change_id: row.change_id.clone(),
+                    source_server_seq: stored.source_server_seq,
+                    source_pending_rank: stored.source_pending_rank,
+                }
+            } else if let Some(source_server_seq) = row.server_seq {
+                SharedHistoryProvenanceRow {
+                    change_id: row.change_id.clone(),
+                    source_server_seq: Some(source_server_seq),
+                    source_pending_rank: None,
+                }
+            } else {
+                let pending_rank = pending_ranks
+                    .get(&index)
+                    .context("pending history order is incomplete")?;
+                SharedHistoryProvenanceRow {
+                    change_id: row.change_id.clone(),
+                    source_server_seq: None,
+                    source_pending_rank: Some(i64::try_from(*pending_rank)?),
+                }
+            };
+            row.server_seq = Some(i64::try_from(position + 1)?);
+            provenance.push(source);
+        }
+
+        tables.shared_history_provenance = provenance;
+        let version = if !tables.shared_history_provenance.is_empty() {
+            EXPORT_VERSION
+        } else if tables.task_related_links.is_empty() {
+            2
+        } else {
+            RELATED_LINKS_EXPORT_VERSION
+        };
+        let capture = Self {
+            snapshot: AvenExport {
+                format: EXPORT_FORMAT.to_string(),
+                version,
+                exported_at: crate::ids::now(),
+                schema_version,
+                blobs_included: false,
+                tables,
+            },
+        };
+        capture.validate()?;
+        Ok(capture)
+    }
+
+    fn validate(&self) -> Result<()> {
+        validation::validate_shared_snapshot(&self.snapshot)?;
+        ensure!(
+            self.snapshot.tables.project_paths.is_empty(),
+            "error invalid-shared-state project paths are device-private"
+        );
+        ensure!(
+            self.snapshot
+                .tables
+                .meta
+                .iter()
+                .all(|row| row.key.starts_with("epic_membership_baseline:")),
+            "error invalid-shared-state private metadata is present"
+        );
+        let change_ids = self
+            .snapshot
+            .tables
+            .changes
+            .iter()
+            .map(|row| row.change_id.as_str())
+            .collect::<HashSet<_>>();
+        let provenance_ids = self
+            .snapshot
+            .tables
+            .shared_history_provenance
+            .iter()
+            .map(|row| row.change_id.as_str())
+            .collect::<HashSet<_>>();
+        ensure!(
+            change_ids.len() == self.snapshot.tables.changes.len()
+                && provenance_ids.len() == self.snapshot.tables.shared_history_provenance.len()
+                && change_ids == provenance_ids,
+            "error invalid-shared-state history provenance does not match retained history"
+        );
+        for row in &self.snapshot.tables.shared_history_provenance {
+            ensure!(
+                matches!(
+                    (row.source_server_seq, row.source_pending_rank),
+                    (Some(1..), None) | (None, Some(1..))
+                ),
+                "error invalid-shared-state history provenance is invalid"
+            );
+        }
+        let mut ranks = self
+            .snapshot
+            .tables
+            .changes
+            .iter()
+            .map(|row| row.server_seq.context("shared history rank is missing"))
+            .collect::<Result<Vec<_>>>()?;
+        ranks.sort_unstable();
+        let expected_ranks = (1..=i64::try_from(ranks.len())?).collect::<Vec<_>>();
+        ensure!(
+            ranks == expected_ranks,
+            "error invalid-shared-state history ranks are not dense"
+        );
+        Ok(())
+    }
+}
+
+pub(crate) async fn ensure_no_active_local_shared_capture(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<()> {
+    adoption::ensure_unbound(conn).await?;
+    let active: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM local_shared_capture_journal WHERE singleton = 1)",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(
+        !active,
+        "error local-shared-capture-active hint=cancel-never-dispatched-capture-first"
+    );
+    Ok(())
+}
+
+pub(crate) async fn ensure_changes_not_local_capture_protected(
+    conn: &mut sqlx::SqliteConnection,
+    change_ids: &[&str],
+) -> Result<()> {
+    if change_ids.is_empty() {
+        return Ok(());
+    }
+    let protected: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM local_shared_capture_changes
+             WHERE change_id IN (SELECT value FROM json_each(?))
+         )",
+    )
+    .bind(serde_json::to_string(change_ids)?)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(
+        !protected,
+        "error local-shared-capture-protected-history hint=cancel-never-dispatched-capture-first"
+    );
+    Ok(())
+}
+
+/// Frame magic of the zstd documents a capture stores. Plain JSON text, which
+/// older captures stored, never starts with it.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Upper bound on one decompressed capture document.
+const DOCUMENT_LIMIT: u64 = 1 << 30;
+
+/// Serializes a capture document straight into a zstd frame, without
+/// materializing its text. A counting pass first gives the frame its declared
+/// size, which lets readers allocate the text once.
+pub(super) fn pack_document<T: serde::Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
+    struct Count(u64);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len() as u64;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 1)?;
+    encoder.set_pledged_src_size(Some(count.0))?;
+    encoder.include_contentsize(true)?;
+    let mut writer = std::io::BufWriter::with_capacity(1 << 16, encoder);
+    serde_json::to_writer(&mut writer, value)?;
+    let encoder = writer.into_inner().map_err(|error| error.into_error())?;
+    Ok(encoder.finish()?)
+}
+
+/// The JSON text of a stored capture document, compressed or not.
+pub(super) fn unpack_document(stored: &[u8]) -> Result<String> {
+    if !stored.starts_with(&ZSTD_MAGIC) {
+        return Ok(std::str::from_utf8(stored)?.to_owned());
+    }
+    // Frames written by `pack_document` declare their size, so the text is
+    // allocated once. A larger actual size fails rather than growing.
+    if let Ok(Some(size)) = zstd::zstd_safe::get_frame_content_size(stored) {
+        ensure!(
+            size <= DOCUMENT_LIMIT,
+            "error local-shared-capture-document-too-large"
+        );
+        let text = zstd::bulk::decompress(stored, usize::try_from(size)?)?;
+        return Ok(String::from_utf8(text)?);
+    }
+    let mut text = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(
+            zstd::stream::read::Decoder::new(stored)?,
+            DOCUMENT_LIMIT + 1,
+        ),
+        &mut text,
+    )?;
+    ensure!(
+        text.len() as u64 <= DOCUMENT_LIMIT,
+        "error local-shared-capture-document-too-large"
+    );
+    Ok(String::from_utf8(text)?)
+}
+
+async fn load_persisted_local_capture(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<Option<NeverDispatchedLocalSharedCapture>> {
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "SELECT candidate_id, stream_id, internal_version
+         FROM local_shared_capture_journal WHERE singleton = 1",
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((candidate_id, stream_id, internal_version)) = row else {
+        return Ok(None);
+    };
+    ensure!(
+        internal_version == LOCAL_CAPTURE_VERSION,
+        "error local-shared-capture-unsupported"
+    );
+    let snapshot: Vec<u8> = sqlx::query_scalar(
+        "SELECT snapshot FROM local_shared_capture_documents WHERE candidate_id = ?",
+    )
+    .bind(&candidate_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    #[cfg(test)]
+    counters::snapshot_parse();
+    let persisted: PersistedLocalCapture = serde_json::from_str(
+        &unpack_document(&snapshot).context("error local-shared-capture-malformed")?,
+    )
+    .context("error local-shared-capture-malformed")?;
+    ensure!(
+        persisted.candidate_id == candidate_id && persisted.stream_id == stream_id,
+        "error local-shared-capture-encoding-mismatch"
+    );
+    let capture = SharedStateCapture {
+        snapshot: persisted.snapshot,
+    };
+    capture.validate()?;
+    validate_persisted_local_capture(conn, &candidate_id, &persisted.images, &capture.snapshot)
+        .await?;
+    Ok(Some(NeverDispatchedLocalSharedCapture {
+        candidate_id,
+        stream_id,
+        capture,
+        images: persisted.images,
+        snapshot_digest: crate::sync::codec::hash(&snapshot),
+    }))
+}
+
+/// One captured change: ID, prefix rank, source server sequence and source
+/// pending rank.
+pub(super) type RankRow<'a> = (std::borrow::Cow<'a, str>, i64, Option<i64>, Option<i64>);
+
+/// The capture's rank table as JSON text, parsed with [`RankRow`]. One array
+/// for the whole table: decoding thousands of rows one by one through the
+/// driver costs several times the query itself.
+pub(super) async fn rank_rows_json(
+    conn: &mut sqlx::SqliteConnection,
+    candidate_id: &str,
+) -> Result<String> {
+    Ok(sqlx::query_scalar(
+        "SELECT json_group_array(json_array(
+                    change_id, prefix_rank, source_server_seq, source_pending_rank))
+         FROM local_shared_capture_changes WHERE candidate_id = ?",
+    )
+    .bind(candidate_id)
+    .fetch_one(&mut *conn)
+    .await?)
+}
+
+async fn validate_persisted_local_capture(
+    conn: &mut sqlx::SqliteConnection,
+    candidate_id: &str,
+    persisted_images: &[PersistedCaptureImage],
+    snapshot: &AvenExport,
+) -> Result<()> {
+    let stored = rank_rows_json(conn, candidate_id).await?;
+    let mut stored: Vec<RankRow<'_>> = serde_json::from_str(&stored)?;
+    stored.sort_by_key(|row| row.1);
+    let provenance = snapshot
+        .tables
+        .shared_history_provenance
+        .iter()
+        .map(|row| (row.change_id.as_str(), row))
+        .collect::<HashMap<_, _>>();
+    let mut expected = snapshot
+        .tables
+        .changes
+        .iter()
+        .map(|change| {
+            let source = provenance
+                .get(change.change_id.as_str())
+                .context("shared history provenance is missing")?;
+            Ok((
+                std::borrow::Cow::Borrowed(change.change_id.as_str()),
+                change
+                    .server_seq
+                    .context("shared history rank is missing")?,
+                source.source_server_seq,
+                source.source_pending_rank,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    expected.sort_by_key(|row| row.1);
+    ensure!(
+        stored == expected,
+        "error local-shared-capture-history-mismatch"
+    );
+
+    let invalid_ownership: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM local_shared_capture_images image
+             LEFT JOIN local_shared_capture_pins pin
+               ON pin.candidate_id = image.candidate_id AND pin.sha256 = image.sha256
+             WHERE image.candidate_id = ? AND (
+                 (image.classification = 'unavailable' AND pin.sha256 IS NOT NULL)
+                 OR (image.classification != 'unavailable' AND pin.sha256 IS NULL)
+             )
+         )",
+    )
+    .bind(candidate_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(
+        !invalid_ownership,
+        "error local-shared-capture-image-ownership-mismatch"
+    );
+    let stored_images: Vec<(String, String)> = sqlx::query_as(
+        "SELECT sha256, classification FROM local_shared_capture_images
+         WHERE candidate_id = ? ORDER BY sha256",
+    )
+    .bind(candidate_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut encoded_images = persisted_images
+        .iter()
+        .map(|image| (image.sha256.clone(), image.classification.clone()))
+        .collect::<Vec<_>>();
+    encoded_images.sort();
+    let inventory_hashes = snapshot
+        .tables
+        .blob_inventory
+        .iter()
+        .map(|row| row.sha256.as_str())
+        .collect::<HashSet<_>>();
+    ensure!(
+        stored_images == encoded_images
+            && encoded_images.len() == inventory_hashes.len()
+            && encoded_images
+                .iter()
+                .all(|(sha256, _)| inventory_hashes.contains(sha256.as_str())),
+        "error local-shared-capture-image-set-mismatch"
+    );
+    Ok(())
+}
+
+/// Classifies captured image metadata. Selected bytes are validated once, by
+/// packaging, before anything is frozen; pins protect them until then.
+fn classify_images(
+    tables: &crate::data_safety::export_types::ExportTables,
+    blob_dir: Option<&Path>,
+) -> Result<Vec<(String, &'static str)>> {
+    let deleted_tasks = tables
+        .tasks
+        .iter()
+        .map(|task| (task.id.as_str(), task.deleted != 0))
+        .collect::<HashMap<_, _>>();
+    let current_hashes = tables
+        .task_attachments
+        .iter()
+        .filter(|attachment| {
+            attachment.deleted == 0
+                && !deleted_tasks
+                    .get(attachment.task_id.as_str())
+                    .copied()
+                    .unwrap_or(true)
+        })
+        .map(|attachment| attachment.sha256.as_str())
+        .collect::<HashSet<_>>();
+    let mut result = Vec::with_capacity(tables.blob_inventory.len());
+    for inventory in &tables.blob_inventory {
+        let missing_on_disk = if let Some(blob_dir) = blob_dir {
+            let path = crate::attachments::storage::object_path(blob_dir, &inventory.sha256)?;
+            match std::fs::metadata(path) {
+                Ok(metadata) => !metadata.is_file(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => {
+                    let attachment = tables
+                        .task_attachments
+                        .iter()
+                        .find(|attachment| attachment.sha256 == inventory.sha256);
+                    let task = attachment.and_then(|attachment| {
+                        tables.tasks.iter().find(|task| {
+                            task.id == attachment.task_id
+                                && task.workspace_id == attachment.workspace_id
+                        })
+                    });
+                    anyhow::bail!(
+                        "error local-shared-capture-image-file task={:?} attachment={:?}: {}",
+                        task.map(|task| task.title.as_str())
+                            .unwrap_or("unknown task"),
+                        attachment
+                            .and_then(|attachment| attachment.filename.as_deref())
+                            .unwrap_or("unknown attachment"),
+                        error
+                    );
+                }
+            }
+        } else {
+            false
+        };
+        ensure!(
+            matches!(inventory.available, 0 | 1),
+            "error local-shared-capture-image-availability-invalid"
+        );
+        let unavailable = if blob_dir.is_some() {
+            missing_on_disk
+        } else {
+            inventory.available == 0
+        };
+        if unavailable {
+            result.push((inventory.sha256.clone(), "unavailable"));
+            continue;
+        }
+        result.push((
+            inventory.sha256.clone(),
+            if current_hashes.contains(inventory.sha256.as_str()) {
+                "current_selected"
+            } else {
+                "extra_selected"
+            },
+        ));
+    }
+    Ok(result)
+}
+
+fn random_cryptographic_id() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).context("error local-shared-capture-rng")?;
+    Ok(hex::encode(bytes))
+}
+
+pub(crate) async fn ensure_empty_target(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    adoption::ensure_unbound(conn).await?;
+    ensure_empty_domain(conn).await
+}
+
+pub(crate) async fn ensure_empty_domain(conn: &mut sqlx::SqliteConnection) -> Result<()> {
+    let occupied: i64 = sqlx::query_scalar(
+        "SELECT
+             (SELECT count(*) FROM workspaces WHERE id != '0000000000000000')
+           + (SELECT count(*) FROM projects)
+           + (SELECT count(*) FROM project_paths)
+           + (SELECT count(*) FROM project_id_aliases)
+           + (SELECT count(*) FROM labels)
+           + (SELECT count(*) FROM metadata_fields)
+           + (SELECT count(*) FROM metadata_field_id_aliases)
+           + (SELECT count(*) FROM tasks)
+           + (SELECT count(*) FROM task_metadata)
+           + (SELECT count(*) FROM task_labels)
+           + (SELECT count(*) FROM notes)
+           + (SELECT count(*) FROM task_dependencies)
+           + (SELECT count(*) FROM task_epic_links)
+           + (SELECT count(*) FROM task_related_links)
+           + (SELECT count(*) FROM task_attachments)
+           + (SELECT count(*) FROM blob_inventory)
+           + (SELECT count(*) FROM recurrence_series)
+           + (SELECT count(*) FROM recurrence_series_labels)
+           + (SELECT count(*) FROM recurrence_series_metadata)
+           + (SELECT count(*) FROM recurrence_occurrences)
+           + (SELECT count(*) FROM recurrence_pause_intervals)
+           + (SELECT count(*) FROM changes)
+           + (SELECT count(*) FROM field_versions)
+           + (SELECT count(*) FROM conflicts)
+           + (SELECT count(*) FROM shared_history_provenance)
+           + (SELECT count(*) FROM local_shared_capture_journal)
+           + (SELECT count(*) FROM local_e2ee_dependency_baseline)
+           + (SELECT count(*) FROM local_e2ee_dependency_edges)
+           + (SELECT count(*) FROM local_e2ee_epic_edges)",
+    )
+    .fetch_one(conn)
+    .await?;
+    ensure!(
+        occupied == 0,
+        "error shared-state-install target database is not empty"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "shared_state/tests.rs"]
+mod tests;

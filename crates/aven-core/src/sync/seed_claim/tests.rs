@@ -1,0 +1,721 @@
+use super::*;
+use crate::db::Database;
+
+fn fixture(name: &str) -> Vec<u8> {
+    let json: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/genesis.json")).unwrap();
+    hex::decode(json[name].as_str().unwrap()).unwrap()
+}
+
+fn array(name: &str) -> [u8; 32] {
+    fixture(name).try_into().unwrap()
+}
+
+fn context() -> LocalSharedStatePackageContext {
+    LocalSharedStatePackageContext {
+        vault_id: array("vault"),
+        generation_id: array("generation"),
+    }
+}
+
+fn key() -> LocalSharedStatePackageKey {
+    LocalSharedStatePackageKey::new(array("generation_secret"))
+}
+
+fn authority() -> SeedAuthority {
+    let mut bytes = Vec::new();
+    for name in ["signing_seed", "hpke_private", "token", "record"] {
+        bytes.extend(fixture(name));
+    }
+    SeedAuthority::from_protected_storage(&bytes, context(), &key()).unwrap()
+}
+
+fn operator_secret() -> Secret {
+    Secret::new([0x91; 32])
+}
+
+/// Issues the fixture genesis's setup ID to `db` for [`operator_secret`].
+async fn operator(db: &Database) -> Secret {
+    let secret = operator_secret();
+    db.issue_e2ee_server_setup(&secret, array("setup"), u64::MAX)
+        .await
+        .unwrap();
+    secret
+}
+
+struct FixedEntropy([u8; 32]);
+impl rand_core::TryRng for FixedEntropy {
+    type Error = rand_core::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        panic!("unexpected entropy request")
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        panic!("unexpected entropy request")
+    }
+    fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), Self::Error> {
+        assert_eq!(out.len(), 32);
+        out.copy_from_slice(&self.0);
+        Ok(())
+    }
+}
+impl rand_core::TryCryptoRng for FixedEntropy {}
+
+#[test]
+fn frozen_bytes_match_reviewed_crypto_fixture() {
+    let (recipient, _) = <Kem as hpke::Kem>::derive_keypair(&array("hpke_ikm"));
+    let seed = SeedAuthority::build(
+        context(),
+        &key(),
+        array("setup"),
+        array("claim"),
+        array("device"),
+        Secret::new(array("signing_seed")),
+        recipient,
+        Secret::new(array("token")),
+        &mut FixedEntropy(array("encapsulation_entropy")),
+    )
+    .unwrap();
+    assert_eq!(seed.genesis.record().as_slice(), fixture("record"));
+    assert_eq!(seed.genesis.claim_bytes(), fixture("request"));
+    assert_eq!(seed.genesis.commitment(), array("record_commitment"));
+    assert_eq!(seed.genesis.state(), fixture("state"));
+    assert_eq!(seed.genesis.core(&seed.genesis.state()), fixture("core"));
+    assert_eq!(seed.genesis.info(), fixture("hpke_info"));
+    assert_eq!(
+        &*self_plaintext(&seed.genesis, key().protected_storage_bytes()),
+        &fixture("self_plaintext")
+    );
+    assert_eq!(
+        seed.protected_storage_bytes(),
+        authority().protected_storage_bytes()
+    );
+}
+
+#[test]
+fn bounded_parser_rejects_every_truncation_and_mutation() {
+    let record = fixture("record");
+    for i in 0..record.len() {
+        assert!(Genesis::from_record(&record[..i]).is_err());
+        let mut bad = record.clone();
+        bad[i] ^= 1;
+        assert!(Genesis::from_record(&bad).is_err(), "byte {i}");
+    }
+    let mut extra = record.clone();
+    extra.push(0);
+    assert!(Genesis::from_record(&extra).is_err());
+    let request = fixture("request");
+    for i in 0..request.len() {
+        assert!(codec::claim_record(&request[..i]).is_err());
+    }
+    let mut huge = request;
+    huge[6..10].fill(255);
+    assert!(codec::claim_record(&huge).is_err());
+}
+
+// Recompute the state hash and sign the modified transcript with the real seed.
+// These are valid signatures over invalid semantics, not tamper-only negatives.
+fn resign(core: &[u8], state: &[u8], attachments: &[u8]) -> Vec<u8> {
+    let mut core = core.to_vec();
+    core[197..229].copy_from_slice(&hash(&cce("aven-e2ee/v1/membership/state", &[state])));
+    let signature = SigningKey::from_bytes(&array("signing_seed"))
+        .sign(&cce("aven-e2ee/v1/membership/sign", &[&core, attachments]));
+    let mut record = vec![1];
+    for part in [&core[..], state, attachments, &signature.to_bytes()] {
+        bytes(&mut record, part);
+    }
+    record
+}
+
+#[test]
+fn resigned_invalid_genesis_semantics_are_rejected() {
+    let state = fixture("state");
+    let core = fixture("core");
+    let attachments = fixture("attachments");
+    // Version/suite, bootstrap/pending/recovery flags, counts, credential version,
+    // admission mismatch, generation count and initial eligibility boundary.
+    for offset in [4, 6, 39, 40, 41, 42, 174, 175, 207, 279] {
+        let mut bad = state.clone();
+        bad[offset] ^= 1;
+        let record = resign(&core, &bad, &attachments);
+        assert!(Genesis::from_record(&record).is_err(), "state {offset}");
+    }
+    // Core version, vault, membership sequence, predecessor, signer kind/ID,
+    // action, action profile, and claim binding.
+    for offset in [0, 5, 44, 49, 81, 86, 118, 127, 161] {
+        let mut bad = core.clone();
+        bad[offset] ^= 1;
+        assert!(
+            Genesis::from_record(&resign(&bad, &state, &attachments)).is_err(),
+            "core {offset}"
+        );
+    }
+    // Recipient count/kind/purpose, wrong device and wrong recipient public key.
+    for offset in [6, 7, 8, 13, 49] {
+        let mut bad = attachments.clone();
+        bad[offset] ^= 1;
+        assert!(
+            Genesis::from_record(&resign(&core, &state, &bad)).is_err(),
+            "attachment {offset}"
+        );
+    }
+}
+
+#[test]
+fn protected_validation_checks_secrets_and_opaque_self_coverage() {
+    let seed = authority();
+    let saved = seed.protected_storage_bytes();
+    for offset in [0, 33, 64] {
+        let mut wrong = saved.clone();
+        wrong[offset] ^= 1;
+        assert!(SeedAuthority::from_protected_storage(&wrong, context(), &key()).is_err());
+    }
+    let mut wrong_context = context();
+    wrong_context.generation_id[0] ^= 1;
+    assert!(SeedAuthority::from_protected_storage(&saved, wrong_context, &key()).is_err());
+    assert!(
+        SeedAuthority::from_protected_storage(
+            &saved,
+            context(),
+            &LocalSharedStatePackageKey::new([99; 32])
+        )
+        .is_err()
+    );
+
+    let core = fixture("core");
+    let mut att = fixture("attachments");
+    att[121] ^= 1;
+    let bad = resign(&core, &fixture("state"), &att);
+    // A keyless server cannot establish HPKE plaintext validity.
+    assert!(Genesis::from_record(&bad).is_ok());
+    let mut saved = saved.clone();
+    saved[96..].copy_from_slice(&bad);
+    assert!(SeedAuthority::from_protected_storage(&saved, context(), &key()).is_err());
+
+    // A validly encrypted and signed self package with the wrong secret also fails.
+    let private = HpkePrivate::from_bytes(&fixture("hpke_private")).unwrap();
+    let public = <Kem as hpke::Kem>::sk_to_pk(&private);
+    let wrong_plaintext = self_plaintext(seed.genesis(), &[99; 32]);
+    let (enc, ct) = hpke::single_shot_seal_with_rng::<Aead, Kdf, Kem>(
+        &OpModeS::Base,
+        &public,
+        &seed.genesis.info(),
+        &wrong_plaintext,
+        &core,
+        &mut FixedEntropy([7; 32]),
+    )
+    .unwrap();
+    att[85..117].copy_from_slice(&enc.to_bytes());
+    att[121..].copy_from_slice(&ct);
+    let bad = resign(&core, &fixture("state"), &att);
+    assert!(Genesis::from_record(&bad).is_ok());
+    saved[96..].copy_from_slice(&bad);
+    assert!(SeedAuthority::from_protected_storage(&saved, context(), &key()).is_err());
+}
+
+#[test]
+fn weak_signatures_and_invalid_dh_fail_in_libraries() {
+    let mut record = fixture("record");
+    record[870..].fill(255);
+    assert!(Genesis::from_record(&record).is_err());
+    let mut state = fixture("state");
+    state[75..107].fill(0);
+    state[75] = 1;
+    assert!(
+        Genesis::from_record(&resign(&fixture("core"), &state, &fixture("attachments"))).is_err()
+    );
+    for pk in [[0; 32], {
+        let mut x = [0; 32];
+        x[0] = 1;
+        x
+    }] {
+        let public = <Kem as hpke::Kem>::PublicKey::from_bytes(&pk).unwrap();
+        assert!(
+            hpke::single_shot_seal_with_rng::<Aead, Kdf, Kem>(
+                &OpModeS::Base,
+                &public,
+                b"info",
+                b"plaintext",
+                b"aad",
+                &mut FixedEntropy([3; 32])
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_authorization_resume_restart_and_divergent_bindings() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("server.sqlite");
+    let db = Database::open(&path).await.unwrap();
+    let seed = authority();
+    let request = seed.genesis.claim_bytes();
+    let secret = operator(&db).await;
+    for authentication in [
+        ClaimAuthentication::SeedBearer(seed.bearer()),
+        ClaimAuthentication::SetupSecret(&Secret::new([0; 32])),
+    ] {
+        assert!(db.admit_seed_claim(&request, authentication).await.is_err());
+    }
+    // A verifier issued for another setup ID refuses the same secret.
+    let other = Database::open(&root.path().join("other.sqlite"))
+        .await
+        .unwrap();
+    other
+        .issue_e2ee_server_setup(&secret, [3; 32], u64::MAX)
+        .await
+        .unwrap();
+    assert!(
+        other
+            .admit_seed_claim(&request, ClaimAuthentication::SetupSecret(&secret))
+            .await
+            .is_err()
+    );
+    let result = db
+        .admit_seed_claim(&request, ClaimAuthentication::SetupSecret(&secret))
+        .await
+        .unwrap();
+    result.validate_pinned(seed.genesis()).unwrap();
+    drop(db);
+    // The prior response could have been lost. Reopen and resume.
+    let db = Database::open(&path).await.unwrap();
+    assert_eq!(
+        result,
+        db.admit_seed_claim(&request, ClaimAuthentication::SeedBearer(seed.bearer()))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        result,
+        db.admit_seed_claim(&request, ClaimAuthentication::SetupSecret(&secret))
+            .await
+            .unwrap()
+    );
+    assert!(
+        db.admit_seed_claim(
+            &request,
+            ClaimAuthentication::SetupSecret(&Secret::new([0; 32]))
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        db.admit_seed_claim(
+            &request,
+            ClaimAuthentication::SeedBearer(&Secret::new([0; 32]))
+        )
+        .await
+        .is_err()
+    );
+
+    let (core, state, att, _) = codec::components(seed.genesis.record()).unwrap();
+    for field in ["claim", "verifier", "ciphertext", "setup"] {
+        let mut c = core.to_vec();
+        let mut s = state.to_vec();
+        let mut a = att.to_vec();
+        match field {
+            "claim" => {
+                c[161] ^= 1;
+                s[175] ^= 1;
+            }
+            "verifier" => s[139] ^= 1,
+            "ciphertext" => a[121] ^= 1,
+            "setup" => c[129] ^= 1,
+            _ => unreachable!(),
+        }
+        let divergent = Genesis::from_record(&resign(&c, &s, &a)).unwrap();
+        let error = db
+            .admit_seed_claim(
+                &divergent.claim_bytes(),
+                ClaimAuthentication::SetupSecret(&secret),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("conflict"), "{field}: {error}");
+    }
+    let other = SeedAuthority::generate(context(), &key(), array("setup")).unwrap();
+    assert!(
+        db.admit_seed_claim(
+            &other.genesis.claim_bytes(),
+            ClaimAuthentication::SeedBearer(other.bearer())
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        result,
+        db.admit_seed_claim(&request, ClaimAuthentication::SeedBearer(seed.bearer()))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn two_connections_compete_and_failed_insert_rolls_back() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("server.sqlite");
+    let db = Database::open(&path).await.unwrap();
+    let seed = authority();
+    let secret = operator(&db).await;
+    let request = seed.genesis.claim_bytes();
+    {
+        let mut conn = db.acquire_writer().await.unwrap();
+        sqlx::query("CREATE TRIGGER fail_claim AFTER INSERT ON server_seed_claim BEGIN SELECT RAISE(ABORT, 'injected claim failure'); END")
+            .execute(&mut *conn).await.unwrap();
+    }
+    assert!(
+        db.admit_seed_claim(&request, ClaimAuthentication::SetupSecret(&secret))
+            .await
+            .is_err()
+    );
+    {
+        let mut conn = db.acquire_writer().await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM server_seed_claim")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("DROP TRIGGER fail_claim")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let second = Database::open(&path).await.unwrap();
+    let competitor = SeedAuthority::generate(context(), &key(), array("setup")).unwrap();
+    let competing_request = competitor.genesis.claim_bytes();
+    let (a, b) = tokio::join!(
+        db.admit_seed_claim(&request, ClaimAuthentication::SetupSecret(&secret)),
+        second.admit_seed_claim(
+            &competing_request,
+            ClaimAuthentication::SetupSecret(&secret)
+        ),
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    let (winner, result) = if let Ok(result) = a {
+        (&seed, result)
+    } else {
+        (&competitor, b.unwrap())
+    };
+    drop(db);
+    drop(second);
+    let reopened = Database::open(&path).await.unwrap();
+    assert_eq!(
+        result,
+        reopened
+            .admit_seed_claim(
+                &winner.genesis.claim_bytes(),
+                ClaimAuthentication::SeedBearer(winner.bearer())
+            )
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn server_storage_exports_and_diagnostics_exclude_secrets() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    let seed = authority();
+    let setup = operator(&db).await;
+    let result = db
+        .admit_seed_claim(
+            &seed.genesis.claim_bytes(),
+            ClaimAuthentication::SetupSecret(&setup),
+        )
+        .await
+        .unwrap();
+    let exported =
+        serde_json::to_vec(&db.export_data("2026-09-22T00:00:00Z".into()).await.unwrap()).unwrap();
+    let debug = format!(
+        "{seed:?} {result:?} {:?}",
+        ClaimAuthentication::SetupSecret(&setup)
+    );
+    let mut conn = db.acquire_reader().await.unwrap();
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT genesis FROM server_seed_claim")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(stored, seed.genesis.record());
+    let mut surfaces = vec![exported, stored, debug.into_bytes()];
+    for path in [
+        db.path().to_path_buf(),
+        std::path::PathBuf::from(format!("{}-wal", db.path().display())),
+    ] {
+        if let Ok(bytes) = std::fs::read(path) {
+            surfaces.push(bytes);
+        }
+    }
+    for secret in [
+        fixture("signing_seed"),
+        fixture("hpke_private"),
+        fixture("token"),
+        fixture("generation_secret"),
+        setup.expose().to_vec(),
+    ] {
+        for bytes in &surfaces {
+            assert!(!bytes.windows(32).any(|window| window == secret));
+            assert!(
+                !bytes
+                    .windows(64)
+                    .any(|window| window == hex::encode(&secret).as_bytes())
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn committed_claim_resumes_after_process_exit_without_response() {
+    let root = tempfile::tempdir().unwrap();
+    crate::test_support::worker::run("sync::seed_claim::tests::claim_exit_worker", &root.path());
+    let db = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    let seed = authority();
+    let result = db
+        .admit_seed_claim(
+            &seed.genesis.claim_bytes(),
+            ClaimAuthentication::SeedBearer(seed.bearer()),
+        )
+        .await
+        .unwrap();
+    result.validate_pinned(seed.genesis()).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "subprocess worker exits without destructors; invoked with an isolated test root"]
+async fn claim_exit_worker() {
+    let Some(root) = crate::test_support::worker::args::<std::path::PathBuf>() else {
+        return;
+    };
+    let db = Database::open(&root.join("server.sqlite")).await.unwrap();
+    let secret = operator(&db).await;
+    db.admit_seed_claim(
+        &authority().genesis.claim_bytes(),
+        ClaimAuthentication::SetupSecret(&secret),
+    )
+    .await
+    .unwrap();
+    crate::test_support::worker::exit();
+}
+
+#[tokio::test]
+async fn issued_server_setup_expires_and_refuses_used_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    assert!(!db.is_e2ee_server_storage().await.unwrap());
+    let seed = authority();
+    let request = seed.genesis.claim_bytes();
+    let secret = operator_secret();
+    let stale = Secret::new([0x92; 32]);
+    let id = db
+        .issue_e2ee_server_setup(&stale, array("setup"), 100)
+        .await
+        .unwrap();
+    assert_eq!(id, array("setup"));
+    assert!(db.is_e2ee_server_storage().await.unwrap());
+    assert!(db.e2ee_server_setup(100).await.unwrap().is_none());
+    // Reissue after expiry keeps the ID and refuses the replaced secret.
+    let id = db
+        .issue_e2ee_server_setup(&secret, [3; 32], 200)
+        .await
+        .unwrap();
+    assert_eq!(id, array("setup"));
+    assert!(db.e2ee_server_setup(199).await.unwrap().is_some());
+    assert!(
+        db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&stale), 199)
+            .await
+            .is_err()
+    );
+    db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&secret), 199)
+        .await
+        .unwrap();
+    let error = db
+        .issue_e2ee_server_setup(&secret, [3; 32], 300)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "error e2ee-server-already-claimed");
+
+    let used = Database::open(&root.path().join("used.sqlite"))
+        .await
+        .unwrap();
+    let workspace = used.list_workspaces().await.unwrap().remove(0);
+    used.create_label(&workspace, "history").await.unwrap();
+    let error = used
+        .issue_e2ee_server_setup(&secret, [3; 32], 300)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "error e2ee-server-storage-not-empty");
+}
+
+#[tokio::test]
+async fn server_setup_refuses_historyless_domain_data_without_modifying_it() {
+    for kind in ["task", "label", "workspace", "renamed-default"] {
+        let root = tempfile::tempdir().unwrap();
+        let source = Database::open(&root.path().join("source.sqlite"))
+            .await
+            .unwrap();
+        let workspace = source.list_workspaces().await.unwrap().remove(0);
+        match kind {
+            "task" => {
+                source
+                    .create_task(
+                        &workspace,
+                        crate::operations::TaskDraft {
+                            title: "private historyless task".into(),
+                            description: "private description".into(),
+                            project: Some("app".into()),
+                            status: "todo".into(),
+                            priority: "none".into(),
+                            source: crate::choices::TaskSource::Cli,
+                            labels: vec![],
+                            metadata: vec![],
+                            available_at: None,
+                            due_on: None,
+                            is_epic: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            "label" => {
+                source
+                    .create_label(&workspace, "private label")
+                    .await
+                    .unwrap();
+            }
+            "workspace" => {
+                source.create_workspace("private workspace").await.unwrap();
+            }
+            _ => {
+                source
+                    .rename_workspace("default", "private workspace")
+                    .await
+                    .unwrap();
+            }
+        }
+        let mut export = source
+            .export_data("2026-10-02T00:00:00Z".into())
+            .await
+            .unwrap();
+        export.tables.changes.clear();
+        export.tables.field_versions.clear();
+        let target = Database::open(&root.path().join("target.sqlite"))
+            .await
+            .unwrap();
+        target.validate_import_data(&export).await.unwrap();
+        target.import_data(&export).await.unwrap();
+        let before =
+            serde_json::to_value(target.export_data("fixed".into()).await.unwrap()).unwrap();
+        let error = target
+            .issue_e2ee_server_setup(&operator_secret(), array("setup"), 300)
+            .await
+            .unwrap_err();
+        assert!(error.is::<StorageNotEmpty>(), "{kind}: {error:#}");
+        assert!(!target.is_e2ee_server_storage().await.unwrap());
+        let after =
+            serde_json::to_value(target.export_data("fixed".into()).await.unwrap()).unwrap();
+        assert_eq!(before, after, "{kind}");
+    }
+}
+
+#[tokio::test]
+async fn marked_server_storage_refuses_local_domain_contamination() {
+    let root = tempfile::tempdir().unwrap();
+    let db = Database::open(&root.path().join("server.sqlite"))
+        .await
+        .unwrap();
+    operator(&db).await;
+    assert!(db.is_e2ee_server_storage().await.unwrap());
+    let workspace = db.list_workspaces().await.unwrap().remove(0);
+    db.create_label(&workspace, "private label").await.unwrap();
+    let error = db.is_e2ee_server_storage().await.unwrap_err();
+    assert!(error.is::<StorageNotEmpty>());
+}
+
+#[tokio::test]
+async fn persisted_setup_is_read_in_the_claim_transaction() {
+    let root = tempfile::tempdir().unwrap();
+    let seed = authority();
+    let request = seed.genesis.claim_bytes();
+    let old = operator_secret();
+    let new = Secret::new([0x93; 32]);
+
+    // Reissue first: the claim sees only the replacement verifier.
+    let db = Database::open(&root.path().join("reissued.sqlite"))
+        .await
+        .unwrap();
+    db.issue_e2ee_server_setup(&old, array("setup"), 200)
+        .await
+        .unwrap();
+    db.issue_e2ee_server_setup(&new, [3; 32], 200)
+        .await
+        .unwrap();
+    let error = db
+        .admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&old), 100)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "error seed-claim-unauthorized");
+    assert!(
+        db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&new), 200)
+            .await
+            .is_err()
+    );
+    db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&new), 100)
+        .await
+        .unwrap()
+        .validate_pinned(seed.genesis())
+        .unwrap();
+
+    // Claim first: the claimed storage refuses a later reissue.
+    let db = Database::open(&root.path().join("claimed.sqlite"))
+        .await
+        .unwrap();
+    db.issue_e2ee_server_setup(&old, array("setup"), 200)
+        .await
+        .unwrap();
+    db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&old), 100)
+        .await
+        .unwrap();
+    let error = db
+        .issue_e2ee_server_setup(&new, [3; 32], 300)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "error e2ee-server-already-claimed");
+}
+
+#[tokio::test]
+async fn expired_setup_is_named_only_for_its_own_secret() {
+    let root = tempfile::tempdir().unwrap();
+    let seed = authority();
+    let request = seed.genesis.claim_bytes();
+    let secret = operator_secret();
+    let guess = Secret::new([0x93; 32]);
+    let db = Database::open(&root.path().join("expired.sqlite"))
+        .await
+        .unwrap();
+    db.issue_e2ee_server_setup(&secret, array("setup"), 200)
+        .await
+        .unwrap();
+
+    let refusal = |error: anyhow::Error| *error.downcast_ref::<ClaimRefusal>().unwrap();
+    let expired = db
+        .admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&secret), 200)
+        .await
+        .unwrap_err();
+    assert_eq!(refusal(expired), ClaimRefusal::Expired);
+    let wrong = db
+        .admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&guess), 200)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refusal(wrong),
+        ClaimRefusal::Unauthorized { claimed: false }
+    );
+    db.admit_seed_claim_at(&request, ClaimAuthentication::SetupSecret(&secret), 100)
+        .await
+        .unwrap();
+}

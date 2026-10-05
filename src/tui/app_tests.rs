@@ -2,7 +2,7 @@ use super::*;
 use crate::choices::{TaskPriority, TaskSource, TaskStatus};
 use crate::operations::TaskDraft;
 use crate::query::RecurrenceSeriesLifecycleFilter;
-use crate::tui::app_conflicts::CONFLICT_CONFIRM_LOCAL_TITLE;
+use crate::tui::app_conflicts::{CONFLICT_CONFIRM_LOCAL_TITLE, CONFLICT_CONFIRM_REMOTE_TITLE};
 use crate::tui::app_edit::{
     EDIT_AVAILABILITY_TITLE, EDIT_DESCRIPTION_TITLE, EDIT_DUE_TITLE, EDIT_LABELS_TITLE,
     EDIT_PROJECT_TITLE, EDIT_TITLE_TITLE,
@@ -20,7 +20,7 @@ use crate::tui::overlay::{
     AddTaskMode, CommandState, ConfirmIntent, ConfirmState, LineEdit, MultilineInputMode,
     MultilineInputState, MultilineIntent, OverlayState, OverlayTarget, OverlayView,
     OverlayViewContext, PickerIntent, PickerItem, PickerMode, PickerState, SearchIntent,
-    SearchState, SyncStatusState, TagComboboxIntent, TextInputState, TextIntent, TextPanelState,
+    SearchState, SyncDialogState, TagComboboxIntent, TextInputState, TextIntent, TextPanelState,
 };
 use crate::tui::store::{
     SidebarEntryTarget, TaskLayout, TaskOrder, TaskQuery, TaskScope, TaskScopeTarget, TaskViewState,
@@ -49,11 +49,7 @@ fn detail_scroll(app: &App) -> u16 {
 
 async fn test_app() -> App {
     let dir = tempfile::tempdir().unwrap();
-    let pool = crate::test_support::open_db(&dir.path().join("test.db"))
-        .await
-        .unwrap();
-    reset_default_workspace(&pool).await;
-    let database = aven_core::db::Database::open(&dir.path().join("test.db"))
+    let (database, _) = crate::test_support::open_database(&dir.path().join("test.db"))
         .await
         .unwrap();
     let mut app = App::new_for_tests(database).await.unwrap();
@@ -241,11 +237,7 @@ async fn create_blocked_pair(app: &mut App) -> (crate::ids::TaskId, crate::ids::
 
 async fn test_app_with_pool() -> (tempfile::TempDir, SqlitePool, App) {
     let dir = tempfile::tempdir().unwrap();
-    let pool = crate::test_support::open_db(&dir.path().join("test.db"))
-        .await
-        .unwrap();
-    reset_default_workspace(&pool).await;
-    let database = aven_core::db::Database::open(&dir.path().join("test.db"))
+    let (database, pool) = crate::test_support::open_database(&dir.path().join("test.db"))
         .await
         .unwrap();
     let app = App::new_for_tests(database).await.unwrap();
@@ -447,8 +439,8 @@ fn picker_row_click(app: &App, visible_row: u16, size: ratatui::layout::Size) ->
         overlay,
         OverlayViewContext {
             sync_status: &app.store.sync_status,
-            syncing: app.sync.work_pending(),
-            now: time::OffsetDateTime::UNIX_EPOCH,
+            sync_activity: &app.sync_ops.activity,
+            syncing: app.sync.started_at(),
             status_prefix_active: false,
             priority_prefix_active: false,
         },
@@ -504,6 +496,20 @@ fn render_app_text(app: &mut App, width: u16, height: u16) -> String {
 
 #[path = "app_tests/navigation.rs"]
 mod navigation;
+
+#[tokio::test]
+async fn freshly_migrated_database_reaches_empty_workspace_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh.db");
+    assert!(!path.exists());
+    let database = aven_core::db::Database::open(&path).await.unwrap();
+    assert!(database.meta("client_id").await.unwrap().is_some());
+    let mut app = App::new_for_tests(database).await.unwrap();
+
+    let rendered = render_app_text(&mut app, 120, 30);
+
+    assert!(rendered.contains("No tasks in this workspace"));
+}
 
 async fn type_chars(app: &mut App, input: &str) {
     for ch in input.chars() {

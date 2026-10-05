@@ -36,6 +36,7 @@ pub(super) const HELP_SECTIONS: &[HelpSection] = &[
             "context",
             "show",
             "edit",
+            "move",
             "note",
             "note-delete",
             "dep",
@@ -83,11 +84,15 @@ pub(super) struct HelpSection {
     pub(super) commands: &'static [&'static str],
 }
 
-pub(crate) fn parse() -> Cli {
+pub(crate) fn parse_from<I, T>(args: I) -> Cli
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
     let mut command = Cli::command();
     let help = render_top_level_help(&command);
     command = command.override_help(help);
-    let matches = command.get_matches();
+    let matches = command.get_matches_from(args);
     Cli::from_arg_matches(&matches).expect("clap validates matches")
 }
 

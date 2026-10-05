@@ -21,6 +21,10 @@ impl App {
             ));
             return Ok(());
         }
+        if action.creates_local_data() && self.local_edits_paused_by_join() {
+            self.set_info("joining sync: local changes wait until synced tasks are downloaded");
+            return Ok(());
+        }
         if self.handle_recurring_series_task_action(&action).await? {
             return Ok(());
         }
@@ -185,13 +189,13 @@ impl App {
                     .await?
             }
             Action::BeginManualConflictMerge => self.begin_manual_conflict_merge().await?,
-            Action::ShowConfigStatus => self.show_config_status()?,
+            Action::ShowSync => self.show_sync_dialog(),
             Action::ShowConfigInfo => self.show_config_info()?,
             Action::ShowConfigPaths => self.show_config_paths()?,
             Action::ShowDatabaseStats => self.show_database_stats().await?,
             Action::BeginUpdate => self.begin_update(),
             Action::ShowChangelog => self.show_changelog(),
-            Action::PairMobile => self.show_pairing_invitation(),
+            Action::AddDevice => self.show_pairing_invitation(),
             Action::BeginConfigInit => self.begin_config_init()?,
             Action::BeginAddDependency => self.begin_add_dependency().await?,
             Action::BeginRemoveDependency => self.begin_remove_dependency(),

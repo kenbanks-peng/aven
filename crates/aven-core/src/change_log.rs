@@ -7,6 +7,7 @@ use crate::workspaces::Workspace;
 
 pub mod op_type {
     pub const CREATE_TASK: &str = "create_task";
+    pub const MOVE_TASKS: &str = "move_tasks";
     pub const SET_FIELD: &str = "set_field";
     pub const RESOLVE_FIELD: &str = "resolve_field";
     pub const LABEL_ADD: &str = "label_add";
@@ -45,10 +46,12 @@ pub mod op_type {
     pub const OPEN_RECURRENCE_PAUSE: &str = "open_recurrence_pause";
     pub const CLOSE_RECURRENCE_PAUSE: &str = "close_recurrence_pause";
     pub const STOP_RECURRENCE_SERIES: &str = "stop_recurrence_series";
+    pub const PUBLISH_DEVICE_LABEL: &str = "publish_device_label";
 }
 
 pub enum ChangeEntity {
     Task,
+    TaskMove,
     Project,
     Label,
     MetadataField,
@@ -61,6 +64,7 @@ impl ChangeEntity {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Task => "task",
+            Self::TaskMove => "task_move",
             Self::Project => "project",
             Self::Label => "label",
             Self::MetadataField => "metadata_field",

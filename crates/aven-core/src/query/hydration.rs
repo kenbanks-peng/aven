@@ -131,6 +131,10 @@ pub async fn build_task_list_items(
             rollup
         });
         let recurrence = enrichment.recurrence_by_task.remove(&task_id);
+        let conflicts = enrichment
+            .conflicts_by_task
+            .remove(&task_id)
+            .unwrap_or_default();
         let queue = queue_meta_on(
             &task,
             has_conflict,
@@ -150,6 +154,7 @@ pub async fn build_task_list_items(
             live_attachment_count,
             metadata,
             activity,
+            conflicts,
             has_conflict,
             unresolved_blocker_count,
             dependent_count,

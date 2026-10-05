@@ -5,25 +5,32 @@ use aven_core::{
 };
 mod attachments;
 mod cli;
+mod clipboard;
 mod command_metadata;
 mod commands;
 mod config;
 mod config_edit;
 mod daemon;
 mod due;
+pub mod encrypted_tail_http;
+mod http_admission;
 mod input;
 mod logging;
 mod notification;
 mod operations;
 mod pairing;
+pub mod peer_enrollment_http;
 mod projects;
+pub mod protected_local_keys;
 mod recurrence_input;
 mod render;
 mod routing;
 mod schedule_input;
+pub mod seed_bootstrap_http;
 mod signals;
 mod status;
 mod sync;
+pub mod sync_http;
 mod task_intake;
 mod task_render;
 mod time_input;
@@ -37,22 +44,57 @@ mod test_support;
 pub use cli::Cli;
 
 use cli::{
-    BackupSubcommand, Commands, DaemonSubcommand, InternalSubcommand, SkillSubcommand,
-    SyncSubcommand,
+    BackupSubcommand, Commands, DaemonSubcommand, DeviceSubcommand, InternalSubcommand,
+    SkillSubcommand, SyncSubcommand,
 };
 use commands::{
     cmd_add, cmd_attachment, cmd_backup, cmd_bulk_update, cmd_config, cmd_conflict, cmd_context,
     cmd_daemon_status, cmd_delete_restore, cmd_demo, cmd_dep, cmd_doctor, cmd_edit, cmd_epic,
     cmd_export, cmd_import, cmd_internal_demo_snapshot, cmd_internal_natural_add, cmd_label,
-    cmd_list, cmd_metadata, cmd_note, cmd_note_delete, cmd_prime, cmd_project, cmd_recur,
-    cmd_related, cmd_search, cmd_self_update, cmd_show, cmd_skill, cmd_skill_install,
-    cmd_sync_pair, cmd_sync_status, cmd_text, cmd_workspace,
+    cmd_list, cmd_metadata, cmd_move, cmd_note, cmd_note_delete, cmd_prime, cmd_project, cmd_recur,
+    cmd_related, cmd_search, cmd_self_update, cmd_show, cmd_skill, cmd_skill_install, cmd_text,
+    cmd_workspace,
 };
-use sync::{run_server, sync_client};
+use sync::run_server;
 use workspaces::resolve_active_workspace_with_routing;
 
 pub async fn run_cli() -> Result<()> {
-    let cli = cli::parse();
+    run_cli_from(std::env::args_os()).await
+}
+
+pub fn report_cli_error(error: &anyhow::Error) {
+    logging::record_command_error(error);
+    for line in cli_error_lines(error) {
+        eprintln!("{line}");
+    }
+}
+
+fn cli_error_lines(error: &anyhow::Error) -> Vec<String> {
+    match sync::error_explanations::explain(
+        sync::error_explanations::ErrorAction::General,
+        sync::error_explanations::ErrorSurface::Cli,
+        error,
+    ) {
+        Some(explanation) => {
+            let mut lines = vec![format!(
+                "Error: {} [{}]",
+                explanation.message, explanation.code
+            )];
+            if !explanation.next_step.is_empty() {
+                lines.push(format!("Next: {}", explanation.next_step));
+            }
+            lines
+        }
+        None => vec![format!("Error: {error}")],
+    }
+}
+
+async fn run_cli_from<I, T>(args: I) -> Result<()>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = cli::parse_from(args);
     let command = cli
         .command
         .unwrap_or_else(|| Commands::Tui(cli::TuiArgs::default()));
@@ -85,7 +127,6 @@ enum StandaloneCommand {
     Internal(cli::InternalCommand),
     Server(cli::ServerArgs),
     Skill(cli::SkillCommand),
-    SyncPair(cli::PairArgs),
     Update(cli::SelfUpdateArgs),
 }
 
@@ -100,6 +141,7 @@ enum DatabaseCommand {
     Dep(cli::DepCommand),
     Related(cli::RelatedCommand),
     Edit(cli::TaskEditArgs),
+    Move(cli::MoveArgs),
     Epic(cli::EpicCommand),
     Export(cli::ExportArgs),
     Import(cli::ImportArgs),
@@ -140,6 +182,7 @@ impl From<Commands> for CliDispatch {
             Commands::BulkUpdate(args) => Self::database(DatabaseCommand::BulkUpdate(args)),
             Commands::Prime(args) => Self::database(DatabaseCommand::Prime(args)),
             Commands::Edit(args) => Self::database(DatabaseCommand::Edit(args)),
+            Commands::Move(args) => Self::database(DatabaseCommand::Move(args)),
             Commands::Update(args) => Self::Standalone(StandaloneCommand::Update(args)),
             Commands::Note(args) => Self::database(DatabaseCommand::Note(args)),
             Commands::NoteDelete(args) => Self::database(DatabaseCommand::NoteDelete(args)),
@@ -168,18 +211,7 @@ impl From<Commands> for CliDispatch {
             Commands::Daemon(args) => Self::Standalone(StandaloneCommand::Daemon(args)),
             Commands::Demo => Self::Standalone(StandaloneCommand::Demo),
             Commands::Server(args) => Self::Standalone(StandaloneCommand::Server(args)),
-            Commands::Sync(mut args) => match args.command.take() {
-                Some(SyncSubcommand::Pair(pair)) => {
-                    Self::Standalone(StandaloneCommand::SyncPair(cli::PairArgs {
-                        server: pair.server.or(args.server),
-                        copy: pair.copy,
-                    }))
-                }
-                command => {
-                    args.command = command;
-                    Self::database(DatabaseCommand::Sync(args))
-                }
-            },
+            Commands::Sync(args) => Self::database(DatabaseCommand::Sync(args)),
             Commands::Tui(args) => Self::Tui(args),
             Commands::Internal(args) => Self::Standalone(StandaloneCommand::Internal(args)),
         }
@@ -205,10 +237,6 @@ async fn dispatch_standalone(
             None => cmd_skill(),
             Some(SkillSubcommand::Install(args)) => cmd_skill_install(args),
         },
-        StandaloneCommand::SyncPair(args) => {
-            let config = config::AppConfig::load()?;
-            cmd_sync_pair(&config, args)
-        }
         StandaloneCommand::Config(args) => cmd_config(args).await,
         StandaloneCommand::Demo => cmd_demo(db, workspace).await,
         StandaloneCommand::Doctor(args) => cmd_doctor(db, workspace.as_deref(), args).await,
@@ -236,6 +264,7 @@ async fn dispatch_standalone(
                         config,
                         program: args.program,
                     })
+                    .map(|service| service.print())
                 }
                 Some(DaemonSubcommand::Uninstall) => daemon::uninstall(),
                 Some(DaemonSubcommand::Restart) => daemon::restart(),
@@ -299,12 +328,14 @@ async fn dispatch_database(
         DatabaseCommand::Context(args) => {
             let workspace =
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
-            cmd_context(&database, &workspace, args).await
+            let blob_dir = config::resolve_blob_dir(&db_path, &config)?;
+            cmd_context(&database, &workspace, &blob_dir, args).await
         }
         DatabaseCommand::Show(args) => {
             let workspace =
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
-            cmd_show(&database, &workspace, args).await
+            let blob_dir = config::resolve_blob_dir(&db_path, &config)?;
+            cmd_show(&database, &workspace, &blob_dir, args).await
         }
         DatabaseCommand::List(args) => {
             let workspace =
@@ -362,6 +393,11 @@ async fn dispatch_database(
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
             cmd_edit(&database, &workspace, args).await
         }
+        DatabaseCommand::Move(args) => {
+            let workspace =
+                resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
+            cmd_move(&database, &workspace, args).await
+        }
         DatabaseCommand::Note(args) => {
             let workspace =
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
@@ -409,12 +445,32 @@ async fn dispatch_database(
                 resolve_command_workspace(&database, workspace.as_deref(), &routing).await?;
             cmd_conflict(&database, &workspace, args).await
         }
-        DatabaseCommand::Sync(args) => match &args.command {
-            Some(SyncSubcommand::Pair(_)) => unreachable!("pairing command is standalone"),
-            Some(SyncSubcommand::Status(status)) => {
-                cmd_sync_status(&database, &config, status.json).await
+        DatabaseCommand::Sync(args) => match args.command {
+            Some(SyncSubcommand::Setup(setup)) => {
+                sync::encrypted::setup(&database, &config, setup).await
             }
-            None => sync_client(&database, args, &config).await,
+            Some(SyncSubcommand::Invite(args)) if args.cancel => {
+                sync::encrypted::cancel(&database, &config).await
+            }
+            Some(SyncSubcommand::Invite(_)) => sync::encrypted::invite(&database, &config).await,
+            Some(SyncSubcommand::Join(join)) => {
+                sync::encrypted::join(&database, &config, join).await
+            }
+            Some(SyncSubcommand::Device(device)) => match device.command {
+                DeviceSubcommand::List { json } => {
+                    sync::encrypted::list_devices(&database, &config, json).await
+                }
+                DeviceSubcommand::Remove { device_id, json } => {
+                    sync::encrypted::remove_device(&database, &config, &device_id, json).await
+                }
+            },
+            Some(SyncSubcommand::Status(status)) => {
+                sync::encrypted::status(&database, &config, status.json).await
+            }
+            Some(SyncSubcommand::Reset(reset)) => {
+                sync::encrypted::reset(&database, &config, reset).await
+            }
+            None => sync::encrypted::sync(&database, &config, args.json).await,
         },
         DatabaseCommand::Workspace(args) => cmd_workspace(&database, args).await,
         DatabaseCommand::Text(args) => {
@@ -431,8 +487,26 @@ async fn dispatch_database(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
+
     use crate::ids::{BASE32, encode_crockford};
     use crate::projects::normalize_key;
+
+    #[test]
+    fn cli_sync_errors_show_plain_copy_and_stable_code_without_the_chain() {
+        let error = anyhow!("error enrollment-network outcome-unknown")
+            .context("error bootstrap-origin")
+            .context("error sync-server-refused hint=\"raw internal hint\"");
+
+        let lines = super::cli_error_lines(&error);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("Couldn't reach the sync server"));
+        assert!(lines[0].contains("[enrollment-network]"));
+        assert!(lines[1].starts_with("Next: "));
+        assert!(!lines.join("\n").contains("bootstrap-origin"));
+        assert!(!lines.join("\n").contains("raw internal hint"));
+    }
 
     #[test]
     fn normalizes_project_keys() {

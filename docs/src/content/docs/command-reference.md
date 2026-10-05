@@ -549,6 +549,33 @@ aven edit APP-7KQ9 --remove-metadata review-state
 aven edit APP-7KQ0 --epic on
 ```
 
+### `aven move`
+
+Move tasks to an existing project in another workspace.
+
+```sh
+aven move <task-ref>... --to-workspace <workspace> --project <project>
+```
+
+The active workspace is the source. Task IDs and ref suffixes stay the same;
+the project prefix changes. Notes, labels, custom metadata, attachments and
+internal relationships move with the tasks. Labels and metadata fields match by
+name or key in the destination. Moving an epic includes its complete subtree,
+including deleted children.
+
+A move is atomic and cannot be undone through TUI undo. It refuses recurring
+tasks, unresolved conflicts and live dependencies, related links or epic links
+crossing the move boundary. A group may contain at most 256 tasks; its snapshot
+must fit the 64 KiB operation payload limit. If validation fails, nothing moves.
+
+```sh
+aven --workspace personal move APP-7KQ9 APP-7KQ0 \
+  --to-workspace work --project app
+```
+
+The summary reports the moved count and source and destination workspace keys.
+Devices sharing the vault must support workspace moves.
+
 ### `aven note`
 
 Append a durable note to a task.
@@ -837,46 +864,140 @@ See [Task metadata](/task-metadata/) for key rules, value semantics, filtering, 
 
 ### `aven sync`
 
-Push local changes and pull remote changes until both backlogs are drained.
+Exchange changes with the end-to-end encrypted sync server chosen during setup
+or join.
 
 ```sh
-aven sync [--server <url>]
+aven sync [--json]
 ```
 
-The server URL resolves from `--server`, then `AVEN_SYNC_SERVER`, then `sync.server_url`. When configured, `sync.auth_token` is sent as bearer authentication. Aven pins the normalized server URL in database metadata and rejects accidental reuse of one database with a different server.
+Sync runs bounded rounds until tasks are up to date and image transfers settle,
+or until a round limit stops it. Output reports sent and received changes,
+open and newly created conflicts, and image state; `--json` emits the versioned
+counts and result. A database that has not been set up
+or joined fails with `sync-not-set-up` and stays usable locally.
 
-Output reports pushed and pulled task changes, uploaded and downloaded image counts and sizes, remaining work, the resulting server cursor, and completion state. Large attachment backlogs transfer in bounded rounds, and `complete=false` means sync still has work to do.
+#### `aven sync setup`
+
+Start sync from this database with the invitation printed by `aven server setup`.
 
 ```sh
-aven sync
-aven sync --server http://127.0.0.1:3000
+aven sync setup [--yes]
 ```
 
-#### `aven sync pair`
+On macOS, interactive setup automatically uses a valid `aven-setup:` invitation
+from the clipboard. Otherwise, paste the invitation or pipe it to standard
+input. Setup previews the database, checks its image files, and lists missing
+images that will be published as unavailable. It asks for confirmation; `--yes`
+is required when standard input is not a terminal. Every other device starts
+from this data. Afterwards the database can still create backups, but restore
+and import are refused there.
+Rerun the command with an invitation from the same server to resume an
+interrupted setup whose server outcome was unknown. Setup remembers the server
+address before sending credentials and refuses to resume at a different address
+or without that saved address. To abandon setup and use another server, run
+`aven sync reset --force`. A definite rejection before setup is frozen leaves the
+database local-only.
 
-Produce a terminal QR pairing invitation for Aven iOS onboarding.
+#### `aven sync invite`
+
+Invite another device and wait until it joins.
 
 ```sh
-aven sync pair [--server <url>]
-aven sync --server <url> pair
+aven sync invite
+aven sync invite --cancel
 ```
 
-The invitation transfers the existing shared `sync.auth_token` and a
-phone-reachable sync server URL. The pair-local `--server` wins over the parent
-`sync --server` form when both are present. The remaining server precedence is
-`AVEN_SYNC_SERVER`, then `sync.server_url`. A selected blank server reports a
-missing server instead of falling through. The command requires a configured,
-nonempty `sync.auth_token` and rejects invalid or loopback URLs.
+Standard output receives only the `AVEN:` invitation. Interactive
+standard error also shows it as a QR code, and the eventual **Device added**
+message is written to standard error. Anyone with the invitation can access
+all synced data and manage devices. It expires after ten minutes. Rerunning the
+command resumes the open invitation and reports its declared expiry.
 
-Pairing reads configuration only. It does not open a task database, contact the
-server, mutate configuration, or run sync. The QR code is the only invitation
-payload output: ordinary text and errors omit the token and encoded invitation.
-Terminal output uses black-on-white ANSI styling unless `NO_COLOR` is present.
-Redirected output uses plain rows without escape sequences or a terminal-width
-check.
-Use `--server` when the desktop sync configuration uses loopback or another
-address the phone cannot reach. Public HTTPS and reverse-proxy server URLs remain
-supported.
+Ctrl-C or `--cancel` retires an invitation before keys have been sent. If keys
+may already have been sent, it remains open until its expiry and the next sync
+changes keys. A second Ctrl-C force-quits while cancellation is in progress.
+Sync on this device keeps running while the invitation is open.
+
+#### `aven sync join`
+
+Join sync from an empty database with a device invitation.
+
+```sh
+aven sync join [--yes]
+aven sync join --new-invitation [--yes]
+```
+
+Paste the invitation without terminal echo, or pipe it to standard input, while
+the inviting device waits. A fresh join shows the server and asks for
+confirmation; `--yes` is required for piped input. Joining downloads the synced
+data and then its images. Rerun `aven sync join` to resume an interrupted join
+without supplying the invitation. Use `--new-invitation` only when continuing
+with a replacement invitation from the original inviting device.
+
+#### `aven sync device`
+
+List devices in sync, or remove another device.
+
+```sh
+aven sync device list [--json]
+aven sync device remove <device-id-or-prefix> [--json]
+```
+
+Both commands contact the server. Text `list` output is a table containing the
+automatic label when available, a unique short ID, and **this device** for the
+current device. It mentions an unfinished key update only while one is pending.
+The label is the macOS Computer Name or Linux hostname and is stored only in the
+encrypted synced data. JSON retains each full `device_id`, `current`, and
+`admission_sequence` value and adds `label`; it also retains
+`key_rotation_pending`.
+
+`remove` accepts a full ID or a unique prefix of at least four hexadecimal
+characters. An ambiguous prefix lists its matches. Removal rotates keys for
+future changes, then reports `state` as `complete` or `pending` with
+`access_revoked` and `key_rotation_pending`. An interrupted removal fails with
+`sync-device-removal-incomplete`; use the full selected `device_id` to resume.
+Refusals include `sync-device-id-invalid`, `sync-device-id-ambiguous`,
+`sync-device-not-found`, and `sync-device-current`; a device cannot remove
+itself. Removal does not erase data the removed device already downloaded. JSON
+output is versioned and omits keys, credentials, and invitations.
+
+A sync allows 256 device changes over its lifetime, at most 63 of them key
+rotations. Adding a device is one change. Removing a device, or changing keys
+after an invitation expired when it may have sent keys, is two: the change and
+its key rotation. Inviting a device requires room for one key rotation. Once a
+limit is reached, devices can no longer be added or removed; start a new sync
+from a backup as in [Recover from device loss](/sync/#recover-from-device-loss).
+
+#### `aven sync reset`
+
+Stop syncing this database and keep its data as a local database.
+
+```sh
+aven sync reset [--force] [--yes] [--json]
+```
+
+Deletes this database's sync state, its unsent sync queue, and its protected
+sync keys. Tasks, images, and history stay and remain editable. Reset does not
+contact the server or change which devices take part in sync; remove this
+device from another device with `aven sync device remove`. Changes made here
+that never synced do not reach the previous sync.
+
+Afterwards the database behaves as if it never synced: `aven sync setup` can
+start a new sync from it, and `aven sync join` still needs an empty database.
+Reset asks for confirmation; `--yes` is required when standard input is not a
+terminal. It is refused with `sync-reset-join-in-progress` or
+`sync-reset-invitation-open` while joining or an unexpired invitation is
+unfinished.
+
+An unfinished setup is also refused by default because its server may have
+accepted the claim even when the client did not receive the response. If the
+original setup invitation or server storage is gone and setup cannot resume,
+`--force` abandons it after an additional warning. This can orphan a server
+that accepted the setup, but keeps local tasks, images, and history. JSON output
+reports `state` as `reset`, or `not-set-up` when the database did not take part
+in sync. The TUI has no reset action. See
+[Rebuilding sync](/sync/#rebuilding-sync).
 
 #### `aven sync status`
 
@@ -887,33 +1008,59 @@ aven sync status
 aven sync status --json
 ```
 
-The report distinguishes `disabled`, `unconfigured`, `healthy`, `degraded`,
-`blocked`, and `failed`. It includes the effective and database-pinned server
-identities, pending change and attachment counts, unresolved conflicts, cursor
-progress, and last attempt, success, transfer counts, and privacy-safe error.
-The versioned JSON report uses the same field names and adds `version` for
-compatibility checks. Authentication values, task content, payloads, and raw
-server responses are omitted.
+The state is `not-set-up`, `setup-incomplete`, `join-incomplete`,
+`key-change-pending`, `access-refused`, or `ready`.
+`key-change-pending` means an invitation expired after keys may have been sent
+to a device that never joined; the next `aven sync` changes keys before
+uploading new changes. `access-refused` records when the server refused this
+device's credentials. It may have been removed, but the refusal alone does not
+prove that; check from another device. Local tasks and images remain available,
+and a successful sync clears the state. Set-up databases also report the
+server, whether local changes wait to sync, open conflicts, pending image
+uploads, downloads, and unavailable images, plus whether an invitation is open
+and its expiry. Text output omits the internal server position; JSON retains it. The versioned JSON report omits invitation text, keys, and task
+content.
+
+Command failures print a plain explanation, a next step, and a stable code in
+square brackets. The full internal error chain is written to the log rather
+than repeated on standard error.
 
 ### `aven server`
 
-Run an HTTP sync server backed by its own SQLite database.
+Serve end-to-end encrypted sync from storage prepared by `aven server setup`.
 
 ```sh
-aven server --data <path> [--bind <address>] [--unsafe-public-bind]
+aven server [--data <path>] [--bind <address>] [--unsafe-public-bind]
+aven server setup [--data <path>] --url <url> [--invitation-only]
 ```
 
 | Option | Description |
 | --- | --- |
-| `--data <path>` | Required server SQLite database path. |
-| `--bind <ip:port>` | Listen address. Defaults to `127.0.0.1:0`, which chooses an available loopback port. |
-| `--unsafe-public-bind` | Allow a public IP bind. Public binds also require `sync.auth_token`. |
+| `--data <path>` | Server SQLite database path. Defaults to `$STATE_DIRECTORY/sync-server.sqlite` when systemd sets `StateDirectory=`, otherwise `$XDG_STATE_HOME/aven/server/sync-server.sqlite` (`~/.local/state/aven/server/sync-server.sqlite`). Pass the same path to both commands. |
+| `--bind <ip:port>` | Listen address. Defaults to `127.0.0.1:3746`. Loopback, private, and VPN addresses are accepted directly. |
+| `--unsafe-public-bind` | Allow binding a public or wildcard address. Prints a warning because payload encryption does not protect credentials or setup invitations. |
+| `--url <url>` | For `setup`: the HTTP or HTTPS origin devices use to reach the server, with no path, query, or credentials, and at most 255 bytes. |
+| `--invitation-only` | For `setup`: print only the invitation, without operator instructions. |
 
-Loopback binds can run without authentication. Private-network binds require `sync.auth_token`. Public binds require both an auth token and `--unsafe-public-bind`; aven prints a warning to use TLS or a reverse proxy. The server exposes `POST /sync`, accepts compressed requests, compresses responses when appropriate, and shuts down gracefully on an operating-system termination signal.
+`server setup` stores an expiring setup verifier, then prints a setup invitation
+for `aven sync setup`, the storage path, and a starting `aven server --bind ...`
+command together on standard output. Use `--invitation-only` when a script needs
+the invitation without the operator instructions. The suggested bind uses an HTTP URL's port; HTTPS
+uses port 3746 for the service behind its proxy. For direct VPN HTTP, replace
+the loopback bind with the server's VPN address. Running setup again before a
+device claims the server replaces the invitation. The server does not terminate
+TLS. Device credentials, setup invitations, server identifiers, and traffic
+metadata are outside the end-to-end encrypted payload, so use HTTP only over a
+trusted VPN or another protected private network; otherwise put a TLS reverse
+proxy in front of it. Both commands refuse storage
+that holds
+change history, including storage from the unencrypted sync of earlier
+releases. The server shuts down gracefully on an operating-system termination
+signal.
 
 ```sh
-aven server --data ~/.local/share/aven/server.sqlite --bind 127.0.0.1:3000
-aven server --data /srv/aven/server.sqlite --bind 192.168.1.10:3000
+aven server setup --data /srv/aven/server.sqlite --url http://100.100.20.30:3746
+aven server --data /srv/aven/server.sqlite --bind 100.100.20.30:3746
 ```
 
 ### `aven conflict`
@@ -959,7 +1106,8 @@ aven conflict resolve APP-7KQ9 description --value-file ./merged.md
 
 ### `aven daemon`
 
-Run synchronization continuously or manage the macOS LaunchAgent service.
+Run synchronization continuously or manage it as a background service on macOS
+or on Linux with systemd.
 
 ```sh
 aven daemon
@@ -970,19 +1118,23 @@ aven daemon restart
 aven daemon repair [--if-installed] [--program <path>]
 ```
 
-Running `aven daemon` in the foreground requires `sync.enabled: true` and `sync.server_url`. It syncs immediately, then on the configured interval and whenever a local mutation sends a UDP wake signal. Failed syncs use exponential backoff up to five minutes. Bounded rounds with more work remaining resume promptly. The process exits when its executable changes so a service manager can restart the updated binary.
+Running `aven daemon` in the foreground requires `sync.enabled: true`. Until the database is set up or joined it waits without contacting a server. Once set up, it syncs immediately, then on the configured interval and whenever a local mutation sends a UDP wake signal. Failed syncs use exponential backoff up to five minutes. Bounded rounds with more work remaining resume promptly. The process exits when its executable changes so a service manager can restart the updated binary.
 
 `daemon status` is observational. It reports platform support, installation,
 loaded and running state, executable consistency, configuration validity,
 service and log paths, and a recovery action. Its JSON states are
 `unavailable`, `unconfigured`, `healthy`, `degraded`, `blocked`, and `failed`.
 
-Service management is available on macOS:
+Service management is available on macOS, as a LaunchAgent, and on Linux, as a
+systemd user service named `aven-daemon.service`:
 
-- `install` writes, enables, and loads the LaunchAgent. It records the resolved database, config directory, executable, wake address, and log paths. `--program` stores an explicit executable path instead of the running binary.
-- `uninstall` unloads and removes the LaunchAgent plist.
-- `restart` asks `launchctl` to restart the loaded service.
-- `repair` rewrites and reloads an existing LaunchAgent from active configuration. `--if-installed` succeeds without changes when the service is absent. `--program` selects the stored executable path.
+- `install` writes, enables, and starts the service. It records the resolved database, config directory, and executable. On macOS it also records log paths; on Linux output goes to the journal (`journalctl --user -u aven-daemon.service`). `--program` stores an explicit executable path instead of the running binary.
+- `uninstall` stops and removes the service file.
+- `restart` restarts the service.
+- `repair` rewrites and restarts an installed service from active configuration. `--if-installed` succeeds without changes when the service is absent. `--program` selects the stored executable path.
+
+On Linux, a systemd user service stops when you log out unless lingering is
+enabled with `loginctl enable-linger`.
 
 ```sh
 aven daemon
@@ -1110,7 +1262,7 @@ Doctor has a standalone bootstrap path. It can report malformed or invalid confi
 
 Database inspection uses an isolated snapshot and never creates or changes the selected database, initializes metadata or a workspace, enables WAL, runs migrations, or removes sidecars. Checks that reconcile derived state operate only on the disposable snapshot. Doctor performs no sync, daemon wakeup, update check, network request, or repair. A missing database remains missing. Pending migrations are reported with backup and normal-startup guidance.
 
-The report includes config and database paths and their sources, schema and sidecar state, workspace counts, client and sequence metadata, sync configuration and recent sync state, unresolved conflict count, daemon wake settings, and macOS service status. Attachment checks report image storage, cleanup eligibility, quotas, operations in progress, and inconsistencies. Independent sections continue after failures, while dependent checks use `skipped` status and include a reason.
+The report includes config and database paths and their sources, schema and sidecar state, workspace counts, client and sequence metadata, sync configuration and recent sync state, unresolved conflict count, daemon wake settings, and service status on macOS and Linux. Attachment checks report image storage, cleanup eligibility, quotas, operations in progress, and inconsistencies. Independent sections continue after failures, while dependent checks use `skipped` status and include a reason.
 
 Normal doctor checks attachment records and local image availability. `--integrity` also runs read-only SQLite and relationship checks, verifies recurring schedules, generated tasks, history, pauses, and lifecycle state, verifies stored image hashes and sizes, decodes images, and confirms formats and dimensions. A missing current recurring task is a repairable warning with guidance to run `aven recur list`. Other recurring-task integrity failures include guidance to preserve the database and recover from a known-good backup.
 
@@ -1129,19 +1281,16 @@ aven doctor --json --fail-on-error
 Check GitHub releases for a newer aven version.
 
 ```sh
-aven update [--yes] [--allow-sync-incompatibility]
+aven update [--yes]
 ```
 
 Package-manager installations receive manager-specific update instructions. Direct installations report an available release without changing the executable unless `--yes` is supplied.
-
-Before installing a release with a different sync protocol, Aven sends an empty request to the configured sync server to check compatibility. The request contains no tasks and does not advance sync state. If the server is incompatible or cannot be checked, Aven recommends updating the server first and does not install. Use `--yes --allow-sync-incompatibility` to proceed despite that warning. The override does not skip archive, checksum, or executable validation.
 
 A direct update downloads the platform archive, verifies it, replaces the current executable, and asks you to restart running aven processes. Cached release information is used when a fresh check fails and a valid cache entry exists.
 
 ```sh
 aven update
 aven update --yes
-aven update --yes --allow-sync-incompatibility
 ```
 
 ## Data safety commands
@@ -1157,7 +1306,9 @@ aven backup restore <path> --yes
 
 Without `--output`, backup creates a timestamped `.aven-backup.tar.zst` archive beside the active database. The archive contains a consistent database backup and every attachment image available on this device. The database preserves recurring schedules, future-task settings, completed, skipped, and missed history, pauses, conflicts, and task-specific notes and attachments. Attachment records for missing images remain in the database, but the missing files cannot be included. Cached previews and incomplete files are excluded. Aven validates every included image while creating the archive.
 
-`backup restore` requires `--yes`. Restore checks the archive, database, attachment information, and image files before replacing local data. It creates safety copies of the existing database and attachment directory first. Plain SQLite backup files remain accepted for database-only recovery.
+Backups work for databases that take part in sync, including incomplete setup or joining. Sync bindings, enrollment state, and encryption keys are excluded, so restoring to a fresh path creates a local-only database.
+
+`backup restore` requires `--yes`. Restore checks the archive, database, attachment information, and image files before replacing local data. It creates safety copies of the existing database and attachment directory first. Plain SQLite backup files remain accepted for database-only recovery. Restore is refused when the target database takes part in sync; use a fresh database path instead.
 
 ```sh
 aven backup
@@ -1173,7 +1324,7 @@ Export portable user and sync metadata as JSON.
 aven export --output <path>
 ```
 
-The export includes tasks, recurring schedules, future-task settings, history, pauses, conflicts, and attachment information. Past dated tasks remain ordinary task rows. Image files are excluded and `blobs_included` is `false`. Parent directories are created as needed. The command reports workspace and task counts and output size.
+The export includes tasks, recurring schedules, future-task settings, history, pauses, conflicts, and attachment information. Past dated tasks remain ordinary task rows. Image files are excluded and `blobs_included` is `false`. Parent directories are created as needed. The command reports workspace and task counts and output size. An export from a database that has set up or joined sync can't be imported; use `aven backup` for synced data.
 
 ```sh
 aven export --output ~/backups/aven.json
@@ -1187,7 +1338,7 @@ Replace local data from an aven JSON export.
 aven import <path> --yes
 ```
 
-Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable. Sync restores images that reached the same server before export. Attachments that were still local-only remain unavailable metadata and are not published after import; use a backup archive when moving them and their image files.
+Import requires explicit confirmation with `--yes`. Aven validates the export, relationships, attachment information, recurring schedules, generated tasks, history, pauses, and active, paused, or stopped state before replacing local data. It creates a safety backup, preserves this installation's client identity, clears server-specific sync state, and runs integrity checks. Past dated tasks keep their own fields, notes, and attachment metadata. Because JSON contains no image files, imported attachments are marked unavailable and are not published by sync; use a backup archive when moving images.
 
 Exports without recurrence sections import every task as nonrecurring data.
 

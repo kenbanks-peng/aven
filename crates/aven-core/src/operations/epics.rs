@@ -36,7 +36,7 @@ impl Database {
         let outcome =
             add_task_to_epic_in_transaction(&mut tx, workspace, child_id, epic_id).await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             let mut commands = vec![UndoCommand::AddEpicChild {
                 epic_id: outcome.epic.id.clone(),
@@ -52,7 +52,7 @@ impl Database {
                     queue_activity_after: None,
                 });
             }
-            record_tui_undo(&mut tx, &workspace.id, &summary, UndoPayload { commands }).await?;
+            record_tui_undo(&mut tx, &workspace.id, UndoPayload { commands }).await?;
         }
         tx.commit().await?;
         Ok(outcome)
@@ -80,12 +80,11 @@ impl Database {
         let outcome =
             remove_task_from_epic_in_transaction(&mut tx, workspace, child_id, epic_id).await?;
         if outcome.changed
-            && let UndoContext::Tui { summary } = undo
+            && let UndoContext::Tui = undo
         {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &summary,
                 UndoPayload {
                     commands: vec![UndoCommand::RemoveEpicChild {
                         epic_id: outcome.epic.id.clone(),
@@ -168,6 +167,7 @@ async fn record_epic_change(
     workspace: &Workspace,
     pair: &EpicPair,
     op_type: &'static str,
+    at: &str,
 ) -> Result<()> {
     append_change(
         conn,
@@ -177,7 +177,7 @@ async fn record_epic_change(
         op_type,
         ChangePayload::workspace(workspace)
             .set("epic_task_id", pair.epic.id.clone())
-            .set("created_at", now()),
+            .set("created_at", at),
     )
     .await?;
     Ok(())
@@ -284,7 +284,7 @@ pub(crate) async fn add_task_to_epic_in_transaction(
     let changed = insert_epic_link_if_absent(conn, &pair, &ts).await?;
 
     if changed {
-        record_epic_change(conn, workspace, &pair, op_type::EPIC_LINK_ADD).await?;
+        record_epic_change(conn, workspace, &pair, op_type::EPIC_LINK_ADD, &ts).await?;
     }
 
     Ok(EpicLinkOutcome {
@@ -307,7 +307,7 @@ pub(crate) async fn restore_task_to_epic_in_transaction(
     let ts = now();
     let changed = insert_epic_link_if_absent(conn, &pair, &ts).await?;
     if changed {
-        record_epic_change(conn, workspace, &pair, op_type::EPIC_LINK_ADD).await?;
+        record_epic_change(conn, workspace, &pair, op_type::EPIC_LINK_ADD, &ts).await?;
     }
     Ok(EpicLinkOutcome {
         epic: pair.epic,
@@ -356,7 +356,14 @@ pub(crate) async fn remove_task_from_epic_in_transaction(
         > 0;
 
     if changed {
-        record_epic_change(conn, workspace, &pair, op_type::EPIC_LINK_REMOVE).await?;
+        record_epic_change(
+            conn,
+            workspace,
+            &pair,
+            op_type::EPIC_LINK_REMOVE,
+            &mutation_at,
+        )
+        .await?;
     }
 
     Ok(EpicLinkOutcome {

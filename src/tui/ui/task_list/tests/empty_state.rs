@@ -1,23 +1,28 @@
 use super::*;
+use crate::tui::store::TaskViewState;
 
 #[tokio::test]
 async fn empty_task_list_keeps_header_and_invites_first_task() {
     let store = test_store_with_tasks(Vec::new()).await;
 
-    let rendered = buffer_text(&render_task_list_buffer(&store, 80, 10));
+    let rendered = buffer_text(&render_task_list_buffer(
+        &TaskListSource::from_store(&store),
+        80,
+        10,
+    ));
 
     assert!(rendered.contains("TITLE"));
     assert!(rendered.contains("No tasks in this workspace"));
-    assert!(rendered.contains("Add the first task to start building your queue."));
+    assert!(rendered.contains("Add the first task, or use :sync to join an existing sync."));
     assert!(rendered.contains("Add a task"));
 }
 
-#[tokio::test]
-async fn empty_filtered_task_list_offers_to_clear_filters() {
-    let mut store = test_store_with_tasks(Vec::new()).await;
-    store.view_state.filter_modifiers.label = Some("blocked".to_string());
+#[test]
+fn empty_filtered_task_list_offers_to_clear_filters() {
+    let mut list = TaskListFixture::new(Vec::new());
+    list.view_state.filter_modifiers.label = Some("blocked".to_string());
 
-    let rendered = buffer_text(&render_task_list_buffer(&store, 64, 7));
+    let rendered = buffer_text(&render_task_list_buffer(&list.source(), 64, 7));
 
     assert!(rendered.contains("No tasks match these filters"));
     assert!(rendered.contains("f c"));
@@ -25,12 +30,28 @@ async fn empty_filtered_task_list_offers_to_clear_filters() {
     assert!(!rendered.contains("No tasks in this workspace"));
 }
 
-#[tokio::test]
-async fn empty_epics_view_teaches_closed_filter() {
-    let mut store = test_store_with_tasks(Vec::new()).await;
-    store.view_state.query = TaskQuery::Epics;
+fn empty_state_context(
+    view_state: &TaskViewState,
+) -> crate::tui::ui::empty_state::EmptyStateContext<'_> {
+    crate::tui::ui::empty_state::EmptyStateContext {
+        view_state,
+        open_count: 0,
+        done_count: 0,
+        upcoming_count: 0,
+        has_tasks: false,
+        load_failed: false,
+    }
+}
 
-    let state = crate::tui::ui::empty_state::task_empty_state(&store);
+#[test]
+fn empty_epics_view_teaches_closed_filter() {
+    let mut view_state = TaskViewState {
+        query: TaskQuery::Epics,
+        ..Default::default()
+    };
+
+    let state =
+        crate::tui::ui::empty_state::task_empty_state_for(&empty_state_context(&view_state));
 
     assert_eq!(state.title, "No open epics");
     assert_eq!(
@@ -38,19 +59,20 @@ async fn empty_epics_view_teaches_closed_filter() {
         Some(crate::tui::event::Action::ToggleClosedFilter)
     );
 
-    store.view_state.filter_modifiers.closed = ClosedTaskVisibility::Only;
-    let state = crate::tui::ui::empty_state::task_empty_state(&store);
+    view_state.filter_modifiers.closed = ClosedTaskVisibility::Only;
+    let state =
+        crate::tui::ui::empty_state::task_empty_state_for(&empty_state_context(&view_state));
     assert_eq!(state.title, "No closed epics");
 }
 
-#[tokio::test]
-async fn empty_state_classifies_named_and_specialized_surfaces() {
+#[test]
+fn empty_state_classifies_named_and_specialized_surfaces() {
     use crate::tui::ui::empty_state::{
-        EmptyStateReason, column_board_empty_state, recent_actions_empty_state,
-        recurrence_empty_state, task_empty_state,
+        EmptyStateReason, column_board_empty_state_for, recent_actions_empty_state_for,
+        recurrence_empty_state_for, task_empty_state_for,
     };
 
-    let mut store = test_store_with_tasks(Vec::new()).await;
+    let mut view_state = TaskViewState::default();
     let named_views = [
         TaskQuery::Queue,
         TaskQuery::All,
@@ -65,94 +87,101 @@ async fn empty_state_classifies_named_and_specialized_surfaces() {
         TaskQuery::Epics,
     ];
     for view in named_views {
-        store.view_state.query = view;
-        let state = task_empty_state(&store);
+        view_state.query = view;
+        let state = task_empty_state_for(&empty_state_context(&view_state));
         assert!(!state.title.is_empty(), "missing title for {view:?}");
         assert!(state.action.is_some(), "missing action for {view:?}");
     }
 
-    store.view_state.scope = TaskScope::Project("app".to_string());
-    store.view_state.query = TaskQuery::Queue;
-    assert_eq!(task_empty_state(&store).title, "No tasks in this project");
+    view_state.scope = TaskScope::Project("app".to_string());
+    view_state.query = TaskQuery::Queue;
+    assert_eq!(
+        task_empty_state_for(&empty_state_context(&view_state)).title,
+        "No tasks in this project"
+    );
 
-    store.view_state.scope = TaskScope::Workspace;
-    store.view_state.query = TaskQuery::Search;
-    store.view_state.projection_origin = TaskProjectionOrigin::SearchPrompt;
-    assert_eq!(task_empty_state(&store).title, "Search tasks");
+    view_state.scope = TaskScope::Workspace;
+    view_state.query = TaskQuery::Search;
+    view_state.projection_origin = TaskProjectionOrigin::SearchPrompt;
+    assert_eq!(
+        task_empty_state_for(&empty_state_context(&view_state)).title,
+        "Search tasks"
+    );
 
-    store.view_state.projection_origin = TaskProjectionOrigin::Search {
+    view_state.projection_origin = TaskProjectionOrigin::Search {
         query: "missing".to_string(),
         task_ids: Vec::new(),
     };
     assert_eq!(
-        task_empty_state(&store).reason,
+        task_empty_state_for(&empty_state_context(&view_state)).reason,
         EmptyStateReason::NoSearchResults
     );
 
-    store.view_state.projection_origin = TaskProjectionOrigin::Search {
+    view_state.projection_origin = TaskProjectionOrigin::Search {
         query: "matched".to_string(),
         task_ids: vec![crate::test_support::task_id("matched")],
     };
-    store.view_state.filter_modifiers.label = Some("hidden".to_string());
+    view_state.filter_modifiers.label = Some("hidden".to_string());
     assert_eq!(
-        task_empty_state(&store).reason,
+        task_empty_state_for(&empty_state_context(&view_state)).reason,
         EmptyStateReason::NoFilterMatches
     );
 
-    store.view_state.projection_origin = TaskProjectionOrigin::NamedView;
-    store.view_state.filter_modifiers.label = None;
-    store.view_state.filter_modifiers.deleted_only = true;
+    view_state.projection_origin = TaskProjectionOrigin::NamedView;
+    view_state.filter_modifiers.label = None;
+    view_state.filter_modifiers.deleted_only = true;
     assert_eq!(
-        task_empty_state(&store).reason,
+        task_empty_state_for(&empty_state_context(&view_state)).reason,
         EmptyStateReason::NoDeletedTasks
     );
 
-    store.view_state.filter_modifiers = Default::default();
-    store.view_state.query = TaskQuery::Queue;
-    store.counts.upcoming = 2;
+    view_state.filter_modifiers = Default::default();
+    view_state.query = TaskQuery::Queue;
+    let mut context = empty_state_context(&view_state);
+    context.upcoming_count = 2;
     assert_eq!(
-        task_empty_state(&store).reason,
+        task_empty_state_for(&context).reason,
         EmptyStateReason::DeferredTasks
     );
 
-    store.view_state.query = TaskQuery::Recurring;
-    store.view_state.recurring.lifecycle = crate::query::RecurrenceSeriesLifecycleFilter::Stopped;
+    view_state.query = TaskQuery::Recurring;
+    view_state.recurring.lifecycle = crate::query::RecurrenceSeriesLifecycleFilter::Stopped;
     assert_eq!(
-        recurrence_empty_state(&store).reason,
+        recurrence_empty_state_for(&empty_state_context(&view_state)).reason,
         EmptyStateReason::RecurrenceLifecycle
     );
 
-    store.view_state.query = TaskQuery::RecentActions;
+    view_state.query = TaskQuery::RecentActions;
     assert_eq!(
-        recent_actions_empty_state(&store).reason,
+        recent_actions_empty_state_for(&empty_state_context(&view_state)).reason,
         EmptyStateReason::RecentActions
     );
 
-    store.tasks.push(task_list_item("Unassigned status"));
-    store.set_task_columns(vec![crate::config::TaskColumnConfig {
-        name: "Inbox".to_string(),
-        statuses: vec!["inbox".to_string()],
-    }]);
+    let mut context = empty_state_context(&view_state);
+    context.has_tasks = true;
     assert_eq!(
-        column_board_empty_state(&store).reason,
+        column_board_empty_state_for(&context).reason,
         EmptyStateReason::ColumnConfiguration
-    );
-    store.tasks.clear();
-
-    store.fail_next_refresh();
-    store.refresh(None).await.unwrap_err();
-    assert_eq!(
-        recent_actions_empty_state(&store).reason,
-        EmptyStateReason::LoadFailed
     );
 }
 
 #[tokio::test]
-async fn empty_task_list_adapts_to_short_and_narrow_bodies() {
-    let store = test_store_with_tasks(Vec::new()).await;
+async fn empty_state_reports_failed_store_refresh() {
+    let mut store = test_store_with_tasks(Vec::new()).await;
+    store.fail_next_refresh();
+    store.refresh(None).await.unwrap_err();
+    assert_eq!(
+        crate::tui::ui::empty_state::recent_actions_empty_state(&store).reason,
+        crate::tui::ui::empty_state::EmptyStateReason::LoadFailed
+    );
+}
 
-    let one_body_row = buffer_text(&render_task_list_buffer(&store, 20, 2));
-    let header_only = buffer_text(&render_task_list_buffer(&store, 20, 1));
+#[test]
+fn empty_task_list_adapts_to_short_and_narrow_bodies() {
+    let list = TaskListFixture::new(Vec::new());
+
+    let one_body_row = buffer_text(&render_task_list_buffer(&list.source(), 20, 2));
+    let header_only = buffer_text(&render_task_list_buffer(&list.source(), 20, 1));
 
     assert!(one_body_row.contains("add task"));
     assert!(!one_body_row.contains("No tasks in this workspace"));
@@ -160,12 +189,34 @@ async fn empty_task_list_adapts_to_short_and_narrow_bodies() {
 }
 
 #[tokio::test]
-async fn populated_task_list_preserves_rows_without_empty_prompt() {
-    let store = test_store_with_tasks(vec![task_list_item("Ship the release")]).await;
+async fn loaded_tasks_reach_rendering_and_hit_testing_with_their_identity() {
+    let store = test_store_with_tasks(vec![
+        task_list_item("Ship the release"),
+        task_list_item("Write the notes"),
+    ])
+    .await;
+    assert_eq!(store.tasks.len(), 2);
+    let area = Rect::new(0, 0, 140, 10);
 
-    let rendered = buffer_text(&render_task_list_buffer(&store, 80, 7));
+    let rendered = buffer_text(&render_task_list_buffer(
+        &TaskListSource::from_store(&store),
+        area.width,
+        area.height,
+    ));
 
     assert!(rendered.contains("Ship the release"));
+    assert!(rendered.contains("Write the notes"));
     assert!(!rendered.contains("No tasks in this workspace"));
-    assert!(!rendered.contains("Add the first task to start building your queue."));
+    let table_state = TableState::default();
+    for (index, item) in store.tasks.iter().enumerate() {
+        let visual_row = task_visual_row(&store, index).unwrap() as u16;
+        let row = area.y + 1 + visual_row;
+        let hit = task_at_position(&store, &table_state, area, area.x + 1, row).unwrap();
+        assert_eq!(hit.task_index, index);
+        assert_eq!(hit.task_id, item.task.id);
+        let status = (area.x..area.right())
+            .find_map(|x| task_status_at_position(&store, &table_state, area, x, row))
+            .unwrap();
+        assert_eq!(status.task_id, item.task.id);
+    }
 }

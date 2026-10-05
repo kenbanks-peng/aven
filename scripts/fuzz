@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Builds the libFuzzer targets in fuzz/ on stable Rust and runs one of them.
+#
+# Usage: scripts/fuzz <target> [libFuzzer flags...]
+#        scripts/fuzz --list
+#
+# Coverage instrumentation uses the stable SanitizerCoverage pass, so no
+# nightly toolchain or cargo-fuzz is needed. There is no AddressSanitizer;
+# findings are panics, overflow, timeouts and RSS limit hits. The corpus is
+# seeded from real artifacts on first run.
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+fuzz="$root/fuzz"
+targets=(tail tail_apply attachment membership bootstrap invitation wire)
+
+if [[ "${1:-}" == "--list" || $# -eq 0 ]]; then
+    printf '%s\n' "${targets[@]}"
+    [[ $# -eq 0 ]] && exit 1 || exit 0
+fi
+target="$1"
+shift
+if [[ ! " ${targets[*]} " =~ " $target " ]]; then
+    echo "unknown fuzz target: $target" >&2
+    exit 1
+fi
+
+host="$(rustc -vV | sed -n 's/^host: //p')"
+export SQLX_OFFLINE=true
+if [[ ! -d "$fuzz/corpus/$target" ]]; then
+    cargo run --quiet --release --manifest-path "$fuzz/Cargo.toml" --bin seed_corpus
+fi
+# An explicit target keeps build scripts uninstrumented.
+RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module \
+-Cllvm-args=-sanitizer-coverage-level=4 \
+-Cllvm-args=-sanitizer-coverage-inline-8bit-counters \
+-Cllvm-args=-sanitizer-coverage-pc-table \
+-Cllvm-args=-sanitizer-coverage-trace-compares \
+-Cdebug-assertions -Coverflow-checks" \
+    cargo build --quiet --release --manifest-path "$fuzz/Cargo.toml" \
+    --target "$host" --target-dir "$fuzz/target" --bin "$target"
+
+dict=()
+if [[ "$target" == tail* || "$target" == wire ]]; then
+    dict=(-dict="$fuzz/dict/tail.dict")
+fi
+mkdir -p "$fuzz/corpus/$target" "$fuzz/artifacts/$target"
+exec "$fuzz/target/$host/release/$target" "$fuzz/corpus/$target" \
+    -artifact_prefix="$fuzz/artifacts/$target/" -rss_limit_mb=2048 -timeout=10 \
+    "${dict[@]}" "$@"

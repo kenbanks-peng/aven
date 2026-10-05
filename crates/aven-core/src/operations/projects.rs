@@ -63,7 +63,6 @@ impl Database {
             record_tui_undo(
                 &mut tx,
                 &workspace.id,
-                &format!("project {}", outcome.project.key),
                 UndoPayload {
                     commands: vec![UndoCommand::DeleteCreatedProject {
                         project_key: outcome.project.key.clone(),
@@ -338,7 +337,6 @@ where
         record_tui_undo(
             &mut tx,
             &workspace.id,
-            &format!("project {}", outcome.project.key),
             UndoPayload {
                 commands: vec![UndoCommand::SetProjectMetadata {
                     project_id: outcome.project.id.clone(),

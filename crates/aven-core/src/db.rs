@@ -7,8 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(not(any(test, feature = "test-support")))]
+use sqlx::Transaction;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Connection as _, Sqlite, SqliteConnection, SqlitePool, Transaction};
+use sqlx::{Connection as _, Sqlite, SqliteConnection, SqlitePool};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use crate::ids::new_id;
@@ -18,13 +20,17 @@ mod backup;
 mod changes;
 mod field_versions;
 mod inspection;
+pub mod installation;
 mod rows;
 
 pub use backup::{
     backup_database, default_backup_path, default_sqlite_backup_path, restore_database_file,
     shm_path, wal_path,
 };
-pub(crate) use backup::{backup_database_with_connection, create_restore_safety_backup};
+pub(crate) use backup::{
+    backup_database_with_connection, create_restore_safety_backup, detach_backup_snapshot,
+    ensure_file_has_no_active_local_shared_capture,
+};
 pub(crate) use changes::{IdentifiedChange, insert_change, insert_change_with_identity};
 pub(crate) use field_versions::{
     conflict_exists, entity_conflict_exists, entity_field_version, field_version,
@@ -38,6 +44,8 @@ pub(crate) use rows::{
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const FILE_DATABASE_CONNECTIONS: u32 = 5;
+// Bounds retained WAL space on reuse after checkpointing, not transaction size.
+const WAL_JOURNAL_SIZE_LIMIT: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Database {
@@ -46,11 +54,14 @@ pub struct Database {
     path: PathBuf,
     file_identity: Option<PathBuf>,
     _inspection_dir: Option<Arc<tempfile::TempDir>>,
+    pub(crate) membership_cache: crate::sync::seed_claim::membership::persistence::Cache,
 }
 
 pub(crate) struct WriterConnection {
     connection: sqlx::pool::PoolConnection<Sqlite>,
     _guard: OwnedMutexGuard<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    acquired: std::time::Instant,
 }
 
 impl Deref for WriterConnection {
@@ -64,6 +75,13 @@ impl Deref for WriterConnection {
 impl DerefMut for WriterConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.connection
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for WriterConnection {
+    fn drop(&mut self) {
+        crate::test_support::writer_timing::record_gate_hold(self.acquired.elapsed());
     }
 }
 
@@ -90,6 +108,7 @@ impl Database {
             path: path.to_path_buf(),
             file_identity,
             _inspection_dir: None,
+            membership_cache: Default::default(),
         })
     }
 
@@ -125,16 +144,27 @@ impl Database {
         conflict_exists(&mut conn, workspace_id, task_id, field).await
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+
     pub(crate) async fn acquire_reader(&self) -> Result<sqlx::pool::PoolConnection<Sqlite>> {
         Ok(self.pool.acquire().await?)
     }
 
     pub(crate) async fn acquire_writer(&self) -> Result<WriterConnection> {
+        #[cfg(any(test, feature = "test-support"))]
+        let waiting = std::time::Instant::now();
         let guard = self.writer.clone().lock_owned().await;
         let connection = self.pool.acquire().await?;
+        #[cfg(any(test, feature = "test-support"))]
+        crate::test_support::writer_timing::record_gate_wait(waiting.elapsed());
         Ok(WriterConnection {
             connection,
             _guard: guard,
+            #[cfg(any(test, feature = "test-support"))]
+            acquired: std::time::Instant::now(),
         })
     }
 }
@@ -154,6 +184,9 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
         DatabaseStorage::File => Some(lock_database_setup(options.get_filename()).await?),
         DatabaseStorage::InMemory => None,
     };
+    if storage == DatabaseStorage::File {
+        create_private_database_file(options.get_filename())?;
+    }
     options = options
         .create_if_missing(true)
         .foreign_keys(true)
@@ -165,7 +198,9 @@ pub(crate) async fn open_db(path: &Path) -> Result<SqlitePool> {
             .idle_timeout(None)
             .max_lifetime(None),
         DatabaseStorage::File => {
-            options = options.journal_mode(SqliteJournalMode::Wal);
+            options = options
+                .journal_mode(SqliteJournalMode::Wal)
+                .pragma("journal_size_limit", WAL_JOURNAL_SIZE_LIMIT.to_string());
             SqlitePoolOptions::new().max_connections(FILE_DATABASE_CONNECTIONS)
         }
     };
@@ -195,17 +230,23 @@ async fn lock_database_setup(path: &Path) -> Result<fs::File> {
     name.push(".aven-open.lock");
     let lock_path = path.with_file_name(name);
     tokio::task::spawn_blocking(move || {
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
+        let lock = crate::private_fs::open_lock_file(&lock_path)
             .with_context(|| format!("could not open {}", lock_path.display()))?;
         lock.lock()
             .with_context(|| format!("could not lock {}", lock_path.display()))?;
         Ok(lock)
     })
     .await?
+}
+
+/// New databases are owner-only; SQLite gives WAL, SHM, and journal files the
+/// main database's mode. An existing database keeps its user-managed mode.
+fn create_private_database_file(path: &Path) -> Result<()> {
+    match crate::private_fs::create_new_file(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("could not create {}", path.display())),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -243,6 +284,7 @@ async fn initialize_meta(pool: &SqlitePool) -> Result<()> {
     insert_meta_if_missing(&mut conn, "client_id", &new_id()).await?;
     insert_meta_if_missing(&mut conn, "sync_cursor", "0").await?;
     insert_meta_if_missing(&mut conn, "local_seq", "0").await?;
+    insert_meta_if_missing(&mut conn, "sync_generation", "0").await?;
     Ok(())
 }
 
@@ -273,10 +315,18 @@ pub(crate) async fn set_meta(conn: &mut SqliteConnection, key: &str, value: &str
     Ok(())
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) type WriterTransaction<'a> = Transaction<'a, Sqlite>;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) type WriterTransaction<'a> = crate::test_support::writer_timing::TimedTransaction<'a>;
+
 pub(crate) async fn begin_immediate(
     conn: &mut SqliteConnection,
-) -> sqlx::Result<Transaction<'_, Sqlite>> {
-    conn.begin_with("BEGIN IMMEDIATE").await
+) -> sqlx::Result<WriterTransaction<'_>> {
+    let transaction = conn.begin_with("BEGIN IMMEDIATE").await?;
+    #[cfg(any(test, feature = "test-support"))]
+    let transaction = WriterTransaction::new(transaction);
+    Ok(transaction)
 }
 
 async fn insert_meta_if_missing(conn: &mut SqliteConnection, key: &str, value: &str) -> Result<()> {
@@ -295,3 +345,9 @@ mod tests;
 
 #[cfg(test)]
 mod payload_tests;
+
+/// Whether `error` came from the database engine, such as a lock timeout,
+/// rather than a decision made on stored data.
+pub fn is_storage_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<sqlx::Error>())
+}

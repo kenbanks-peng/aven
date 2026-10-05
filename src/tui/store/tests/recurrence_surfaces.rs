@@ -77,6 +77,31 @@ async fn recurring_series_view_includes_paused_and_filters_stopped() {
 }
 
 #[tokio::test]
+async fn failed_stop_refresh_keeps_published_recurring_filter() {
+    let mut store = test_store().await;
+    let (_, selected) = create_daily(&mut store).await;
+    let series_id = store.tasks[selected]
+        .recurrence
+        .as_ref()
+        .unwrap()
+        .series_id
+        .clone();
+    store.show_view(TaskQuery::Recurring).await.unwrap();
+    let original_view_state = store.view_state.clone();
+    store.fail_next_refresh();
+
+    assert!(
+        store
+            .stop_recurrence(&series_id, None, false)
+            .await
+            .is_err()
+    );
+
+    assert_eq!(store.view_state, original_view_state);
+    assert_eq!(store.recurrence_series[0].series.id, series_id);
+}
+
+#[tokio::test]
 async fn recurring_series_search_and_refresh_restore_series_identity() {
     let mut store = test_store().await;
     create_daily_named(&mut store, "Alpha journal").await;

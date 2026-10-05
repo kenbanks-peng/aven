@@ -7,7 +7,7 @@ use aven_core::query::{RecurrenceHistoryPage, RecurrenceSeriesDetail};
 use aven_core::recurrence::{RecurrenceOutcome, RecurrenceSchedule, RecurrenceSeriesId};
 use chrono::{DateTime, NaiveDate, Utc};
 
-use super::{MutationMessage, TuiStore};
+use super::{MainRowSelection, MutationMessage, SelectionRestore, TuiProjection, TuiStore};
 
 impl TuiStore {
     pub(crate) async fn load_recurrence_series_detail(
@@ -18,12 +18,7 @@ impl TuiStore {
             .database
             .recurrence_series_detail(&self.active_workspace.id, series_id)
             .await?;
-        anyhow::ensure!(
-            &detail.series.id == series_id,
-            "recurrence detail identity changed while loading"
-        );
-        self.recurrence_detail = Some(detail);
-        Ok(())
+        self.projection.set_recurrence_detail(series_id, detail)
     }
 
     pub(crate) async fn create_recurrence_series(
@@ -145,7 +140,7 @@ impl TuiStore {
             .await?;
         self.wake_after_mutation();
         let selected = self
-            .refresh_after_recurrence_mutation(series_id, selected_task_id)
+            .refresh_after_recurrence_mutation(series_id, selected_task_id, None)
             .await?;
         if self
             .recurrence_detail
@@ -176,12 +171,12 @@ impl TuiStore {
                 &self.active_workspace,
                 task_id,
                 RecurrenceOutcome::Skipped,
-                crate::undo::UndoContext::tui(format!("skip {series_ref}")),
+                crate::undo::UndoContext::tui(),
             )
             .await?;
         self.wake_after_mutation();
         let selected = self
-            .refresh_after_recurrence_mutation(series_id, Some(task_id))
+            .refresh_after_recurrence_mutation(series_id, Some(task_id), None)
             .await?;
         Ok(MutationMessage::new(
             format!("skipped {series_ref} slot {slot_on}"),
@@ -221,12 +216,10 @@ impl TuiStore {
             .stop_recurrence_series(&self.active_workspace, series_id, skip_current)
             .await?;
         self.wake_after_mutation();
-        if self.view_state.query == super::TaskQuery::Recurring {
-            self.view_state.recurring.lifecycle =
-                aven_core::query::RecurrenceSeriesLifecycleFilter::All;
-        }
+        let mut view_state = self.view_state.clone();
+        view_state.recurring.lifecycle = aven_core::query::RecurrenceSeriesLifecycleFilter::All;
         let selected = self
-            .refresh_after_recurrence_mutation(series_id, selected_task_id)
+            .refresh_after_recurrence_mutation(series_id, selected_task_id, Some(view_state))
             .await?;
         let outcome = if skip_current {
             "skipped current occurrence"
@@ -263,7 +256,7 @@ impl TuiStore {
         }
         self.wake_after_mutation();
         let selected = self
-            .refresh_after_recurrence_mutation(series_id, selected_task_id)
+            .refresh_after_recurrence_mutation(series_id, selected_task_id, None)
             .await?;
         Ok(MutationMessage::new(
             format!("{} recurring series {series_ref}", action.verb()),
@@ -271,20 +264,37 @@ impl TuiStore {
         ))
     }
 
+    /// `recurring_view_state` replaces the view state only when the Recurring view is active.
     async fn refresh_after_recurrence_mutation(
         &mut self,
         series_id: &RecurrenceSeriesId,
         selected_task_id: Option<&crate::ids::TaskId>,
+        recurring_view_state: Option<super::TaskViewState>,
     ) -> Result<Option<usize>> {
         if self.view_state.query == super::TaskQuery::Recurring {
+            let restore =
+                SelectionRestore::Identity(MainRowSelection::RecurrenceSeries(series_id.clone()));
             return Ok(self
-                .refresh_with_scope_fallback(Some(&super::MainRowSelection::RecurrenceSeries(
-                    series_id.clone(),
-                )))
+                .refresh_replacement(&restore, recurring_view_state, None)
                 .await?
                 .selected);
         }
         self.refresh(selected_task_id).await
+    }
+}
+
+impl TuiProjection {
+    pub(super) fn set_recurrence_detail(
+        &mut self,
+        series_id: &RecurrenceSeriesId,
+        detail: RecurrenceSeriesDetail,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            &detail.series.id == series_id,
+            "recurrence detail identity changed while loading"
+        );
+        self.recurrence_detail = Some(detail);
+        Ok(())
     }
 }
 

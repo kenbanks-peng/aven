@@ -3,14 +3,14 @@ use sqlx::{Row, SqliteConnection};
 
 use crate::sync::wire::{AttachmentAddPayload, AttachmentDeletePayload, ChangeWire};
 
-use super::shared::task_field_workspace_id_payload;
+use super::shared::task_operation_workspace_id_payload;
 
 pub(super) async fn add_attachment(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
     payload: &AttachmentAddPayload,
 ) -> Result<()> {
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     ensure_attachment_task_exists(conn, workspace_id.as_str(), &change.entity_id).await?;
     if let Some(row) =
         existing_attachment(conn, workspace_id.as_str(), &payload.attachment_id).await?
@@ -44,7 +44,7 @@ pub(super) async fn delete_attachment(
     change: &ChangeWire,
     payload: &AttachmentDeletePayload,
 ) -> Result<()> {
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
     let updated = sqlx::query(
         "UPDATE task_attachments
          SET deleted = 1,

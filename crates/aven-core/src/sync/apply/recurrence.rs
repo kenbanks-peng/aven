@@ -300,7 +300,7 @@ pub(super) async fn project_occurrence(
         is_slot(&schedule.rule, schedule.start_on, slot_on),
         "error recurrence-slot-off-lattice slot={slot_on}"
     );
-    verify_series_schedule(conn, &workspace_id, &series_id, &schedule).await?;
+    verify_series_lattice(conn, &workspace_id, &series_id, &schedule).await?;
     let identity = derive_occurrence_identity(&workspace_id, &series_id, &schedule, slot_on)?;
     ensure!(
         identity.task_id == task_id,
@@ -310,25 +310,27 @@ pub(super) async fn project_occurrence(
         str_payload(&change.payload, "projected_at")? == identity.occurrence_link.projected_at,
         "error recurrence-generation-conflict slot={slot_on} field=projected_at"
     );
+    let task_change_id = str_payload(&change.payload, "task_change_id")?;
+    let ids = identity.projection_ids(&task_change_id);
+    let proposal = identity.is_proposal(&task_change_id);
     ensure!(
-        str_payload(&change.payload, "task_change_id")? == identity.task_change_id,
-        "error recurrence-generation-conflict slot={slot_on} field=task_change_id"
-    );
-    ensure!(
-        str_payload(&change.payload, "occurrence_change_id")? == identity.occurrence_change_id,
+        str_payload(&change.payload, "occurrence_change_id")? == ids.occurrence_change_id
+            && change.change_id == ids.occurrence_change_id,
         "error recurrence-generation-conflict slot={slot_on} field=occurrence_change_id"
     );
     ensure!(
-        str_payload(&change.payload, "task_field_version_seed")?
-            == identity.field_version_seeds.task,
+        str_payload(&change.payload, "task_field_version_seed")? == ids.task_field_version_seed,
         "error recurrence-generation-conflict slot={slot_on} field=task_field_version_seed"
     );
+    if proposal {
+        verify_projected_proposal(conn, change, &ids).await?;
+    }
     ensure!(
         str_payload(&change.payload, "occurrence_field_version_seed")?
             == identity.field_version_seeds.occurrence,
         "error recurrence-generation-conflict slot={slot_on} field=occurrence_field_version_seed"
     );
-    ensure_task_identity(conn, &workspace_id, &task_id, &identity).await?;
+    ensure_task_identity(conn, &workspace_id, &task_id, &identity, proposal).await?;
 
     if let Some(row) = sqlx::query(
         "SELECT task_id, projection_state, outcome, resolved_at, archived_at
@@ -426,12 +428,8 @@ async fn apply_outcome(conn: &mut SqliteConnection, change: &ChangeWire) -> Resu
     let slot_on = date_payload(&change.payload, "slot_on")?;
     let outcome = RecurrenceOutcome::parse(&str_payload(&change.payload, "outcome")?)?;
     let resolved_at = str_payload(&change.payload, "resolved_at")?;
-    let stored_schedule = load_schedule(conn, &workspace_id, &series_id).await?;
-    ensure!(
-        stored_schedule == schedule(&change.payload)?,
-        "error recurrence-generation-conflict series_id={series_id} field=schedule"
-    );
-    let schedule = stored_schedule;
+    let schedule =
+        verify_series_lattice(conn, &workspace_id, &series_id, &schedule(&change.payload)?).await?;
     ensure!(
         is_slot(&schedule.rule, schedule.start_on, slot_on),
         "error recurrence-slot-off-lattice slot={slot_on}"
@@ -500,6 +498,7 @@ async fn apply_outcome(conn: &mut SqliteConnection, change: &ChangeWire) -> Resu
                 "resolved",
             )
             .await?;
+            apply_outcome_status(conn, change, &workspace_id, &task_id, outcome).await?;
             ensure_task_outcome(conn, &workspace_id, &task_id, outcome).await?;
             return Ok(());
         }
@@ -754,15 +753,33 @@ pub(super) async fn suppress_recurrence_status_conflict(
     workspace_id: &WorkspaceId,
     task_id: &TaskId,
     value: &str,
-    versions_match: bool,
 ) -> Result<bool> {
-    if versions_match || !matches!(value, "done" | "canceled") {
+    if !matches!(value, "done" | "canceled") {
         return Ok(false);
     }
+    // Terminal-versus-terminal races are outcome conflicts, and an untouched
+    // generated status has no explicit edit to preserve. The occurrence outcome owns
+    // the terminal status in both cases. An explicit non-terminal edit is an
+    // ordinary field conflict.
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM recurrence_occurrences WHERE workspace_id = ? AND task_id = ?)",
+        "SELECT EXISTS(SELECT 1 FROM recurrence_occurrences WHERE workspace_id = ? AND task_id = ?)
+         AND (
+             (SELECT status IN ('done', 'canceled') FROM tasks WHERE workspace_id = ? AND id = ?)
+             OR EXISTS(
+                 SELECT 1 FROM changes c JOIN field_versions v
+                   ON v.workspace_id = ? AND v.entity_type = 'task' AND v.entity_id = ?
+                  AND v.field = 'status'
+                  AND v.version = json_extract(c.payload, '$.task_field_version_seed')
+                 WHERE c.entity_type = 'task' AND c.entity_id = ? AND c.op_type = 'create_task'
+             )
+         )",
     )
     .bind(workspace_id)
+    .bind(task_id)
+    .bind(workspace_id)
+    .bind(task_id)
+    .bind(workspace_id)
+    .bind(task_id)
     .bind(task_id)
     .fetch_one(&mut *conn)
     .await?)
@@ -782,6 +799,61 @@ async fn update_outcome(
     sqlx::query("UPDATE recurrence_occurrences SET outcome = ?, resolved_at = ?, outcome_change_id = ?, projection_state = ?, archived_at = '' WHERE workspace_id = ? AND series_id = ? AND slot_on = ?")
         .bind(outcome.as_str()).bind(resolved_at).bind(change_id).bind(projection_state).bind(workspace_id).bind(series_id).bind(slot_on.to_string()).execute(&mut *conn).await?;
     Ok(())
+}
+
+/// Completion owns an occurrence's terminal status. Its status change is either
+/// suppressed as a field conflict or held as an ordinary conflict with an explicit
+/// non-terminal edit; either way the outcome applies that change's status here.
+async fn apply_outcome_status(
+    conn: &mut SqliteConnection,
+    change: &ChangeWire,
+    workspace_id: &WorkspaceId,
+    task_id: &TaskId,
+    outcome: RecurrenceOutcome,
+) -> Result<()> {
+    let status_change_id = str_payload(&change.payload, "task_status_change_id")?;
+    let open: bool = sqlx::query_scalar(
+        "SELECT status NOT IN ('done', 'canceled') FROM tasks WHERE workspace_id = ? AND id = ?",
+    )
+    .bind(workspace_id)
+    .bind(task_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if status_change_id.is_empty() || !open {
+        return Ok(());
+    }
+    let status = match outcome {
+        RecurrenceOutcome::Completed => "done",
+        RecurrenceOutcome::Skipped => "canceled",
+    };
+    // The status change precedes its outcome in the author's order, so it is
+    // already in accepted or local history.
+    let referenced: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM changes
+         WHERE change_id = ? AND entity_type = 'task' AND entity_id = ? AND field = 'status'
+           AND op_type IN ('set_field', 'resolve_field')
+           AND json_extract(payload, '$.value') = ?)",
+    )
+    .bind(&status_change_id)
+    .bind(task_id)
+    .bind(status)
+    .fetch_one(&mut *conn)
+    .await?;
+    ensure!(
+        referenced,
+        "error recurrence-outcome-status-reference task_id={task_id}"
+    );
+    crate::mutation::apply_field_value_in_workspace(conn, workspace_id, task_id, "status", status)
+        .await?;
+    set_entity_field_version(
+        conn,
+        workspace_id,
+        MutableEntityType::Task,
+        task_id.as_str(),
+        "status",
+        &status_change_id,
+    )
+    .await
 }
 
 async fn ensure_task_outcome(
@@ -812,7 +884,23 @@ async fn ensure_task_identity(
     workspace_id: &WorkspaceId,
     task_id: &TaskId,
     identity: &crate::recurrence::RecurrenceOccurrenceIdentity,
+    proposal: bool,
 ) -> Result<()> {
+    if proposal {
+        // A task can carry an earlier accepted proposal's baseline or explicit
+        // edits, so only its immutable creation time identifies it.
+        let created_at: String =
+            sqlx::query_scalar("SELECT created_at FROM tasks WHERE workspace_id = ? AND id = ?")
+                .bind(workspace_id)
+                .bind(task_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        ensure!(
+            created_at == identity.created_at,
+            "error recurrence-generation-conflict task_id={task_id} field=timestamps"
+        );
+        return Ok(());
+    }
     let row =
         sqlx::query("SELECT created_at, updated_at FROM tasks WHERE workspace_id = ? AND id = ?")
             .bind(workspace_id)
@@ -838,6 +926,48 @@ async fn ensure_task_identity(
             "error recurrence-generation-conflict task_id={task_id} field=field_versions"
         );
     }
+    Ok(())
+}
+
+/// A proposal-form projection cannot carry template content, so it is bound to the
+/// generated task it references: the same occurrence coordinates, seed and schedule
+/// context, and a create whose own content derives the referenced identity.
+async fn verify_projected_proposal(
+    conn: &mut SqliteConnection,
+    projection: &ChangeWire,
+    ids: &crate::recurrence::RecurrenceProposalIds,
+) -> Result<()> {
+    let payload: Option<String> = sqlx::query_scalar(
+        "SELECT payload FROM changes
+         WHERE change_id = ? AND entity_type = 'task' AND op_type = 'create_task'",
+    )
+    .bind(&ids.task_change_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let create: Value = serde_json::from_str(
+        &payload.context("error recurrence-generation-conflict field=projection-create")?,
+    )?;
+    let projected = &projection.payload;
+    ensure!(
+        [
+            "workspace_id",
+            "series_id",
+            "slot_on",
+            "task_id",
+            "occurrence_field_version_seed",
+            "frequency",
+            "interval",
+            "weekdays",
+            "timezone",
+            "start_on",
+            "available_local_time",
+            "due_policy",
+        ]
+        .iter()
+        .all(|key| create.get(*key).is_some() && create.get(*key) == projected.get(*key))
+            && crate::recurrence::derive_proposal_ids(&create)? == *ids,
+        "error recurrence-generation-conflict field=projection-create"
+    );
     Ok(())
 }
 
@@ -952,17 +1082,23 @@ async fn load_schedule(
     schedule(&payload)
 }
 
-async fn verify_series_schedule(
+/// Historical recurrence records carry the author's editable schedule context
+/// (available time and due policy). Only the slot lattice and timezone are fixed
+/// for a series, so only those must match the current series.
+async fn verify_series_lattice(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
     series_id: &RecurrenceSeriesId,
-    expected: &RecurrenceSchedule,
-) -> Result<()> {
+    recorded: &RecurrenceSchedule,
+) -> Result<RecurrenceSchedule> {
+    let stored = load_schedule(conn, workspace_id, series_id).await?;
     ensure!(
-        load_schedule(conn, workspace_id, series_id).await? == *expected,
+        stored.rule == recorded.rule
+            && stored.timezone == recorded.timezone
+            && stored.start_on == recorded.start_on,
         "error recurrence-generation-conflict series_id={series_id} field=schedule"
     );
-    Ok(())
+    Ok(stored)
 }
 async fn ensure_series_exists(
     conn: &mut SqliteConnection,
@@ -1160,7 +1296,12 @@ mod tests {
         use crate::db::field_version;
         use crate::task_fields::TaskField;
 
-        for field in [TaskField::Title, TaskField::Description, TaskField::Status] {
+        for (field, local_value) in [
+            (TaskField::Title, "local text edit"),
+            (TaskField::Description, "local text edit"),
+            (TaskField::Status, "backlog"),
+            (TaskField::Status, "canceled"),
+        ] {
             for incoming in ["done", "canceled", "active"] {
                 let (_temp, mut conn) = crate::test_support::test_conn().await;
                 let workspace = crate::test_support::ensure_default_workspace(&mut conn)
@@ -1199,11 +1340,6 @@ mod tests {
                 let base_version = field_version(&mut conn, &task_id, field.as_str())
                     .await
                     .unwrap();
-                let local_value = if field == TaskField::Status {
-                    "backlog"
-                } else {
-                    "local text edit"
-                };
                 let mut change = ChangeWire {
                     change_id: "AAAAAAAAAAAAAAA0".to_string(),
                     client_id: "local".to_string(),
@@ -1243,7 +1379,10 @@ mod tests {
                 .fetch_optional(&mut *conn)
                 .await
                 .unwrap();
-                let suppressed = field == TaskField::Status && incoming != "active";
+                // Only terminal-versus-terminal status races are left to the outcome;
+                // an explicit non-terminal status stays an ordinary conflict.
+                let suppressed =
+                    field == TaskField::Status && local_value == "canceled" && incoming != "active";
                 let expected = (!suppressed).then(|| {
                     (
                         local_value.to_string(),
@@ -1423,5 +1562,241 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(promoted, "projected");
+    }
+
+    #[tokio::test]
+    async fn proposal_projection_requires_its_bound_generated_task() {
+        let (_temp, mut conn) = crate::test_support::test_conn().await;
+        let workspace = crate::test_support::ensure_default_workspace(&mut conn)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO local_seed_source VALUES (1, x'00', 'seed')")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let created = create_recurrence_series(
+            &mut conn,
+            &workspace,
+            CreateRecurrenceSeriesParams::new(RecurrenceSeriesDraft {
+                metadata: Vec::new(),
+                title: "bound".to_string(),
+                description: String::new(),
+                project: "recurrence".to_string(),
+                priority: "none".to_string(),
+                initial_status: "todo".to_string(),
+                labels: Vec::new(),
+                schedule: RecurrenceSchedule::new(
+                    RecurrenceRule::daily(),
+                    "UTC".parse().unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
+                    None,
+                    RecurrenceDuePolicy::SameDay,
+                ),
+            })
+            .at(Utc
+                .with_ymd_and_hms(2026, 7, 20, 12, 0, 0)
+                .single()
+                .unwrap()),
+        )
+        .await
+        .unwrap();
+        let mut tx = begin_immediate(&mut conn).await.unwrap();
+        crate::operations::recurrence::reconcile_recurrence_series_in_transaction(
+            &mut tx,
+            &workspace,
+            &created.series.id,
+            Utc.with_ymd_and_hms(2026, 7, 21, 12, 0, 0)
+                .single()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let load = |slot: &'static str| {
+            sqlx::query_as::<_, (String, String, String)>(
+                "SELECT change_id, payload, created_at FROM changes
+                 WHERE op_type = 'project_recurrence_occurrence'
+                   AND json_extract(payload, '$.slot_on') = ?",
+            )
+            .bind(slot)
+        };
+        let (id, payload, created_at) = load("2026-07-21").fetch_one(&mut *conn).await.unwrap();
+        let projection = ChangeWire {
+            change_id: id,
+            client_id: "remote".into(),
+            local_seq: 1,
+            entity_type: "recurrence_series".into(),
+            entity_id: created.series.id.to_string(),
+            field: Some("projection".into()),
+            op_type: "project_recurrence_occurrence".into(),
+            payload: serde_json::from_str(&payload).unwrap(),
+            base_version: None,
+            created_at,
+            server_seq: Some(1),
+        };
+        let task_change = projection.payload["task_change_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let (other, ..) = load("2026-07-20").fetch_one(&mut *conn).await.unwrap();
+        let other: Value = serde_json::from_str(
+            &sqlx::query_scalar::<_, String>("SELECT payload FROM changes WHERE change_id = ?")
+                .bind(&other)
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        sqlx::query("DELETE FROM recurrence_occurrences WHERE slot_on = '2026-07-21'")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        // A self-consistent projection bound to another slot's generated task.
+        let mut crossed = projection.clone();
+        let ids = crate::recurrence::identity::proposal_ids_for_task_change(
+            other["task_change_id"].as_str().unwrap().to_owned(),
+        );
+        crossed.change_id = ids.occurrence_change_id.clone();
+        crossed.payload["task_change_id"] = ids.task_change_id.into();
+        crossed.payload["occurrence_change_id"] = ids.occurrence_change_id.into();
+        crossed.payload["task_field_version_seed"] = ids.task_field_version_seed.into();
+        assert!(project_occurrence(&mut conn, &crossed).await.is_err());
+        let create: String = sqlx::query_scalar("SELECT payload FROM changes WHERE change_id = ?")
+            .bind(&task_change)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM changes WHERE change_id = ?")
+            .bind(&task_change)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        assert!(project_occurrence(&mut conn, &projection).await.is_err());
+        sqlx::query(
+            "INSERT INTO changes(change_id, client_id, local_seq, entity_type, entity_id, field,
+             op_type, payload, base_version, created_at, server_seq)
+             VALUES (?, 'remote', 99, 'task', ?, NULL, 'create_task', ?, NULL, ?, NULL)",
+        )
+        .bind(&task_change)
+        .bind(projection.payload["task_id"].as_str().unwrap())
+        .bind(&create)
+        .bind(&projection.created_at)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        project_occurrence(&mut conn, &projection).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn outcome_status_requires_its_referenced_status_change() {
+        let (_temp, mut conn) = crate::test_support::test_conn().await;
+        let workspace = crate::test_support::ensure_default_workspace(&mut conn)
+            .await
+            .unwrap();
+        let created = create_recurrence_series(
+            &mut conn,
+            &workspace,
+            CreateRecurrenceSeriesParams::new(RecurrenceSeriesDraft {
+                metadata: Vec::new(),
+                title: "outcome".to_string(),
+                description: String::new(),
+                project: "recurrence".to_string(),
+                priority: "none".to_string(),
+                initial_status: "todo".to_string(),
+                labels: Vec::new(),
+                schedule: RecurrenceSchedule::new(
+                    RecurrenceRule::daily(),
+                    "UTC".parse().unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
+                    None,
+                    RecurrenceDuePolicy::SameDay,
+                ),
+            })
+            .at(Utc.with_ymd_and_hms(2026, 7, 20, 12, 0, 0).unwrap()),
+        )
+        .await
+        .unwrap();
+        let mut tx = begin_immediate(&mut conn).await.unwrap();
+        crate::operations::recurrence::resolve_recurrence_occurrence_in_transaction(
+            &mut tx,
+            &workspace,
+            &created.task.id,
+            RecurrenceOutcome::Completed,
+            "2026-07-20T13:00:00Z",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let row = sqlx::query(
+            "SELECT change_id, payload, created_at FROM changes
+             WHERE op_type = 'resolve_recurrence_occurrence'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        let outcome = ChangeWire {
+            change_id: row.get("change_id"),
+            client_id: "remote".into(),
+            local_seq: 1,
+            entity_type: "recurrence_series".into(),
+            entity_id: created.series.id.to_string(),
+            field: Some("outcome".into()),
+            op_type: "resolve_recurrence_occurrence".into(),
+            payload: serde_json::from_str(&row.get::<String, _>("payload")).unwrap(),
+            base_version: None,
+            created_at: row.get("created_at"),
+            server_seq: Some(1),
+        };
+        let status_change = outcome.payload["task_status_change_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let create: String =
+            sqlx::query_scalar("SELECT change_id FROM changes WHERE op_type = 'create_task'")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap();
+        // Rewind to an explicitly open task whose occurrence has no outcome yet.
+        sqlx::query("DELETE FROM recurrence_occurrences WHERE task_id <> ?")
+            .bind(&created.task.id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        for reference in ["AAAAAAAAAAAAAAAA", create.as_str(), status_change.as_str()] {
+            sqlx::query(
+                "UPDATE recurrence_occurrences
+                 SET outcome = '', resolved_at = '', outcome_change_id = '',
+                     projection_state = 'projected'
+                 WHERE task_id = ?",
+            )
+            .bind(&created.task.id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE tasks SET status = 'active' WHERE id = ?")
+                .bind(&created.task.id)
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            let mut change = outcome.clone();
+            change.payload["task_status_change_id"] = reference.into();
+            let result = apply_outcome(&mut conn, &change).await;
+            if reference == status_change {
+                result.unwrap();
+                let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?")
+                    .bind(&created.task.id)
+                    .fetch_one(&mut *conn)
+                    .await
+                    .unwrap();
+                assert_eq!(status, "done");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("recurrence-outcome-status-reference")
+                );
+            }
+        }
     }
 }

@@ -7,12 +7,14 @@ anyhow = "1.0"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 chrono-tz = "0.10.4"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 flate2 = "1.1"
 hex = "0.4"
 image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+hkdf = "0.13"
 oxipng = { version = "10.1", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["raw_value"] }
 sha2 = "0.11"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "macros", "migrate"] }
 tar = "0.4"
@@ -20,11 +22,12 @@ tempfile = "3.14"
 tokio = { version = "1.45", features = ["macros", "sync", "time"] }
 tracing = "0.1"
 url = "2.5"
+zeroize = "1.8"
 zstd = "0.13"
 
 [package]
 name = "aven"
-version = "0.1.44"
+version = "0.1.45"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Raine"]
@@ -33,15 +36,18 @@ repository = "https://github.com/raine/aven"
 license = "MIT"
 
 [dependencies]
-aven-core = { path = "crates/aven-core", version = "=0.1.32" }
+aven-core = { path = "crates/aven-core", version = "=0.1.33" }
 axum = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 dirs = "6.0"
+getrandom = "0.4"
 hex.workspace = true
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "server", "server-graceful", "service", "tokio"] }
 image.workspace = true
 iana-time-zone = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "gzip", "brotli", "zstd", "deflate"] }
-tower-http = { version = "0.7", features = ["compression-full", "decompression-full"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rustls = { version = "0.23", default-features = false }
 flate2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -64,20 +70,26 @@ unicode-width = "0.2"
 url.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize.workspace = true
 qrcode = { version = "0.14.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+chacha20poly1305.workspace = true
+core-foundation = "0.10"
 mac-notification-sys = "0.6"
+security-framework = { version = "3.7", default-features = false }
+security-framework-sys = { version = "2.15", default-features = false }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 notify-rust = "4"
 
 [dev-dependencies]
-aven-core = { path = "crates/aven-core", version = "=0.1.32", features = ["test-support"] }
-oxipng.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+aven-core = { path = "crates/aven-core", version = "=0.1.33", features = ["test-support"] }
+proptest = { version = "1.11", default-features = false, features = ["std"] }
 zstd.workspace = true
 
 [target.'cfg(target_os = "ios")'.dev-dependencies]
@@ -88,3 +100,19 @@ sqlx = { workspace = true, features = ["sqlite"] }
 
 [patch.crates-io]
 crossterm = { git = "https://github.com/raine/crossterm", rev = "f99eeae405e28fa8cb353a6c6e36c493e72891bd" }
+
+[profile.dev]
+opt-level = 1
+debug = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.test]
+opt-level = 0
+debug = 1
+
+[profile.test.package."*"]
+opt-level = 2
+debug = false

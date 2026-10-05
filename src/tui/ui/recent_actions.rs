@@ -203,7 +203,10 @@ fn render_action_row(
         row_style.bg.unwrap_or(BG),
     );
     let sync_marker = if action.synced { "✓" } else { "•" };
-    let summary = truncate_width(&action.summary, cells[4].width.saturating_sub(1) as usize);
+    let summary = truncate_width(
+        &crate::tui::time::action_summary_display(action),
+        cells[4].width.saturating_sub(1) as usize,
+    );
     let values = [
         Line::from(vec![Span::styled(
             format!(" {when}"),
@@ -290,7 +293,7 @@ fn render_action_detail(frame: &mut Frame, store: &TuiStore, selected: Option<us
             ),
             Span::raw(" "),
             Span::styled(
-                &action.summary,
+                crate::tui::time::action_summary_display(action),
                 Style::new().fg(FG).add_modifier(Modifier::BOLD),
             ),
         ]),
@@ -337,12 +340,9 @@ fn render_action_detail(frame: &mut Frame, store: &TuiStore, selected: Option<us
             Span::styled(field.clone(), Style::new().fg(FG_MUTED)),
         ]));
     }
-    if let Some(detail) = &action.detail {
+    if let Some(detail) = crate::tui::time::action_detail_display(action) {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            detail.clone(),
-            Style::new().fg(FG_MUTED),
-        )));
+        lines.push(Line::from(Span::styled(detail, Style::new().fg(FG_MUTED))));
     }
     let title = if action.target.deleted {
         " ACTION DETAIL × "
@@ -566,6 +566,47 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn availability_action(op: &str, summary: &str) -> RecentActionItem {
+        RecentActionItem {
+            op_type: op.to_string(),
+            field: Some("available_at".to_string()),
+            summary: summary.to_string(),
+            detail: Some("2026-09-28T06:00:00Z".to_string()),
+            ..action_item("APP")
+        }
+    }
+
+    #[test]
+    fn availability_actions_show_instant_in_local_time() {
+        let local = crate::tui::time::available_at_display("2026-09-28T06:00:00Z");
+        let resolution = availability_action(
+            op_type::RESOLVE_FIELD,
+            "resolved availability conflict to 2026-09-28T06:00:00Z: Task",
+        );
+        assert_eq!(
+            crate::tui::time::action_summary_display(&resolution),
+            format!("resolved availability conflict to {local}: Task")
+        );
+        assert_eq!(
+            crate::tui::time::action_detail_display(&resolution).as_deref(),
+            Some(local.as_str())
+        );
+        assert_eq!(
+            crate::tui::time::task_activity_summary_display(&resolution, "Task"),
+            format!("resolved availability conflict · {local}")
+        );
+
+        let change = availability_action(op_type::SET_FIELD, "changed availability: Task");
+        assert_eq!(
+            crate::tui::time::action_summary_display(&change),
+            "changed availability: Task"
+        );
+        assert_eq!(
+            crate::tui::time::task_activity_summary_display(&change, "Task"),
+            format!("changed availability · {local}")
+        );
     }
 
     #[test]

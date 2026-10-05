@@ -12,7 +12,9 @@ use super::conflict;
 use super::label::create_or_update_task_label;
 use super::payload::CreateTaskPayload;
 use super::project::ensure_project_for_payload;
-use super::shared::{str_payload, task_field_workspace_id_payload, task_id, workspace_id_payload};
+use super::shared::{
+    str_payload, task_id, task_operation_workspace_id_payload, workspace_id_payload,
+};
 
 pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
     let p = CreateTaskPayload::from_change(change)?;
@@ -67,6 +69,14 @@ pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire
     .bind(is_epic)
     .execute(&mut *conn)
     .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_workspace_history(task_id, workspace_id)
+         VALUES (?, ?)",
+    )
+    .bind(&task_id)
+    .bind(&workspace_id)
+    .execute(&mut *conn)
+    .await?;
     if let Some(labels) = change.payload.get("labels").and_then(Value::as_array) {
         for label in labels.iter().filter_map(Value::as_str) {
             create_or_update_task_label(conn, &workspace_id, &task_id, label, &change.created_at)
@@ -92,6 +102,117 @@ pub(super) async fn create_task(conn: &mut SqliteConnection, change: &ChangeWire
     Ok(())
 }
 
+/// Moves a generated task's untouched defaults from its baseline generation to an
+/// earlier accepted generation of the same occurrence. Fields, metadata and labels
+/// changed explicitly since generation keep their values; differing fields become
+/// ordinary conflicts, except completion status, which the outcome owns. Returns the
+/// labels whose presence changed, for the caller's label reconciliation.
+pub(crate) async fn adopt_generated_defaults(
+    conn: &mut SqliteConnection,
+    baseline: &ChangeWire,
+    accepted: &ChangeWire,
+) -> Result<Vec<String>> {
+    let task_id = task_id(accepted)?;
+    let workspace_id = workspace_id_payload(conn, accepted).await?;
+    let baseline_seed = str_payload(&baseline.payload, "task_field_version_seed")?;
+    let accepted_seed = str_payload(&accepted.payload, "task_field_version_seed")?;
+    // Replicas that applied the accepted generation first know its defaults by their
+    // field version, the seed, so conflicts identify that side by the seed too.
+    let mut defaults = accepted.clone();
+    defaults.change_id = accepted_seed.clone();
+    let project_id = ensure_project_for_payload(
+        conn,
+        &workspace_id,
+        &CreateTaskPayload::from_change(accepted)?.project_id,
+        accepted,
+    )
+    .await?;
+    for field in TaskField::VERSIONED {
+        let value = match field {
+            TaskField::Project => project_id.to_string(),
+            TaskField::Deleted => "0".into(),
+            _ => str_payload(&accepted.payload, field.as_str())?,
+        };
+        let current = field_version(conn, &task_id, field.as_str()).await?;
+        if current.as_deref() == Some(baseline_seed.as_str()) {
+            if field.is_project() {
+                apply_project_id_in_workspace(conn, &workspace_id, &task_id, &project_id).await?;
+            } else {
+                apply_field_value_in_workspace(
+                    conn,
+                    &workspace_id,
+                    &task_id,
+                    field.as_str(),
+                    &value,
+                )
+                .await?;
+            }
+            set_field_version(conn, &task_id, field.as_str(), &accepted_seed).await?;
+            continue;
+        }
+        if field == TaskField::Status {
+            let local: String =
+                sqlx::query_scalar("SELECT status FROM tasks WHERE workspace_id = ? AND id = ?")
+                    .bind(&workspace_id)
+                    .bind(&task_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            if super::recurrence::suppress_recurrence_status_conflict(
+                conn,
+                &workspace_id,
+                &task_id,
+                &local,
+            )
+            .await?
+            {
+                continue;
+            }
+        }
+        conflict::create_conflict(
+            conn,
+            &defaults,
+            &workspace_id,
+            field.as_str(),
+            &value,
+            current.as_deref(),
+        )
+        .await?;
+    }
+    super::metadata::adopt_generated_values(conn, &workspace_id, &task_id, baseline, &defaults)
+        .await?;
+    let labels = |change: &ChangeWire| -> Vec<String> {
+        change.payload["labels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    let (before, after) = (labels(baseline), labels(accepted));
+    let mut changed = Vec::new();
+    for label in before.iter().chain(&after) {
+        if before.contains(label) == after.contains(label) || changed.contains(label) {
+            continue;
+        }
+        if after.contains(label) {
+            create_or_update_task_label(conn, &workspace_id, &task_id, label, &accepted.created_at)
+                .await?;
+        } else {
+            sqlx::query(
+                "DELETE FROM task_labels WHERE workspace_id = ? AND task_id = ? AND label = ?",
+            )
+            .bind(&workspace_id)
+            .bind(&task_id)
+            .bind(label)
+            .execute(&mut *conn)
+            .await?;
+        }
+        changed.push(label.clone());
+    }
+    Ok(changed)
+}
+
 pub async fn set_field(
     conn: &mut SqliteConnection,
     change: &ChangeWire,
@@ -105,7 +226,20 @@ pub async fn set_field(
     let task_field = TaskField::parse_or_unknown(field)?;
     let field = task_field.as_str();
     let mut value = str_payload(&change.payload, "value")?;
-    let workspace_id = task_field_workspace_id_payload(conn, change).await?;
+    let payload_workspace_id: Option<crate::ids::WorkspaceId> = change
+        .payload
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .map(str::parse)
+        .transpose()?;
+    let workspace_id = task_operation_workspace_id_payload(conn, change).await?;
+    if task_field.is_project()
+        && payload_workspace_id
+            .as_ref()
+            .is_some_and(|payload| payload != &workspace_id)
+    {
+        return Ok(());
+    }
     let mut resolved_project_id = None;
     if task_field.is_project() {
         let project_id = str_payload(&change.payload, "project_id")?;
@@ -143,7 +277,6 @@ pub async fn set_field(
                     &workspace_id,
                     &task_id,
                     &value,
-                    false,
                 )
                 .await?
             {

@@ -322,9 +322,20 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
         }],
         Action::Refresh,
     ),
-    BuiltInCommand::implemented_global_in_detail(
+    BuiltInCommand::implemented_with_aliases(
         "sync",
-        "sync with the remote server",
+        &["config-status"],
+        "open sync status, setup and devices",
+        "General",
+        &[KeySequence {
+            codes: &[KeyCode::Char('C'), KeyCode::Char('s')],
+            label: "C s",
+        }],
+        Action::ShowSync,
+    ),
+    BuiltInCommand::implemented_global_in_detail(
+        "sync-now",
+        "sync with the server now",
         "General",
         &[KeySequence {
             codes: &[KeyCode::Char('S')],
@@ -346,13 +357,12 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
         &[],
         Action::ShowChangelog,
     ),
-    BuiltInCommand::implemented_with_aliases(
-        "pair-mobile",
-        &["pair"],
-        "pair a mobile device with this TUI",
+    BuiltInCommand::implemented(
+        "add-device",
+        "pair a phone or another computer to sync with a QR code",
         "General",
         &[],
-        Action::PairMobile,
+        Action::AddDevice,
     ),
     BuiltInCommand::implemented_for_epic_child(
         "undo",
@@ -1745,7 +1755,7 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
     ),
     BuiltInCommand::implemented_in_detail(
         "conflict-use-local",
-        "resolve with local value",
+        "resolve with current value",
         "Conflicts",
         &[KeySequence {
             codes: &[KeyCode::Char('c'), KeyCode::Char('a')],
@@ -1755,7 +1765,7 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
     ),
     BuiltInCommand::implemented_in_detail(
         "conflict-use-remote",
-        "resolve with remote value",
+        "resolve with incoming value",
         "Conflicts",
         &[KeySequence {
             codes: &[KeyCode::Char('c'), KeyCode::Char('r')],
@@ -1774,16 +1784,6 @@ pub(crate) const COMMANDS: &[BuiltInCommand] = &[
         Action::BeginManualConflictMerge,
     ),
     // Config
-    BuiltInCommand::implemented(
-        "config-status",
-        "show sync and daemon status",
-        "Config",
-        &[KeySequence {
-            codes: &[KeyCode::Char('C'), KeyCode::Char('s')],
-            label: "C s",
-        }],
-        Action::ShowConfigStatus,
-    ),
     BuiltInCommand::implemented(
         "config-show",
         "show configuration",

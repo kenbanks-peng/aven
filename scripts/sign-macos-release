@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Only system tools may handle the signing key.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: sign-macos-release BINARY" >&2
+  exit 2
+fi
+
+: "${APPLE_DEVELOPER_ID_CERT_BASE64:?missing signing certificate}"
+: "${APPLE_DEVELOPER_ID_CERT_PASSWORD:?missing signing certificate password}"
+: "${APPLE_DEVELOPER_ID_IDENTITY:?missing signing identity}"
+
+if [[ $APPLE_DEVELOPER_ID_IDENTITY != "Developer ID Application:"* ]]; then
+  echo "signing identity must be a Developer ID Application identity" >&2
+  exit 2
+fi
+
+binary=$1
+# Login Keychain ACLs use the designated requirement, which includes this identifier.
+identifier=fi.zendit.Aven
+if [[ ! -f $binary ]]; then
+  echo "binary not found: $binary" >&2
+  exit 2
+fi
+
+runner_temp=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
+work_dir=$(mktemp -d "$runner_temp/aven-signing.XXXXXX")
+certificate="$work_dir/certificate.p12"
+keychain="$work_dir/signing.keychain-db"
+keychain_password=$(openssl rand -hex 32)
+
+original_keychains=()
+restore_search_list=0
+keychain_created=0
+set_ci_search_list() {
+  if (( ${#original_keychains[@]} > 0 )); then
+    security list-keychains -d user -s "$@" "${original_keychains[@]}"
+  else
+    security list-keychains -d user -s "$@"
+  fi
+}
+cleanup() {
+  local status=$?
+  local cleanup_failed=0
+  if [[ $restore_search_list == 1 ]]; then
+    set_ci_search_list >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  if [[ $keychain_created == 1 ]]; then
+    security delete-keychain "$keychain" >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  rm -rf "$work_dir"
+  if [[ $cleanup_failed == 1 ]]; then
+    echo "failed to restore CI keychain search list or remove the signing keychain" >&2
+    exit 1
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+# Codesign can use the default search list when resolving an identity's key.
+# Only disposable GitHub runners may change it; local login settings stay intact.
+if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+  search_list=$(security list-keychains -d user)
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    keychain_path=${line#*\"}
+    keychain_path=${keychain_path%\"}
+    original_keychains+=("$keychain_path")
+  done <<<"$search_list"
+fi
+
+printf '%s' "$APPLE_DEVELOPER_ID_CERT_BASE64" | /usr/bin/base64 --decode >"$certificate"
+chmod 600 "$certificate"
+security create-keychain -p "$keychain_password" "$keychain"
+keychain_created=1
+if [[ ${GITHUB_ACTIONS:-} == true ]]; then
+  restore_search_list=1
+  set_ci_search_list "$keychain"
+fi
+security set-keychain-settings -lut 21600 "$keychain"
+security unlock-keychain -p "$keychain_password" "$keychain"
+security import "$certificate" -k "$keychain" \
+  -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" -T /usr/bin/codesign
+security set-key-partition-list -S apple-tool:,apple:,codesign: \
+  -s -k "$keychain_password" "$keychain" >/dev/null
+
+# Resolve the configured public name inside this keychain, then give codesign
+# the unambiguous certificate fingerprint instead of a display-name search.
+valid_identities=$(security find-identity -v -p codesigning "$keychain")
+printf '%s\n' "$valid_identities"
+identity_hash=''
+while IFS= read -r line; do
+  if [[ $line == *"\"$APPLE_DEVELOPER_ID_IDENTITY\"" ]]; then
+    identity_hash+=$(sed -nE 's/^[[:space:]]*[0-9]+\) ([0-9A-F]{40}) ".*"$/\1/p' <<<"$line")
+  fi
+done <<<"$valid_identities"
+if [[ ! $identity_hash =~ ^[0-9A-F]{40}$ ]]; then
+  echo "configured signing identity must match exactly one valid identity in the imported keychain" >&2
+  exit 1
+fi
+
+codesign --force --options runtime --timestamp --identifier "$identifier" \
+  --keychain "$keychain" --sign "$identity_hash" "$binary"
+codesign --verify --strict --verbose=2 "$binary"
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+"$script_dir/verify-macos-release" "$binary"

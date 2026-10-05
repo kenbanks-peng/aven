@@ -41,15 +41,16 @@ impl App {
     }
 
     fn apply_default_add_task_recurrence(&mut self) -> Result<()> {
-        let defaults = crate::commands::recurrence_schedule("daily", None, None, None, None)?;
+        let clock = crate::recurrence_input::RecurrenceClock::system();
+        let time_zone = (clock.local_time_zone)()?;
         self.authoring.apply_add_task_recurrence(
             None,
             None,
             String::new(),
             String::new(),
             "same-day".to_string(),
-            defaults.timezone.to_string(),
-            defaults.start_on.to_string(),
+            time_zone.to_string(),
+            clock.today_in(&time_zone).to_string(),
         );
         Ok(())
     }

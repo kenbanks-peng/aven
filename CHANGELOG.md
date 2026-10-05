@@ -3,6 +3,20 @@ title: Changelog
 description: Release notes for aven.
 ---
 
+## v0.1.45 (2026-10-04)
+
+- Sync is now [end-to-end encrypted](https://aventasks.dev/sync/). Devices encrypt tasks, history and images before upload, so the sync server cannot read your tasks or images. It still sees [some metadata](https://aventasks.dev/sync/#what-encryption-protects), such as IDs, sizes and timing.
+- Start a sync with a one-time setup invitation from [`aven server setup`](https://aventasks.dev/sync/#start-a-server), and [add devices](https://aventasks.dev/sync/#add-a-device) by scanning a QR code or pasting an invitation from a device that already syncs.
+- [List and remove devices](https://aventasks.dev/sync/#manage-devices) with `aven sync device` or **Manage devices** in the TUI Sync dialog. Removing a device rotates the keys for future changes.
+- [`aven sync reset`](https://aventasks.dev/sync/#rebuilding-sync) returns a database to local-only use, keeping its tasks and images.
+- Breaking: Unencrypted sync is removed, and servers refuse storage from earlier releases. Sync every device before upgrading, then follow [Upgrade from unencrypted sync](https://aventasks.dev/sync/#upgrade-from-unencrypted-sync) to move to new server storage.
+- Move tasks to a project in another workspace with [`aven move`](https://aventasks.dev/command-reference/#aven-move). Notes, labels, metadata, attachments, epic subtrees and internal relationships move with them, and refs keep their suffix.
+- On Linux, [`aven daemon install`](https://aventasks.dev/sync/#automate-sync-with-the-daemon) and the other daemon subcommands manage a systemd user service.
+- `aven server` and `aven server setup` store data in a standard location by default, so `--data` is optional.
+- Fix: The daemon restarts on the new version after `brew upgrade` instead of running the old one until Homebrew cleans it up.
+- Fix: Databases, backups, restore staging and log files are created readable only by you.
+- Fix: The TUI shows availability times in recent actions and conflicts in local time.
+
 ## v0.1.44 (2026-09-26)
 
 - Fix: Opening a [search](https://aventasks.dev/tui/#search-filter-and-order) result with `Enter` keeps the typed query as the committed search view, so closing the task detail returns to the full result list instead of a single-task view scoped to that task's reference. ([#21](https://github.com/raine/aven/pull/21))

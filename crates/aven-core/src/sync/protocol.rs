@@ -3,7 +3,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sqlx::SqliteConnection;
 
-use super::wire::{ChangeWire, SYNC_PROTOCOL_VERSION, SyncRequest, SyncResponse};
+use super::wire::{ChangeWire, SYNC_PROTOCOL_VERSION};
 use crate::db::{get_meta, set_meta};
 
 /// Ordinary releases retain this baseline, including for local-only databases.
@@ -81,6 +81,7 @@ pub(crate) async fn establish_protocol(conn: &mut SqliteConnection, protocol: u3
 /// These literal names are the released baseline, not aliases to extensible domain enums.
 const BASELINE_OPERATIONS: &[&str] = &[
     "create_task",
+    "move_tasks",
     "set_field",
     "resolve_field",
     "label_add",
@@ -119,6 +120,7 @@ const BASELINE_OPERATIONS: &[&str] = &[
     "open_recurrence_pause",
     "close_recurrence_pause",
     "stop_recurrence_series",
+    "publish_device_label",
 ];
 const STATUSES: &[&str] = &["inbox", "backlog", "todo", "active", "done", "canceled"];
 const PRIORITIES: &[&str] = &["none", "low", "medium", "high", "urgent"];
@@ -161,6 +163,13 @@ pub(crate) fn validate_operation(
             field.context("error invalid-sync-change field missing")?,
             &["key"],
         )?;
+    }
+    if op == crate::change_log::op_type::PUBLISH_DEVICE_LABEL {
+        let label = payload
+            .get("label")
+            .and_then(Value::as_str)
+            .context("error invalid-sync-change device-label")?;
+        crate::sync::device_labels::validate_device_label(label)?;
     }
     if op == "attachment_add"
         && let Some(value) = payload.get("media_type").and_then(Value::as_str)
@@ -227,7 +236,7 @@ pub(crate) fn validate_operation(
     Ok(())
 }
 
-fn required_protocol(op: &str) -> Result<u32> {
+pub(crate) fn required_protocol(op: &str) -> Result<u32> {
     #[cfg(test)]
     match op {
         "test_protocol_19" => return Ok(19),
@@ -270,33 +279,6 @@ pub(crate) fn validate_change(protocol: u32, change: &ChangeWire) -> Result<()> 
         change.field.as_deref(),
         &change.payload,
     )
-}
-
-pub fn discovery_request(protocol: u32, client_id: String) -> SyncRequest {
-    SyncRequest {
-        protocol_version: Some(protocol),
-        client_id,
-        after: i64::MAX,
-        pull_limit: Some(1),
-        changes: Vec::new(),
-    }
-}
-
-pub fn validate_discovery_response(protocol: u32, response: &SyncResponse) -> Result<()> {
-    super::wire::validate_response_at_protocol(protocol, i64::MAX, 1, &[], response)
-}
-
-pub fn protocol_mismatch(detail: &str) -> Option<(u32, u32)> {
-    let mut fields = detail
-        .trim()
-        .strip_prefix("error sync-protocol-unsupported ")?
-        .split_whitespace();
-    let client = fields.next()?.strip_prefix("client=")?.parse().ok()?;
-    let server = fields.next()?.strip_prefix("server=")?.parse().ok()?;
-    if fields.next().is_some() || client == server {
-        return None;
-    }
-    Some((client, server))
 }
 
 #[cfg(test)]

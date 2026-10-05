@@ -34,7 +34,7 @@ pub(crate) use data_safety::{
     AttachmentListArgs, AttachmentPruneArgs, AttachmentSubcommand, BackupCommand,
     BackupRestoreArgs, BackupSubcommand, DoctorArgs, ExportArgs, ImportArgs,
 };
-pub(crate) use help::parse;
+pub(crate) use help::parse_from;
 pub(crate) use recurrence::{
     RecurCommand, RecurEditArgs, RecurHistoryArgs, RecurListArgs, RecurRefArgs, RecurShowArgs,
     RecurStopArgs, RecurSubcommand,
@@ -43,12 +43,12 @@ pub(crate) use relationships::{
     DepCommand, DepSubcommand, EpicCommand, EpicSubcommand, RelatedCommand, RelatedSubcommand,
 };
 pub(crate) use sync::{
-    ConflictCommand, ConflictSubcommand, DaemonArgs, DaemonSubcommand, PairArgs, ServerArgs,
-    SyncArgs, SyncSubcommand,
+    ConflictCommand, ConflictSubcommand, DaemonArgs, DaemonSubcommand, DeviceSubcommand, JoinArgs,
+    ResetArgs, ServerArgs, ServerSetupArgs, ServerSubcommand, SetupArgs, SyncArgs, SyncSubcommand,
 };
 pub(crate) use tasks::{
-    AddArgs, BulkUpdateArgs, ContextArgs, ListArgs, NoteArgs, NoteDeleteArgs, PrimeArgs, RefArgs,
-    ShowArgs, TaskEditArgs, TaskSearchArgs, TextCommand, TextSubcommand,
+    AddArgs, BulkUpdateArgs, ContextArgs, ListArgs, MoveArgs, NoteArgs, NoteDeleteArgs, PrimeArgs,
+    RefArgs, ShowArgs, TaskEditArgs, TaskSearchArgs, TextCommand, TextSubcommand,
 };
 #[cfg(test)]
 pub(crate) use tui::TuiPriorityArg;
@@ -99,6 +99,8 @@ pub(crate) enum Commands {
     /// Edit task fields
     #[command(after_long_help = EDIT_EXAMPLES)]
     Edit(TaskEditArgs),
+    /// Move tasks to another workspace
+    Move(MoveArgs),
     /// Check for and install an aven update
     Update(SelfUpdateArgs),
     /// Append a note to a task

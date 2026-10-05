@@ -5,12 +5,12 @@ use ratatui::layout::Size;
 use crate::tui::app::App;
 use crate::tui::authoring::AddTaskStep;
 use crate::tui::overlay::{
-    AddTaskMode, MultilineIntent, OverlayOutcome, OverlayState, PickerIntent, TagComboboxIntent,
+    AddTaskMode, MultilineIntent, OverlayOutcome, OverlayState, PairingOverlay, PickerIntent,
+    TagComboboxIntent,
 };
 use crate::tui::platform::{is_editor_prefix_key, open_url_in_default_browser};
 use crate::tui::ui::{
     composer_help_scroll_cap, database_stats_scroll_cap, detail_help_scroll_cap, help_scroll_cap,
-    sync_status_scroll_cap,
 };
 
 impl App {
@@ -41,6 +41,22 @@ impl App {
                     .await
             }
             OverlayState::Changelog(state) => self.handle_changelog_key(state, key, terminal_size),
+            OverlayState::Pairing(page @ PairingOverlay::Ready(_))
+                if key.code == KeyCode::Char('c') && key.modifiers.is_empty() =>
+            {
+                self.overlay = Some(OverlayState::Pairing(page));
+                self.copy_pairing_invitation();
+            }
+            OverlayState::Pairing(PairingOverlay::Failed(_)) if key.code == KeyCode::Enter => {
+                self.retry_pairing_invitation();
+            }
+            OverlayState::Pairing(_) if key.code == KeyCode::Esc => {
+                self.leave_pairing_invitation();
+            }
+            OverlayState::Sync(state) => {
+                self.handle_sync_dialog_key(state, key, terminal_size)
+                    .await?
+            }
             OverlayState::Command { mut state } => match key.code {
                 KeyCode::Esc => {}
                 KeyCode::Enter => {
@@ -100,6 +116,14 @@ impl App {
         };
         let Some(overlay) = self.overlay.take() else {
             return Ok(());
+        };
+        let overlay = match overlay {
+            OverlayState::Sync(state) => {
+                return self
+                    .handle_sync_dialog_mouse(state, mouse, terminal_size)
+                    .await;
+            }
+            overlay => overlay,
         };
         let was_add_task_picker = matches!(
             &overlay,
@@ -247,9 +271,6 @@ impl App {
                     .and_then(|detail| detail.focused_target()),
             ),
             OverlayState::DatabaseStats { .. } => database_stats_scroll_cap(terminal_size.height),
-            OverlayState::SyncStatus(state) => {
-                sync_status_scroll_cap(&self.store.sync_status, state.details, terminal_size)
-            }
             OverlayState::Changelog(state) => {
                 crate::tui::changelog::changelog_scroll_cap(&state.markdown, terminal_size)
             }

@@ -118,6 +118,20 @@ impl App {
                 needs_redraw = true;
             }
 
+            if self.poll_invite().await? {
+                needs_redraw = true;
+            }
+
+            match self.poll_sync_operations().await {
+                Ok(true) => needs_redraw = true,
+                Ok(false) => {}
+                Err(error) => {
+                    self.set_error(format!("refresh failed: {error:#}"));
+                    needs_redraw = true;
+                }
+            }
+            self.store.sync_busy = self.sync.work_pending() || self.sync_ops.work_pending();
+
             if self.poll_gist_creation().await {
                 needs_redraw = true;
             }
@@ -380,8 +394,8 @@ impl App {
                 state,
                 OverlayViewContext {
                     sync_status: &self.store.sync_status,
-                    syncing: self.sync.work_pending(),
-                    now: time::OffsetDateTime::now_utc(),
+                    sync_activity: &self.sync_ops.activity,
+                    syncing: self.sync.started_at(),
                     status_prefix_active: self.pending_shortcut.has_add_task_status_prefix(),
                     priority_prefix_active: self.pending_shortcut.has_add_task_priority_prefix(),
                 },
@@ -477,8 +491,8 @@ impl App {
                 state,
                 OverlayViewContext {
                     sync_status: &self.store.sync_status,
-                    syncing: self.sync.work_pending(),
-                    now: time::OffsetDateTime::now_utc(),
+                    sync_activity: &self.sync_ops.activity,
+                    syncing: self.sync.started_at(),
                     status_prefix_active: self.pending_shortcut.has_add_task_status_prefix(),
                     priority_prefix_active: self.pending_shortcut.has_add_task_priority_prefix(),
                 },
@@ -627,7 +641,7 @@ impl App {
                     let index = selected
                         .unwrap_or(self.store.tasks.len())
                         .min(self.store.tasks.len());
-                    self.store.tasks.insert(index, item);
+                    self.store.insert_task(index, item);
                     return Some(index);
                 }
                 result.selected
@@ -651,7 +665,7 @@ impl App {
                     self.store.load_recurrence_series_detail(&series_id).await?;
                 }
             } else {
-                self.store.recurrence_detail = None;
+                self.store.clear_recurrence_detail();
                 self.detail.close();
                 self.overlay = None;
                 self.set_warning("recurring series is no longer visible");
@@ -707,9 +721,7 @@ impl App {
     ) {
         let selected = self.list.selected_task().unwrap_or(0);
         let stale = hydration.stale_ids().cloned().collect::<Vec<_>>();
-        self.store
-            .tasks
-            .retain(|item| !stale.contains(&item.task.id));
+        self.store.remove_tasks(&stale);
         let rebound = (!self.store.tasks.is_empty())
             .then_some(selected.min(self.store.tasks.len().saturating_sub(1)));
         self.list.select_task(rebound);
@@ -811,6 +823,8 @@ impl App {
 
     pub(super) fn has_time_based_redraw(&self) -> bool {
         self.notification.is_some()
+            || self.sync.work_pending()
+            || self.sync_ops.work_pending()
             || self.refresh_is_due()
             || self.onboarding_intro.is_some()
             || self
@@ -853,6 +867,8 @@ impl App {
             || self.preview_controller.work_pending()
             || self.attachment_controller.work_pending()
             || self.sync.work_pending()
+            || self.invite.work_pending()
+            || self.sync_ops.work_pending()
             || self.gist.work_pending()
             || self.update.work_pending()
             || self.changelog.work_pending()

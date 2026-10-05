@@ -18,7 +18,7 @@ pub const DEFAULT_LOCAL_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const DEFAULT_ORIGINAL_QUOTA_BYTES: i64 = 10 * 1024 * 1024 * 1024;
 pub const DEFAULT_PREVIEW_QUOTA_BYTES: u64 = 512 * 1024 * 1024;
 pub const DEFAULT_MAINTENANCE_LIMIT: usize = 128;
-const LEASE_TTL: Duration = Duration::from_secs(10 * 60);
+pub(crate) const LEASE_TTL: Duration = Duration::from_secs(10 * 60);
 
 pub trait Clock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
@@ -95,11 +95,9 @@ fn staging_dir(blob_dir: &Path) -> PathBuf {
 
 pub use leases::{acquire_lease, release_lease};
 pub use liveness::reconcile_liveness;
-pub(crate) use liveness::{
-    reconcile_liveness_for_hashes_in_transaction, reconcile_liveness_in_transaction,
-};
+pub(crate) use liveness::reconcile_liveness_for_hashes_in_transaction;
 #[cfg(test)]
 pub(crate) use maintenance::reconcile_missing_objects;
 pub use maintenance::{prune, prune_preview_cache};
-pub use quota::{ensure_local_capacity, release_reservation, reserve_upload};
+pub use quota::{ensure_local_capacity, release_reservation};
 pub use report::lifecycle_report;

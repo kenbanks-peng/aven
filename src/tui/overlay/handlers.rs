@@ -15,7 +15,7 @@ use super::state::ScheduleEditorMode;
 use super::state::{
     AddTaskMode, ConfirmState, HeaderMenuState, MultilineInputMode, OrderMenuState, OverlayOutcome,
     OverlayState, OverlaySubmit, PickerMode, PickerState, ScheduleEditorField, ScheduleEditorState,
-    SyncStatusAction, TagComboboxState, TextPanelState,
+    TagComboboxState, TextPanelState,
 };
 use super::tag_combobox::{
     handle_tag_combobox_key, normalize_tag_combobox_highlight, tag_combobox_matches,
@@ -117,9 +117,11 @@ fn schedule_editor_input_mut(editor: &mut ScheduleEditorState) -> Option<&mut su
     match editor.focus {
         ScheduleEditorField::Available => Some(&mut editor.available_at),
         ScheduleEditorField::Due => Some(&mut editor.due_on),
-        ScheduleEditorField::Repeat if !editor.template_locked => Some(&mut editor.repeat_rule),
+        ScheduleEditorField::Repeat if !editor.template_locked() => Some(&mut editor.repeat_rule),
         ScheduleEditorField::Time => Some(&mut editor.repeat_at),
-        ScheduleEditorField::Starts if !editor.template_locked => Some(&mut editor.repeat_start_on),
+        ScheduleEditorField::Starts if !editor.template_locked() => {
+            Some(&mut editor.repeat_start_on)
+        }
         _ => None,
     }
 }
@@ -533,39 +535,8 @@ pub(crate) fn handle_generic_overlay_key(
         OverlayState::RecurrenceHistory(state) => {
             OverlayOutcome::None(OverlayState::RecurrenceHistory(state))
         }
-        OverlayState::SyncStatus(mut state) => match key.code {
-            KeyCode::Esc | KeyCode::Enter => OverlayOutcome::Cancelled,
-            KeyCode::Char('d') => {
-                state.details = !state.details;
-                state.scroll = 0;
-                OverlayOutcome::None(OverlayState::SyncStatus(state))
-            }
-            KeyCode::Char('S') => OverlayOutcome::Submitted(OverlaySubmit::SyncStatus {
-                state,
-                action: SyncStatusAction::SyncNow,
-            }),
-            KeyCode::Char('c') => OverlayOutcome::Submitted(OverlaySubmit::SyncStatus {
-                state,
-                action: SyncStatusAction::ShowConflicts,
-            }),
-            _ => match handle_scroll_key(
-                key,
-                ScrollState {
-                    scroll: state.scroll,
-                    cap: help_scroll_cap,
-                },
-                &[],
-                0,
-            ) {
-                ScrollKeyOutcome::Continue(scroll) => {
-                    state.scroll = scroll.scroll;
-                    OverlayOutcome::None(OverlayState::SyncStatus(state))
-                }
-                ScrollKeyOutcome::Cancelled | ScrollKeyOutcome::Ignored => {
-                    OverlayOutcome::None(OverlayState::SyncStatus(state))
-                }
-            },
-        },
+        // The application routes the Sync dialog before generic handling.
+        OverlayState::Sync(state) => OverlayOutcome::None(OverlayState::Sync(state)),
         OverlayState::DatabaseStats { stats, scroll } => {
             match handle_scroll_key(
                 key,
@@ -624,9 +595,9 @@ pub(crate) fn handle_generic_overlay_key(
                 }
             }
         }
-        OverlayState::Pairing(presentation) => match key.code {
+        OverlayState::Pairing(pairing) => match key.code {
             KeyCode::Esc => OverlayOutcome::Cancelled,
-            _ => OverlayOutcome::None(OverlayState::Pairing(presentation)),
+            _ => OverlayOutcome::None(OverlayState::Pairing(pairing)),
         },
         OverlayState::Detail => OverlayOutcome::None(OverlayState::Detail),
         other => OverlayOutcome::None(other),
@@ -981,63 +952,6 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
-    }
-
-    #[test]
-    fn sync_status_toggles_details_and_resets_scroll() {
-        let outcome = handle_generic_overlay_key(
-            key(KeyCode::Char('d')),
-            OverlayState::SyncStatus(crate::tui::overlay::SyncStatusState {
-                details: false,
-                scroll: 4,
-            }),
-            8,
-        );
-
-        assert_eq!(
-            outcome,
-            OverlayOutcome::None(OverlayState::SyncStatus(
-                crate::tui::overlay::SyncStatusState {
-                    details: true,
-                    scroll: 0,
-                }
-            ))
-        );
-    }
-
-    #[test]
-    fn sync_status_emits_retained_sync_action() {
-        let state = crate::tui::overlay::SyncStatusState {
-            details: true,
-            scroll: 2,
-        };
-        let outcome = handle_generic_overlay_key(
-            key(KeyCode::Char('S')),
-            OverlayState::SyncStatus(state.clone()),
-            8,
-        );
-
-        assert_eq!(
-            outcome,
-            OverlayOutcome::Submitted(OverlaySubmit::SyncStatus {
-                state,
-                action: SyncStatusAction::SyncNow,
-            })
-        );
-    }
-
-    #[test]
-    fn sync_status_scrolls_within_cap() {
-        let outcome = handle_generic_overlay_key(
-            key(KeyCode::Char('j')),
-            OverlayState::SyncStatus(Default::default()),
-            3,
-        );
-
-        assert!(matches!(
-            outcome,
-            OverlayOutcome::None(OverlayState::SyncStatus(state)) if state.scroll == 1
-        ));
     }
 
     #[test]
@@ -1512,6 +1426,57 @@ mod tests {
             panic!("expected add task state");
         };
         assert_eq!(template.repeat_start_on.text, original_start);
+    }
+
+    fn fixed_clock(now: &str) -> crate::recurrence_input::RecurrenceClock {
+        crate::recurrence_input::RecurrenceClock {
+            now: now.parse().unwrap(),
+            local_time_zone: || "UTC".parse().map_err(Into::into),
+        }
+    }
+
+    #[test]
+    fn composer_and_schedule_editor_share_recurrence_previews() {
+        let clock = fixed_clock("2026-07-22T12:00:00Z");
+        let mut state = add_task_state(AddTaskStep::Schedule);
+        state.repeat_rule = LineEdit::new("every Monday and Thursday".to_string());
+        state.refresh_recurrence_preview_at(clock);
+        assert_eq!(
+            state.recurrence_preview,
+            ["Thu Jul 23 2026", "Mon Jul 27 2026", "Thu Jul 30 2026"]
+        );
+        let mut editor = state.schedule_editor(ScheduleEditorField::Mode);
+        editor.refresh_at(clock);
+        assert_eq!(editor.preview, state.recurrence_preview);
+
+        state.repeat_rule = LineEdit::blank();
+        state.refresh_recurrence_preview_at(clock);
+        assert!(state.recurrence_preview.is_empty());
+        assert_eq!(state.recurrence_error, None);
+    }
+
+    #[test]
+    fn template_previews_ignore_rule_and_start_text() {
+        let clock = fixed_clock("2028-01-15T12:00:00Z");
+        let mut state = add_task_state(AddTaskStep::Schedule);
+        state.template_schedule = Some(aven_core::recurrence::RecurrenceSchedule::new(
+            aven_core::recurrence::RecurrenceRule::monthly(),
+            "UTC".parse().unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2028, 1, 31).unwrap(),
+            None,
+            aven_core::recurrence::RecurrenceDuePolicy::SameDay,
+        ));
+        state.repeat_rule = LineEdit::new("daily".to_string());
+        state.repeat_start_on = LineEdit::new("2030-01-01".to_string());
+        state.refresh_recurrence_preview_at(clock);
+        assert_eq!(
+            state.recurrence_preview,
+            ["Mon Jan 31 2028", "Tue Feb 29 2028", "Fri Mar 31 2028"]
+        );
+        let mut editor = state.schedule_editor(ScheduleEditorField::Mode);
+        editor.refresh_at(clock);
+        assert!(editor.template_locked());
+        assert_eq!(editor.preview, state.recurrence_preview);
     }
 
     #[test]

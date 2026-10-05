@@ -1,40 +1,138 @@
-use std::fmt;
-use std::net::IpAddr;
-use std::path::PathBuf;
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use aven_core::db::Database;
-use aven_core::sync::ServerSyncPage;
-use aven_core::sync::wire::{BlobUploadContract, MissingBlobsRequest, MissingBlobsResponse};
-use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, State};
-use axum::http::{HeaderMap, Request, StatusCode};
-use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{post, put};
-use axum::{Json, Router};
+use aven_core::sync::seed_claim::{Secret, StorageNotEmpty};
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
-use tower_http::compression::CompressionLayer;
-use tower_http::decompression::RequestDecompressionLayer;
-use tracing::{error, info, warn};
+use tokio::sync::Semaphore;
+use tracing::{info, warn};
 
-use super::wire::{
-    SYNC_PROTOCOL_VERSION, SyncRequest, SyncResponse, validate_pushed_change,
-    validate_sync_request_envelope,
-};
-use crate::cli::ServerArgs;
+use crate::cli::{ServerArgs, ServerSetupArgs, ServerSubcommand};
 use crate::config;
 use crate::signals::shutdown_signal;
 
-#[derive(Clone)]
-struct ServerState {
-    database: Database,
-    auth_token: Option<String>,
-    blob_dir: PathBuf,
-    lifecycle_policy: aven_core::attachments::LifecyclePolicy,
+const DEFAULT_PORT: u16 = 3746;
+
+/// Setup invitations stay usable for one hour, or until a device claims storage.
+const SETUP_INVITATION_SECONDS: u64 = 3600;
+
+/// Open connections, including idle keep-alive ones. Further clients wait in
+/// the listen backlog.
+const MAX_CONNECTIONS: usize = 256;
+/// How often the server prunes unreferenced encrypted images.
+const IMAGE_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
+/// Longest a connection may take to send one request's headers.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest graceful shutdown waits for in-flight requests.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
+
+const UNPREPARED_STORAGE: &str =
+    "error server-storage-unprepared hint=\"run `aven server setup --url URL` first\"";
+const INVALID_MEMBERSHIP: &str = "error server-membership-invalid hint=\"stored device membership failed verification; restore this path from a backup or prepare a new one with `aven server setup`\"";
+const UNSUPPORTED_STORAGE: &str = "error server-storage-unsupported hint=\"this storage holds unencrypted sync history, which is no longer supported; prepare a new path with `aven server setup`\"";
+
+pub(crate) async fn run_server(args: ServerArgs, config: config::AppConfig) -> Result<()> {
+    if let Some(ServerSubcommand::Setup(setup)) = args.command {
+        return setup_server(setup).await;
+    }
+    let data = server_data_path(args.data)?;
+    serve(args.bind, args.unsafe_public_bind, &data, &config).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+fn server_data_path(flag: Option<PathBuf>) -> Result<PathBuf> {
+    match flag {
+        Some(path) => Ok(path),
+        None => config::default_server_data_path(),
+    }
+}
+
+async fn setup_server(args: ServerSetupArgs) -> Result<()> {
+    let server = super::encrypted::server_origin(&args.url)?;
+    let explicit_data = args.data.is_some();
+    let data = server_data_path(args.data)?;
+    let database = Database::open(&data).await?;
+    let mut fresh_id = [0; 32];
+    getrandom::fill(&mut fresh_id).map_err(|_| anyhow::anyhow!("error server-setup-entropy"))?;
+    let secret = Secret::generate()?;
+    let setup_id = database
+        .issue_e2ee_server_setup(
+            &secret,
+            fresh_id,
+            super::encrypted::unix_now()? + SETUP_INVITATION_SECONDS,
+        )
+        .await
+        .map_err(|error| {
+            if error.is::<StorageNotEmpty>() {
+                error.context(UNSUPPORTED_STORAGE)
+            } else {
+                error
+            }
+        })?;
+    let invitation = super::encrypted::SetupInvitation {
+        server,
+        setup_id,
+        secret,
+    };
+    let invitation = invitation.encode()?;
+    if args.invitation_only {
+        println!("{}", invitation.as_str());
+        return Ok(());
+    }
+
+    println!("================ SETUP INVITATION ================");
+    println!("{}", invitation.as_str());
+    println!("==================================================");
+    println!("Keep this invitation private. It expires in one hour.");
+    println!("Anyone with it can claim this server.");
+    println!("Run `aven sync setup` on the device whose data should start the sync.");
+    println!("Server storage: {}", data.display());
+    let data_arg = if explicit_data {
+        format!(" --data {}", data.display())
+    } else {
+        String::new()
+    };
+    println!(
+        "Then start the server: aven server{data_arg} --bind 127.0.0.1:{}",
+        suggested_port(&args.url)
+    );
+    if args.url.starts_with("http://") && !origin_is_loopback(&args.url) {
+        println!("For direct VPN HTTP, bind the server's VPN address.");
+    }
+    Ok(())
+}
+
+/// The local service port: an HTTP origin's port is direct, while HTTPS
+/// normally terminates at a reverse proxy in front of the default port.
+fn suggested_port(url: &str) -> u16 {
+    let Ok(url) = url::Url::parse(url) else {
+        return DEFAULT_PORT;
+    };
+    match url.port_or_known_default() {
+        Some(port) if url.scheme() == "http" || origin_is_loopback(url.as_str()) => port,
+        _ => DEFAULT_PORT,
+    }
+}
+
+fn origin_is_loopback(origin: &str) -> bool {
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BindScope {
     Loopback,
     Private,
@@ -42,10 +140,10 @@ enum BindScope {
 }
 
 impl BindScope {
-    fn classify(addr: IpAddr) -> Self {
-        if addr.is_loopback() {
+    fn classify(address: IpAddr) -> Self {
+        if address.is_loopback() {
             Self::Loopback
-        } else if is_private_addr(addr) {
+        } else if is_private_address(address) {
             Self::Private
         } else {
             Self::Public
@@ -53,448 +151,231 @@ impl BindScope {
     }
 }
 
-impl fmt::Display for BindScope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Loopback => f.write_str("loopback"),
-            Self::Private => f.write_str("private"),
-            Self::Public => f.write_str("public"),
-        }
-    }
-}
-
-fn is_private_addr(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(addr) => {
-            let octets = addr.octets();
-            addr.is_private()
-                || addr.is_link_local()
+fn is_private_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_link_local()
                 || octets[0] == 100 && (64..=127).contains(&octets[1])
         }
-        IpAddr::V6(addr) => addr.is_unique_local() || addr.is_unicast_link_local(),
+        IpAddr::V6(address) => address.is_unique_local() || address.is_unicast_link_local(),
     }
 }
 
-fn validate_bind_policy(
-    scope: BindScope,
+/// Serves the seed, enrollment and tail/image routers. Each operation
+/// authenticates against the stored vault. The server does not terminate TLS,
+/// so non-loopback binds need an independently protected network.
+async fn serve(
+    bind: SocketAddr,
     unsafe_public_bind: bool,
-    auth_token: Option<&str>,
+    data: &Path,
+    config: &config::AppConfig,
 ) -> Result<()> {
-    match scope {
-        BindScope::Loopback => Ok(()),
-        BindScope::Private => {
-            if auth_token.is_none() {
-                bail!(
-                    "error private-bind-requires-auth hint=\"set sync.auth_token or bind to 127.0.0.1\""
-                );
-            }
-            Ok(())
-        }
-        BindScope::Public => {
-            if !unsafe_public_bind {
-                bail!("error public-bind-requires --unsafe-public-bind");
-            }
-            if auth_token.is_none() {
-                bail!("error sync-auth-token-required hint=\"set sync.auth_token in config.yaml\"");
-            }
-            Ok(())
-        }
+    let scope = BindScope::classify(bind.ip());
+    if scope == BindScope::Public && !unsafe_public_bind {
+        bail!(
+            "error public-bind-requires hint=\"bind a loopback or private VPN address, or pass --unsafe-public-bind for a public or wildcard address\""
+        );
     }
-}
-
-pub(crate) async fn run_server(args: ServerArgs, config: config::AppConfig) -> Result<()> {
-    let scope = BindScope::classify(args.bind.ip());
-    let auth_token = config.sync_auth_token().map(str::to_string);
-    let auth_enabled = auth_token.is_some();
-    validate_bind_policy(scope, args.unsafe_public_bind, auth_token.as_deref())?;
-    let database = Database::open(&args.data).await?;
-    database.reconcile_server_attachment_parents().await?;
-    let blob_dir = config::resolve_blob_dir(&args.data, &config)?;
-    let lifecycle_policy = config.local.attachment_lifecycle.server_policy();
-    let state = ServerState {
-        database,
-        auth_token,
-        blob_dir,
-        lifecycle_policy,
-    };
-    info!(
-        bind = %args.bind,
-        scope = %scope,
-        auth_enabled,
-        "sync server starting"
-    );
-    let app = Router::new()
-        .route(
-            "/sync",
-            post(sync_handler).layer(DefaultBodyLimit::max(
-                aven_core::sync::wire::MAX_SYNC_REQUEST_BYTES,
-            )),
-        )
-        .route("/sync/blobs/missing", post(missing_blobs_handler))
-        .route(
-            "/sync/blobs/{sha256}",
-            put(put_blob_handler)
-                .get(get_blob_handler)
-                .layer(DefaultBodyLimit::max(
-                    aven_core::attachments::MAX_BLOB_BYTES,
-                )),
-        )
-        .layer(RequestDecompressionLayer::new())
-        .layer(middleware::from_fn_with_state(state.clone(), verify_auth))
-        .layer(CompressionLayer::new())
-        .with_state(state.clone());
-    let listener = TcpListener::bind(args.bind).await?;
-    let addr = listener.local_addr()?;
     if scope == BindScope::Public {
-        println!("warning public bind enabled; use TLS or a reverse proxy");
+        eprintln!(
+            "Warning: public or wildcard bind {bind} enabled without TLS. Device credentials and setup invitations are not protected by payload encryption."
+        );
     }
-    println!("listening url=http://{} scope={}", addr, scope);
-    let maintenance = spawn_blob_maintenance(state);
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
-    maintenance.abort();
-    let _ = maintenance.await;
-    result?;
-    Ok(())
+    if !data.exists() {
+        bail!(UNPREPARED_STORAGE);
+    }
+    let database = Database::open(data).await?;
+    if !database.is_e2ee_server_storage().await? {
+        if database.has_change_history().await? {
+            bail!(UNSUPPORTED_STORAGE);
+        }
+        bail!(UNPREPARED_STORAGE);
+    }
+    database
+        .verify_membership_history()
+        .await
+        .map_err(|error| error.context(INVALID_MEMBERSHIP))?;
+    let image_policy = config.local.attachment_lifecycle.server_policy();
+    let publication_policy = aven_core::sync::bootstrap_staging::PublicationPolicy {
+        workspace_quota_bytes: u64::try_from(image_policy.quota_bytes).unwrap_or(0),
+    };
+    tokio::spawn(prune_images(database.clone(), image_policy.grace));
+    let app = crate::seed_bootstrap_http::router(database.clone(), publication_policy)
+        .merge(crate::peer_enrollment_http::router(database.clone()))
+        .merge(crate::encrypted_tail_http::router(database, image_policy));
+    let listener = TcpListener::bind(bind).await?;
+    let addr = listener.local_addr()?;
+    info!(bind = %addr, "sync server starting");
+    println!("listening url=http://{addr}");
+    serve_connections(listener, app, MAX_CONNECTIONS, shutdown_signal()).await
 }
 
-fn spawn_blob_maintenance(state: ServerState) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+/// Periodically deletes the bytes of encrypted images that no live task
+/// references, in small batches so request writers are not starved.
+async fn prune_images(database: Database, grace: Duration) {
+    const BATCH: usize = 128;
+    let mut interval = tokio::time::interval(IMAGE_PRUNE_INTERVAL);
+    loop {
+        interval.tick().await;
         loop {
-            match state
-                .database
-                .maintain_server_blobs(&state.blob_dir, state.lifecycle_policy)
-                .await
-            {
-                Ok(summary) => info!(
-                    eligible = summary.eligible.count,
-                    eligible_bytes = summary.eligible.bytes,
-                    pruned = summary.pruned.count,
-                    pruned_bytes = summary.pruned.bytes,
-                    "attachment maintenance completed"
-                ),
-                Err(err) => warn!(error = %err, "attachment maintenance failed"),
+            match database.prune_encrypted_images(grace, BATCH).await {
+                Ok(pruned) if pruned == BATCH => tokio::task::yield_now().await,
+                Ok(_) => break,
+                Err(error) => {
+                    warn!(error = %error, "encrypted image prune failed");
+                    break;
+                }
             }
-            tokio::time::sleep(crate::sync::ATTACHMENT_MAINTENANCE_INTERVAL).await;
-        }
-    })
-}
-
-async fn verify_auth(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    if let Err(status) = validate_auth(&state, &headers) {
-        if status == StatusCode::UNAUTHORIZED {
-            warn!(
-                auth_enabled = state.auth_token.is_some(),
-                "sync request unauthorized"
-            );
-        }
-        return status.into_response();
-    }
-    next.run(request).await
-}
-
-async fn sync_handler(
-    State(state): State<ServerState>,
-    Json(request): Json<SyncRequest>,
-) -> Response {
-    match handle_sync(state.clone(), request).await {
-        Ok(response) => Json(response).into_response(),
-        Err(err) => {
-            if err.0.is_server_error() {
-                error!(status = %err.0, error = %err.1, "sync request failed");
-            } else {
-                warn!(status = %err.0, error = %err.1, "sync request rejected");
-            }
-            err.into_response()
         }
     }
 }
 
-async fn missing_blobs_handler(
-    State(state): State<ServerState>,
-    Json(request): Json<MissingBlobsRequest>,
-) -> Response {
-    match state
-        .database
-        .prepare_server_blob_uploads(&state.blob_dir, state.lifecycle_policy, &request.blobs)
-        .await
-    {
-        Ok(missing) => Json(MissingBlobsResponse { missing }).into_response(),
-        Err(err) if err.to_string().contains("attachment-quota-exceeded") => (
-            StatusCode::INSUFFICIENT_STORAGE,
-            "error attachment-quota-exceeded".to_string(),
-        )
-            .into_response(),
-        Err(err)
-            if err.to_string().contains("invalid-sync-change")
-                || err.to_string().contains("blob-batch")
-                || err.to_string().contains("duplicate-blob") =>
-        {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-        Err(err) => internal_error(err).into_response(),
+/// Serves HTTP/1 with bounded connections and a header deadline, so a
+/// stalled client can't hold server resources without limit.
+async fn serve_connections(
+    listener: TcpListener,
+    app: axum::Router,
+    max_connections: usize,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let connections = Arc::new(Semaphore::new(max_connections));
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let permit = tokio::select! {
+            permit = connections.clone().acquire_owned() => permit?,
+            () = &mut shutdown => break,
+        };
+        let stream = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok((stream, _)) => stream,
+                Err(_) => {
+                    // Usually descriptor exhaustion; back off instead of spinning.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            () = &mut shutdown => break,
+        };
+        let connection = hyper::server::conn::http1::Builder::new()
+            .timer(TokioTimer::new())
+            .header_read_timeout(HEADER_TIMEOUT)
+            .serve_connection(TokioIo::new(stream), TowerToHyperService::new(app.clone()));
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            let _ = connection.await;
+            drop(permit);
+        });
     }
-}
-
-async fn put_blob_handler(
-    State(state): State<ServerState>,
-    AxumPath(sha256): AxumPath<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    let Some(workspace_id) = header_text(&headers, "x-aven-workspace-id") else {
-        return (StatusCode::BAD_REQUEST, "error blob-workspace-required").into_response();
-    };
-    let Some(media_type) = header_text(&headers, "content-type") else {
-        return (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "error unsupported-attachment-media-type",
-        )
-            .into_response();
-    };
-    let contract = BlobUploadContract {
-        workspace_id: workspace_id.to_string(),
-        sha256,
-        byte_size: match required_i64_header(&headers, "x-aven-byte-size") {
-            Ok(value) => value,
-            Err(response) => return response.into_response(),
-        },
-        media_type: media_type.to_string(),
-        width: match required_i64_header(&headers, "x-aven-width") {
-            Ok(value) => value,
-            Err(response) => return response.into_response(),
-        },
-        height: match required_i64_header(&headers, "x-aven-height") {
-            Ok(value) => value,
-            Err(response) => return response.into_response(),
-        },
-    };
-    match state
-        .database
-        .store_server_blob(
-            &state.blob_dir,
-            state.lifecycle_policy,
-            &contract,
-            body.to_vec(),
-        )
-        .await
-    {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) if err.to_string().contains("attachment-quota-exceeded") => (
-            StatusCode::INSUFFICIENT_STORAGE,
-            "error attachment-quota-exceeded",
-        )
-            .into_response(),
-        Err(err)
-            if err
-                .to_string()
-                .contains("unsupported-attachment-media-type") =>
-        {
-            (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "error unsupported-attachment-media-type".to_string(),
-            )
-                .into_response()
-        }
-        Err(err)
-            if err.to_string().contains("blob-hash-or-size-mismatch")
-                || err.to_string().contains("blob-inventory-metadata-mismatch")
-                || err.to_string().contains("blob-validation-failed")
-                || err.to_string().contains("invalid-sync-change") =>
-        {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-        Err(err) => internal_error(err).into_response(),
-    }
-}
-
-async fn get_blob_handler(
-    State(state): State<ServerState>,
-    AxumPath(sha256): AxumPath<String>,
-) -> Response {
-    match state
-        .database
-        .read_server_blob(&state.blob_dir, &sha256)
-        .await
-    {
-        Ok(Some(blob)) => (
-            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-            blob.bytes,
-        )
-            .into_response(),
-        Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) if err.to_string().contains("invalid") => {
-            (StatusCode::BAD_REQUEST, err.to_string()).into_response()
-        }
-        Err(err) => internal_error(err).into_response(),
-    }
-}
-
-fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|value| value.to_str().ok())
-}
-
-fn required_i64_header(headers: &HeaderMap, name: &str) -> Result<i64, (StatusCode, String)> {
-    header_text(headers, name)
-        .and_then(|value| value.parse::<i64>().ok())
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("error blob-header-invalid name={name}"),
-            )
-        })
-}
-
-fn internal_error(err: impl std::fmt::Display) -> (StatusCode, String) {
-    error!(error = %err, "sync server request failed");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "error internal-server-error".to_string(),
-    )
-}
-
-fn server_sync_error(err: anyhow::Error) -> (StatusCode, String) {
-    let message = err.to_string();
-    if message.contains("attachment-blob") || message.contains("blob-inventory-metadata-mismatch") {
-        (StatusCode::BAD_REQUEST, message)
-    } else {
-        internal_error(err)
-    }
-}
-
-fn invalid_sync_change(err: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::BAD_REQUEST, err.to_string())
-}
-
-fn validate_auth(state: &ServerState, headers: &HeaderMap) -> std::result::Result<(), StatusCode> {
-    let Some(expected) = state.auth_token.as_deref() else {
-        return Ok(());
-    };
-    let authorized = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected);
-    if authorized {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
-    }
-}
-
-async fn handle_sync(
-    state: ServerState,
-    request: SyncRequest,
-) -> std::result::Result<SyncResponse, (StatusCode, String)> {
-    let envelope = validate_sync_request_envelope(&request).map_err(invalid_sync_change)?;
-    for change in &request.changes {
-        validate_pushed_change(change).map_err(invalid_sync_change)?;
-    }
-
-    let client_id = request.client_id.clone();
-    let after = envelope.after;
-    let pull_limit = envelope.pull_limit;
-    let change_count = envelope.push_count;
-    info!(client_id = %client_id, after, change_count, pull_limit, "sync request received");
-
-    let persisted = state
-        .database
-        .persist_server_sync_page_with_blobs(ServerSyncPage { request }, &state.blob_dir)
-        .await
-        .map_err(server_sync_error)?;
-    let cursor = persisted
-        .changes
-        .last()
-        .and_then(|change| change.server_seq)
-        .unwrap_or(after);
-    info!(
-        client_id = %client_id,
-        after,
-        incoming = change_count,
-        accepted = persisted.accepted_count,
-        returned = persisted.changes.len(),
-        cursor,
-        has_more = persisted.has_more,
-        blob_prepare_ms = persisted.blob_prepare_ms,
-        assign_ms = persisted.assign_ms,
-        pull_query_ms = persisted.pull_query_ms,
-        "sync request completed"
-    );
-    Ok(SyncResponse {
-        protocol_version: SYNC_PROTOCOL_VERSION,
-        cursor,
-        has_more: persisted.has_more,
-        push_acks: persisted.push_acks,
-        changes: persisted.changes,
-    })
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, graceful.shutdown()).await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{BindScope, suggested_port};
     use std::net::IpAddr;
 
-    use super::{BindScope, validate_bind_policy};
-
     #[test]
-    fn classifies_bind_scope() {
-        for addr in ["127.0.0.1", "::1"] {
+    fn classifies_private_and_vpn_bind_addresses() {
+        for address in ["127.0.0.1", "::1"] {
             assert_eq!(
-                BindScope::classify(addr.parse::<IpAddr>().unwrap()),
+                BindScope::classify(address.parse::<IpAddr>().unwrap()),
                 BindScope::Loopback
             );
         }
-        for addr in [
-            "10.0.0.5",
-            "172.16.0.5",
-            "192.168.1.5",
-            "100.64.0.5",
-            "100.127.255.5",
-            "169.254.1.5",
+        for address in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "100.127.255.254",
+            "169.254.1.1",
             "fd00::1",
             "fe80::1",
         ] {
             assert_eq!(
-                BindScope::classify(addr.parse::<IpAddr>().unwrap()),
+                BindScope::classify(address.parse::<IpAddr>().unwrap()),
                 BindScope::Private
             );
         }
-        for addr in ["8.8.8.8", "100.128.0.1", "1.1.1.1", "2001:4860:4860::8888"] {
+        for address in [
+            "0.0.0.0",
+            "::",
+            "1.1.1.1",
+            "100.128.0.1",
+            "2606:4700:4700::1111",
+        ] {
             assert_eq!(
-                BindScope::classify(addr.parse::<IpAddr>().unwrap()),
+                BindScope::classify(address.parse::<IpAddr>().unwrap()),
                 BindScope::Public
             );
         }
     }
 
     #[test]
-    fn bind_policy_enforces_guardrails() {
-        assert!(validate_bind_policy(BindScope::Loopback, false, None).is_ok());
-        assert!(validate_bind_policy(BindScope::Private, false, Some("secret")).is_ok());
-        assert!(validate_bind_policy(BindScope::Public, true, Some("secret")).is_ok());
+    fn setup_suggests_direct_http_port() {
+        assert_eq!(suggested_port("https://sync.example.com"), 3746);
+        assert_eq!(suggested_port("https://sync.example.com:8443"), 3746);
+        assert_eq!(suggested_port("http://127.0.0.1:4000"), 4000);
+        assert_eq!(suggested_port("http://localhost:4001"), 4001);
+        assert_eq!(suggested_port("http://[::1]:4002"), 4002);
+        assert_eq!(suggested_port("http://localhost"), 80);
+        assert_eq!(suggested_port("http://100.100.20.30:47831"), 47831);
+        assert_eq!(suggested_port("http://sync.private.example:47831"), 47831);
+    }
 
-        assert_eq!(
-            validate_bind_policy(BindScope::Private, false, None)
-                .unwrap_err()
-                .to_string(),
-            "error private-bind-requires-auth hint=\"set sync.auth_token or bind to 127.0.0.1\""
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    async fn read_to_end(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+            .await
+            .expect("the server answers or closes")
+            .unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn incomplete_headers_time_out_and_release_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "served" }));
+        let server = tokio::spawn(serve_connections(listener, app, 1, std::future::pending()));
+
+        // The only connection slot holds a request whose headers never finish.
+        let mut stalled = TcpStream::connect(address).await.unwrap();
+        stalled
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .unwrap();
+        let mut waiting = TcpStream::connect(address).await.unwrap();
+        waiting
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        // Let the server start reading the stalled headers before time moves.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut byte = [0; 1];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), waiting.read(&mut byte))
+                .await
+                .is_err(),
+            "a second connection waits while the only slot is held"
         );
-        assert_eq!(
-            validate_bind_policy(BindScope::Public, false, Some("secret"))
-                .unwrap_err()
-                .to_string(),
-            "error public-bind-requires --unsafe-public-bind"
-        );
-        assert_eq!(
-            validate_bind_policy(BindScope::Public, true, None)
-                .unwrap_err()
-                .to_string(),
-            "error sync-auth-token-required hint=\"set sync.auth_token in config.yaml\""
-        );
+
+        tokio::time::pause();
+        tokio::time::advance(HEADER_TIMEOUT).await;
+        tokio::time::resume();
+        let closed = read_to_end(&mut stalled).await;
+        assert!(!closed.contains("served"), "{closed}");
+        let response = read_to_end(&mut waiting).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.ends_with("served"), "{response}");
+        server.abort();
     }
 }

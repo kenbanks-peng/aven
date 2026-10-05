@@ -18,7 +18,7 @@ pub(crate) use json::{
 };
 pub(crate) use markdown::{gist_description, gist_filename, task_markdown};
 pub(crate) use text::{
-    print_full_task_report, print_task_dependency_summary, print_task_line_item,
+    print_full_task_report, print_task_dependency_summary, print_task_line_item, task_line_text,
 };
 
 use anyhow::Result;
@@ -43,6 +43,7 @@ pub(crate) struct TaskFullReport {
 pub(crate) async fn build_full_task_report(
     database: &Database,
     workspace: &Workspace,
+    blob_dir: &std::path::Path,
     detail: crate::query::TaskDetail,
 ) -> Result<TaskFullReport> {
     let task = &detail.item.task;
@@ -63,7 +64,7 @@ pub(crate) async fn build_full_task_report(
         });
     }
     let attachments = database
-        .attachment_read_items_by_task(&task.workspace_id, &task.id, true)
+        .attachment_read_items_by_task(blob_dir, &task.workspace_id, &task.id, true)
         .await?
         .into_iter()
         .map(attachment_metadata_json)

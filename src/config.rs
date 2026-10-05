@@ -20,12 +20,12 @@ pub use custom_commands::{
     CustomTuiCommandConfig, CustomTuiCommandExecution, CustomTuiCommandSuccess,
     CustomTuiCommandTarget,
 };
+pub(crate) use paths::expand_tilde_from;
 pub use paths::{
-    config_dir_path, config_file_path, debug_db_path_from_env, default_db_path, expand_tilde,
-    resolve_blob_dir, resolve_db_path, resolve_sync_server,
+    config_dir_path, config_file_path, debug_db_path_from_env, default_db_path,
+    default_server_data_path, expand_tilde, resolve_blob_dir, resolve_db_path,
 };
-pub(crate) use paths::{expand_tilde_from, resolve_sync_server_from};
-pub use tui::{SidebarView, TableColumn, TaskColumnConfig, TuiConfig};
+pub use tui::{SidebarView, TableColumn, TaskColumnConfig, TaskTableConfig, TuiConfig};
 
 const DEFAULT_WAKE_ADDR: &str = "127.0.0.1:47631";
 const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
@@ -254,9 +254,20 @@ pub struct SyncConfig {
     pub enabled: bool,
     #[serde(skip)]
     pub(crate) disable_override: bool,
-    pub server_url: Option<String>,
     pub interval_seconds: Option<u64>,
-    pub auth_token: Option<String>,
+    /// Terminal glyphs for device invitation QR codes.
+    #[serde(default)]
+    pub qr_glyphs: QrGlyphsConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum QrGlyphsConfig {
+    /// Sextants in terminals known to draw them, half-blocks elsewhere.
+    #[default]
+    Auto,
+    Sextant,
+    HalfBlock,
 }
 
 impl Default for SyncConfig {
@@ -264,9 +275,8 @@ impl Default for SyncConfig {
         Self {
             enabled: false,
             disable_override: false,
-            server_url: None,
             interval_seconds: Some(DEFAULT_SYNC_INTERVAL_SECONDS),
-            auth_token: None,
+            qr_glyphs: QrGlyphsConfig::Auto,
         }
     }
 }
@@ -354,14 +364,6 @@ impl AppConfig {
             .max(1)
     }
 
-    pub fn sync_auth_token(&self) -> Option<&str> {
-        self.sync
-            .auth_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-    }
-
     pub(crate) fn sync_is_allowed(&self) -> bool {
         !self.sync.disable_override
     }
@@ -372,7 +374,9 @@ impl AppConfig {
 
     pub(crate) fn ensure_sync_allowed(&self) -> Result<()> {
         if !self.sync_is_allowed() {
-            bail!("error sync-disabled hint=\"sync is disabled in this environment\"");
+            return Err(anyhow::anyhow!("error sync-disabled-by-environment").context(
+                "error sync-disabled hint=\"sync is disabled by AVEN_SYNC_DISABLED; unset it to allow sync\"",
+            ));
         }
         Ok(())
     }
@@ -380,7 +384,7 @@ impl AppConfig {
     pub(crate) fn ensure_automatic_sync_enabled(&self) -> Result<()> {
         self.ensure_sync_allowed()?;
         if !self.sync.enabled {
-            bail!("error sync-disabled hint=\"set sync.enabled = true in config.yaml\"");
+            bail!("error sync-disabled hint=\"run `aven config set sync.enabled true`\"");
         }
         Ok(())
     }
@@ -456,8 +460,7 @@ pub fn write_default_config(path: &Path) -> Result<()> {
     if path.exists() {
         bail!("error config-exists path={}", path.display());
     }
-    let mut config = AppConfig::default();
-    config.sync.auth_token = Some(String::new());
+    let config = AppConfig::default();
     config.validate()?;
     let text = serde_yaml::to_string(&config)?;
     write_config_text(path, text)

@@ -1,0 +1,3 @@
+# Public artificial test values documented in the fixture README.
+crates/aven-core/src/sync/seed_claim/fixtures/genesis.json:generic-api-key:4
+crates/aven-core/src/sync/seed_claim/fixtures/genesis.json:generic-api-key:8

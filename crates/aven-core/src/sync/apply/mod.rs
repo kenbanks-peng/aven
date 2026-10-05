@@ -1,35 +1,40 @@
 mod attachment;
 mod conflict;
 mod dependency;
+pub(crate) use dependency::apply_graph_add;
 mod epic;
 mod label;
 mod metadata;
+mod move_tasks;
+pub(crate) use move_tasks::rebuild_task_placements;
 mod note;
 mod payload;
 mod project;
 mod recurrence;
 mod related;
+pub(crate) use related::replay_related;
 mod shared;
 mod task;
 mod workspace;
 
+pub(crate) use move_tasks::replay_move_tasks;
+
 use anyhow::{Result, bail};
 use sqlx::SqliteConnection;
-use tracing::debug;
 
 use crate::change_log::op_type;
 use crate::sync::wire::{AttachmentAddPayload, AttachmentDeletePayload, ChangeWire};
 
-pub async fn apply_remote_change(conn: &mut SqliteConnection, change: &ChangeWire) -> Result<()> {
-    debug!(
-        change_id = %change.change_id,
-        op_type = %change.op_type,
-        entity_type = %change.entity_type,
-        entity_id = shared::safe_entity_id(change),
-        field = change.field.as_deref().unwrap_or(""),
-        "applying remote change"
-    );
+pub(crate) use task::adopt_generated_defaults;
+
+pub(crate) async fn apply_remote_change(
+    conn: &mut SqliteConnection,
+    change: &ChangeWire,
+) -> Result<()> {
     match change.op_type.as_str() {
+        // Device labels are read from retained encrypted history and have no
+        // task-domain materialization.
+        op_type::PUBLISH_DEVICE_LABEL => {}
         op_type::CREATE_WORKSPACE => workspace::create_workspace(conn, change).await?,
         op_type::SET_WORKSPACE_FIELD => workspace::set_workspace_field(conn, change).await?,
         op_type::CREATE_PROJECT => project::create_project(conn, change).await?,
@@ -46,6 +51,11 @@ pub async fn apply_remote_change(conn: &mut SqliteConnection, change: &ChangeWir
         op_type::SET_LABEL_NAME => label::set_label_name(conn, change).await?,
         op_type::LABEL_RESTORE => label::restore_label(conn, change).await?,
         op_type::CREATE_TASK => task::create_task(conn, change).await?,
+        op_type::MOVE_TASKS => {
+            let tasks = move_tasks::apply_move_tasks(conn, change).await?;
+            crate::undo::discard_pending_tui_undo_for_tasks(conn, &tasks.into_iter().collect())
+                .await?;
+        }
         op_type::SET_FIELD => task::set_field(conn, change, false).await?,
         op_type::RESOLVE_FIELD => task::set_field(conn, change, true).await?,
         op_type::LABEL_ADD => label::add_label(conn, change).await?,

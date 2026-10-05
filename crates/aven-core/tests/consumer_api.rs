@@ -12,10 +12,7 @@ use aven_core::choices::{TaskPriority, TaskSource, TaskStatus};
 use aven_core::db::Database;
 use aven_core::ids::{TaskId, WorkspaceId};
 use aven_core::recurrence::RecurrenceSeriesId;
-use aven_core::sync::wire::{
-    MAX_PULL_BATCH, MAX_PUSH_BATCH, SYNC_PROTOCOL_VERSION, SyncRequest, SyncResponse,
-};
-use aven_core::sync::{ApplySyncPage, ServerSyncPage};
+use aven_core::test_support::encrypted_sync::EncryptedSyncServer;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, SqliteConnection};
 
@@ -534,50 +531,9 @@ async fn task_source(path: &Path, task_id: &TaskId) -> String {
         .unwrap()
 }
 
-async fn exchange(client_path: &Path, server: &Database) {
-    exchange_bounded(client_path, server, MAX_PULL_BATCH).await;
-}
-
-async fn exchange_bounded(client_path: &Path, server: &Database, pull_limit: u32) {
+async fn exchange(client_path: &Path, server: &EncryptedSyncServer) {
     let client = Database::open(client_path).await.unwrap();
-    let page = client
-        .prepare_client_sync_page("https://sync.test".to_string(), MAX_PUSH_BATCH, pull_limit)
-        .await
-        .unwrap();
-    let server_request = SyncRequest {
-        protocol_version: page.request.protocol_version,
-        client_id: page.request.client_id.clone(),
-        after: page.request.after,
-        pull_limit: page.request.pull_limit,
-        changes: page.request.changes.clone(),
-    };
-    let persisted = server
-        .persist_server_sync_page(ServerSyncPage {
-            request: server_request,
-        })
-        .await
-        .unwrap();
-    let cursor = persisted
-        .changes
-        .last()
-        .and_then(|change| change.server_seq)
-        .unwrap_or(page.request.after);
-    client
-        .apply_client_sync_page(ApplySyncPage {
-            request: page.request,
-            response: SyncResponse {
-                protocol_version: SYNC_PROTOCOL_VERSION,
-                cursor,
-                has_more: persisted.has_more,
-                push_acks: persisted.push_acks,
-                changes: persisted.changes,
-            },
-            attempted_at: "2026-07-18T00:00:00Z".to_string(),
-            previous_pushed: 0,
-            previous_pulled: 0,
-        })
-        .await
-        .unwrap();
+    server.sync(&client).await.unwrap();
 }
 
 #[tokio::test]
@@ -585,9 +541,7 @@ async fn consumer_api_creation_sync_and_export_preserve_task_sources() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("source-first.sqlite");
     let second_path = directory.path().join("source-second.sqlite");
-    let server = Database::open(&directory.path().join("source-server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
     let first = Store::open(&first_path).await.unwrap();
     let workspace = first.resolve_workspace("default").await.unwrap();
     let created = first
@@ -702,30 +656,36 @@ async fn consumer_api_creation_sync_and_export_preserve_task_sources() {
         assert_eq!(task_source(&second_path, task_id).await, *source);
     }
 
+    // Associated replicas export data only; the synced rows keep their sources.
     let replica = Database::open(&second_path).await.unwrap();
-    let export = replica
-        .export_data("2026-09-13T00:00:00Z".to_string())
-        .await
-        .unwrap();
-    let export = serde_json::from_slice(&serde_json::to_vec(&export).unwrap()).unwrap();
-    let imported_path = directory.path().join("source-imported.sqlite");
-    let imported = Database::open(&imported_path).await.unwrap();
-    imported.validate_import_data(&export).await.unwrap();
-    imported.import_data(&export).await.unwrap();
-    drop(imported);
-    assert_eq!(task_source(&imported_path, &created.id).await, "api");
+    let export = serde_json::to_value(
+        replica
+            .export_data("2026-09-13T00:00:00Z".to_string())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let exported_source = |task_id: &TaskId| {
+        export["tables"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == task_id.to_string())
+            .unwrap()["source"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(exported_source(&created.id), "api");
     for (task_id, source) in sources {
-        assert_eq!(task_source(&imported_path, &task_id).await, source);
+        assert_eq!(exported_source(&task_id), source);
     }
 }
 
 #[tokio::test]
-async fn consumer_api_queue_report_ranks_open_tasks_and_reads_last_success() {
+async fn consumer_api_queue_report_ranks_open_tasks() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("queue-report.sqlite");
-    let server = Database::open(&directory.path().join("queue-server.sqlite"))
-        .await
-        .unwrap();
     let store = Store::open(&path).await.unwrap();
     let workspace = store.resolve_workspace("default").await.unwrap();
 
@@ -754,6 +714,23 @@ async fn consumer_api_queue_report_ranks_open_tasks_and_reads_last_success() {
             .unwrap();
     }
 
+    store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                metadata: Vec::new(),
+                title: "deferred".to_string(),
+                description: String::new(),
+                project: "Core".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::High,
+                available_at: Some("2999-01-01T00:00:00Z".to_string()),
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+
     let report = store.queue_report(&workspace.id).await.unwrap();
     assert_eq!(
         report.tasks.iter().map(|row| row.band).collect::<Vec<_>>(),
@@ -774,25 +751,11 @@ async fn consumer_api_queue_report_ranks_open_tasks_and_reads_last_success() {
             .all(|row| { row.status != TaskStatus::Done && row.status != TaskStatus::Canceled })
     );
     assert!(report.tasks.iter().all(|row| !row.display_ref.is_empty()));
-    assert_eq!(report.last_success_at, None);
 
     let missing_id = WorkspaceId::new();
     let error = store.queue_report(&missing_id).await.unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
     assert_eq!(error.message, format!("workspace not found: {missing_id}"));
-
-    drop(store);
-    exchange(&path, &server).await;
-    let reopened = Store::open(&path).await.unwrap();
-    assert_eq!(
-        reopened
-            .queue_report(&workspace.id)
-            .await
-            .unwrap()
-            .last_success_at
-            .as_deref(),
-        Some("2026-07-18T00:00:00Z")
-    );
 }
 
 #[tokio::test]
@@ -1142,9 +1105,7 @@ async fn consumer_api_completes_local_task_and_conflict_flows() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("first.sqlite");
     let second_path = directory.path().join("second.sqlite");
-    let server = Database::open(&directory.path().join("server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
 
     let first = Store::open(&first_path).await.unwrap();
     let storage = first.initialize_storage().unwrap();
@@ -1153,14 +1114,6 @@ async fn consumer_api_completes_local_task_and_conflict_flows() {
     assert!(storage.objects.is_dir());
     assert!(storage.trash.is_dir());
     assert!(storage.previews.is_dir());
-    let invalid_sync_server = match first
-        .start_sync_session("ftp://sync.test".to_string(), None, None)
-        .await
-    {
-        Ok(_) => panic!("unsupported sync server URL was accepted"),
-        Err(error) => error,
-    };
-    assert_eq!(invalid_sync_server.code, ErrorCode::Validation);
     let workspaces = first.list_workspaces().await.unwrap();
     assert_eq!(workspaces.len(), 1);
     let workspace = first.resolve_workspace("default").await.unwrap();
@@ -1695,9 +1648,7 @@ async fn consumer_recurrence_changes_survive_sync_round_trips() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("recurrence-first.sqlite");
     let second_path = directory.path().join("recurrence-second.sqlite");
-    let server = Database::open(&directory.path().join("recurrence-server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
     let first = Store::open(&first_path).await.unwrap();
     let workspace = first.resolve_workspace("default").await.unwrap();
     let created = first
@@ -1739,9 +1690,7 @@ async fn consumer_conflict_list_tolerates_recurrence_series_conflicts() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("series-conflict-first.sqlite");
     let second_path = directory.path().join("series-conflict-second.sqlite");
-    let server = Database::open(&directory.path().join("series-conflict-server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
     let first = Store::open(&first_path).await.unwrap();
     let workspace = first.resolve_workspace("default").await.unwrap();
     let series = first
@@ -1858,9 +1807,7 @@ async fn related_links_converge_across_remove_and_offline_remove_add_race() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("related-race-first.sqlite");
     let second_path = directory.path().join("related-race-second.sqlite");
-    let server = Database::open(&directory.path().join("related-race-server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
     let first = Store::open(&first_path).await.unwrap();
     let workspace = first.resolve_workspace("default").await.unwrap();
     let create = |title: &str| CreateTask {
@@ -2098,6 +2045,13 @@ async fn task_detail_is_exact_bounded_and_attachment_aware() {
     .await
     .unwrap();
     let present_sha = "1".repeat(64);
+    let present_object = aven_core::attachments::object_path(
+        &aven_core::attachments::default_blob_dir(&path),
+        &present_sha,
+    )
+    .unwrap();
+    std::fs::create_dir_all(present_object.parent().unwrap()).unwrap();
+    std::fs::write(&present_object, b"data").unwrap();
     let remote_sha = "2".repeat(64);
     for (attachment_id, sha, filename) in [
         ("ATTACHMENT000001", present_sha.as_str(), "present.png"),
@@ -2349,57 +2303,6 @@ async fn attachment_bytes_are_scoped_bounded_and_leased() {
 }
 
 #[tokio::test]
-async fn sync_facts_confirm_metadata_only_after_catch_up() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("facts.sqlite");
-    let store = Store::open(&path).await.unwrap();
-    let server = Database::open(&directory.path().join("server.sqlite"))
-        .await
-        .unwrap();
-    let before = store.sync_facts().await.unwrap();
-    assert!(!before.metadata_caught_up);
-    assert!(before.metadata_confirmed_at.is_none());
-    exchange(&path, &server).await;
-    let confirmed = store.sync_facts().await.unwrap();
-    assert_eq!(confirmed.pending_changes, 0);
-    assert!(confirmed.metadata_caught_up);
-    assert!(confirmed.metadata_confirmed_at.as_deref().unwrap() > "2026-07-18T00:00:00Z");
-    let workspace = store.resolve_workspace("default").await.unwrap();
-    store
-        .create_task(
-            &workspace.id,
-            CreateTask {
-                metadata: Vec::new(),
-                title: "Pending".into(),
-                description: String::new(),
-                project: "Core".into(),
-                status: TaskStatus::Inbox,
-                priority: TaskPriority::None,
-                available_at: None,
-                due_on: None,
-            },
-        )
-        .await
-        .unwrap();
-    let pending = store.sync_facts().await.unwrap();
-    assert!(pending.pending_changes > 0);
-    assert_eq!(
-        pending.metadata_confirmed_at,
-        confirmed.metadata_confirmed_at
-    );
-    exchange_bounded(&path, &server, 1).await;
-    let partial = store.sync_facts().await.unwrap();
-    assert_eq!(partial.pending_changes, 0);
-    assert!(!partial.metadata_caught_up);
-    assert_eq!(
-        partial.metadata_confirmed_at,
-        confirmed.metadata_confirmed_at
-    );
-    exchange(&path, &server).await;
-    assert_eq!(store.sync_facts().await.unwrap().pending_changes, 0);
-}
-
-#[tokio::test]
 async fn task_detail_activity_preserves_bounded_order_anchor_and_empty_history() {
     use aven_core::api::TaskActivityKind;
     let directory = tempfile::tempdir().unwrap();
@@ -2642,9 +2545,7 @@ async fn task_deletion_syncs_delete_and_restore() {
     let directory = tempfile::tempdir().unwrap();
     let first_path = directory.path().join("deletion-first.sqlite");
     let second_path = directory.path().join("deletion-second.sqlite");
-    let server = Database::open(&directory.path().join("deletion-server.sqlite"))
-        .await
-        .unwrap();
+    let server = EncryptedSyncServer::new().await;
     let first = Store::open(&first_path).await.unwrap();
     let workspace = first.resolve_workspace("default").await.unwrap();
     let task = first
@@ -3059,5 +2960,149 @@ async fn detail_status_receipts_preserve_recurrence_routing() {
             .unwrap()
             .status,
         TaskStatus::Done
+    );
+}
+
+#[tokio::test]
+async fn task_detail_reports_deleted_object_file_as_unavailable() {
+    use aven_core::api::{AttachmentAvailability, AttachmentRead};
+    use aven_core::attachments::{default_blob_dir, object_path, sha256_hex};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("images.sqlite");
+    let store = Store::open(&path).await.unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let database = Database::open(&path).await.unwrap();
+    database
+        .resolve_or_create_project(&workspace.id, "Images")
+        .await
+        .unwrap();
+    let task = store
+        .capture_queue_task(
+            &workspace.id,
+            TaskCapture {
+                title: "Images".into(),
+                description: String::new(),
+                project: Some("images".into()),
+                status: TaskStatus::Inbox,
+                priority: TaskPriority::None,
+                source: TaskSource::Ios,
+                due_on: None,
+                labels: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    let bytes = b"stale inventory".to_vec();
+    let sha = sha256_hex(&bytes);
+    let object = object_path(&default_blob_dir(&path), &sha).unwrap();
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::fs::write(&object, &bytes).unwrap();
+    let mut conn = SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(&path))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO task_attachments(workspace_id, attachment_id, task_id, sha256, byte_size, media_type, width, height, created_at, deleted) VALUES (?, 'ATTACHMENT000001', ?, ?, ?, 'image/png', 1, 1, '2026-09-01T10:00:00Z', 0)")
+        .bind(&workspace.id).bind(&task.task_id).bind(&sha).bind(bytes.len() as i64).execute(&mut conn).await.unwrap();
+    sqlx::query("INSERT INTO blob_inventory(sha256, byte_size, media_type, available, first_seen_at) VALUES (?, ?, 'image/png', 1, '2026-09-01T10:00:00Z')")
+        .bind(&sha).bind(bytes.len() as i64).execute(&mut conn).await.unwrap();
+    let attachment = || async {
+        store
+            .task_detail(&workspace.id, &task.task_id)
+            .await
+            .unwrap()
+            .attachments[0]
+            .clone()
+    };
+
+    let present = attachment().await;
+    assert_eq!(present.availability, AttachmentAvailability::Present);
+    assert!(present.has_blob);
+
+    std::fs::remove_file(&object).unwrap();
+    let missing = attachment().await;
+    assert_eq!(missing.availability, AttachmentAvailability::Unavailable);
+    assert!(!missing.has_blob);
+    assert_eq!(missing.attachment_id, present.attachment_id);
+    assert_eq!(missing.byte_size, present.byte_size);
+    let available: i64 = sqlx::query_scalar("SELECT available FROM blob_inventory")
+        .fetch_one(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(available, 1);
+    assert_eq!(
+        store
+            .attachment_bytes(&workspace.id, &task.task_id, "ATTACHMENT000001")
+            .await
+            .unwrap(),
+        AttachmentRead::Missing
+    );
+
+    std::fs::write(&object, &bytes).unwrap();
+    assert_eq!(
+        attachment().await.availability,
+        AttachmentAvailability::Present
+    );
+}
+
+#[tokio::test]
+async fn task_detail_activity_reports_availability_as_structured_instant() {
+    use aven_core::api::TaskActivityKind;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("activity.sqlite"))
+        .await
+        .unwrap();
+    let workspace = store.resolve_workspace("default").await.unwrap();
+    let task = store
+        .create_task(
+            &workspace.id,
+            CreateTask {
+                title: "Deferred".to_string(),
+                description: String::new(),
+                project: "ios".to_string(),
+                status: TaskStatus::Todo,
+                priority: TaskPriority::None,
+                metadata: Vec::new(),
+                available_at: None,
+                due_on: None,
+            },
+        )
+        .await
+        .unwrap();
+    for available_at in [
+        OptionalDateUpdate::Set("2026-07-20T06:00:00Z".to_string()),
+        OptionalDateUpdate::Clear,
+    ] {
+        store
+            .update_task(
+                &workspace.id,
+                &task.id,
+                UpdateTask {
+                    available_at,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let detail = store.task_detail(&workspace.id, &task.id).await.unwrap();
+    let availability = detail
+        .activity
+        .iter()
+        .filter(|action| action.kind == TaskActivityKind::Availability)
+        .map(|action| (action.summary.as_str(), action.available_at.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        availability,
+        [
+            ("cleared availability", None),
+            ("changed availability", Some("2026-07-20T06:00:00Z")),
+        ]
+    );
+    assert!(
+        detail
+            .activity
+            .iter()
+            .filter(|action| action.kind != TaskActivityKind::Availability)
+            .all(|action| action.available_at.is_none())
     );
 }

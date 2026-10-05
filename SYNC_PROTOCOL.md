@@ -1,9 +1,79 @@
 # Sync protocol maintenance
 
 Read this before changing synchronized operations, their interpretation, or the
-protocol constants. [ARCHITECTURE.md](ARCHITECTURE.md) maps the implementation
-owners. This document describes the compatibility contract and the evidence
+protocol constants. Core sync implementation lives in
+`crates/aven-core/src/sync/`; application sync and HTTP integration live under
+`src/`. This document describes the compatibility contract and the evidence
 required to change it.
+
+Scope: this workspace ships only end-to-end encrypted sync. Its encrypted tail
+validates retained and new operations against replica protocol 18 through the
+operation contracts and persisted replica behavior below, so those sections
+govern every shared operation change. Merge tests sync replicas in process
+through the encrypted tail with `aven-core`'s `test-support` feature. Sync has
+no shared-data protocol discovery handshake, server-side protocol admission, or
+release protocol markers. Tail transport capabilities are negotiated separately
+as described below. Changing an encrypted operation contract also requires an encrypted
+tail codec change and its own security review.
+
+## Workspace moves
+
+Protocol 18 includes `move_tasks`. A move is one atomic snapshot operation for
+at most 256 sorted task IDs, with the existing 64 KiB operation payload limit.
+It relocates task-owned data and internal relationships to an existing workspace
+and project. Recurring tasks, unresolved conflicts and live relationships
+crossing the move boundary prevent a local move.
+
+The authenticated Move projection exposes source and destination workspace IDs
+and sorted task IDs to the server, but not task contents. Task IDs are packed as
+80-bit values so the largest projection fits the 4 KiB envelope limit. The
+recipient compares the projection with the decrypted payload before applying it.
+Image object and reference identities remain unchanged; placement, scopes and
+parent liveness accounting follow accepted moves. Historical image operations
+route to current placement while upload tickets retain their authored scope.
+
+Replicas replay placement-sensitive commands in accepted order, then pending
+order. Metadata snapshots pair values (including removal tombstones) with their
+versions. Dependency and epic reduction share this order and use the exact
+published graph baseline; incorporated bootstrap history is not reapplied.
+Local JSON import rebuilds placement history without replaying domain snapshots.
+Encrypted replicas retain the existing data-only export/import restrictions.
+
+This operation is part of the initial encrypted-sync contract, not a protocol-19
+extension. All supported clients, including the mobile core, must read it before
+sharing a vault with a producer. Subsequent changes to this contract follow the
+reader-first publication rules below.
+
+## Encrypted tail transport capabilities
+
+Transport batching does not change replicated operation meanings or protocol 18.
+Clients lazily send authenticated `Features` to `/e2ee/tail/v1` before preparing
+multi-record pushes. A successful reply advertises the batch record and decoded
+byte ceilings. A legacy server's `encrypted-tail-malformed` refusal to this
+specific probe selects singleton appends; other errors do not authorize fallback.
+Old `Append`, `Lookup`, and `Pull` messages retain their encodings and semantics.
+
+`/e2ee/tail/batch/v1` accepts `Append` and mapping-only `Resolve`. Its envelope
+uses canonical padded base64 for fixed identifiers and commitments. Appends are
+bounded by 128 records, 1 MiB of decoded records, and 1,414,488 serialized request
+bytes. Resolve requests and batch replies are limited to 256 KiB. Image references
+with upload tickets remain singleton appends. The endpoints share admission
+limits; the batch body ceiling is below the image endpoint's existing ceiling.
+
+A batch inserts all records and side effects in one server transaction. Duplicate
+IDs within a request, prefix collisions, invalid records, or any already-accepted
+ID refuse the entire batch without writes. The latter returns
+`encrypted-tail-batch-known` and requires reconciliation; singleton append remains
+idempotent and returns an existing mapping for an accepted ID.
+
+The local outbox durably freezes an ordered group before dispatch. New pending
+work never joins a surviving group. Acceptance and removal of an outbox row
+commit together. After interruption or an uncertain outcome, every remaining ID
+must be resolved before any resend or generation replacement. Found mappings
+must pass the existing canonical same-ID comparison, including fetching alternate
+ciphertext when needed. Absence is not persisted as permission to resend after a
+restart. Only an authored pre-dispatch admission-busy refusal can be retried
+without this reconciliation barrier.
 
 ## What a protocol version means
 
@@ -63,24 +133,11 @@ For example, a future baseline of 18 and latest version of 20 would promise real
 support for 18, 19, and 20. Changing the constants alone cannot fulfill that
 promise.
 
-### Request and response envelopes
-
-`SyncRequest.protocol_version` carries the selected protocol as a JSON integer.
-It is optional in the Rust decoding type so missing versions can be rejected;
-absence does not negotiate a default. `SyncResponse.protocol_version` identifies
-the response contract. Server admission checks exact equality with the active
-server protocol on every metadata request.
+### Server sequences
 
 Across acknowledgements, pulled changes, and retained local history, one server
 sequence belongs to only one operation identity. An unexpected collision must
 reject the page transactionally, not silently omit a history row.
-
-A session discovers compatibility with an authenticated empty `/sync` request
-using a maximal cursor, before ordinary metadata or attachment transfer. A
-supported version learned from a mismatch requires an exact confirmation probe.
-Discovery is advisory: its cursor is not applied and it does not establish local
-replica behavior. A server cutover after discovery must still reject a stale
-metadata request without accepting any of its changes.
 
 ### Operation contracts
 
@@ -109,6 +166,66 @@ It is not a substitute for them. A changed meaning requires a new operation
 identity or an explicit revision with retained historical decoding. Existing
 pending rows must keep their IDs, payloads, timestamps, order, and canonical
 meaning when uploaded through a newer request envelope.
+
+#### Recurrence generation forms
+
+Generated `create_task` and `project_recurrence_occurrence` records have two
+derivation forms under the same operation names and payload keys. Validators accept
+either form when all of a record's change IDs and seed belong to it, and reject
+mixtures.
+
+- Occurrence form: change IDs and the task field-version seed derive from
+  workspace, series and slot date only. Local-only databases produce it, as did
+  earlier encrypted-sync builds. Two such records with the same ID and unequal
+  content remain a same-ID integrity failure and are never rewritten.
+- Proposal form: databases with a seed opt-in or peer enrollment produce it. The
+  create's change ID derives from a SHA-256 digest over a JSON array of its
+  workspace, series, slot, title, description, project, initial status, priority,
+  labels (strictly ascending), metadata (`[field_id, key, value]`, strictly
+  ascending by key) and editable schedule values. The projection change ID and
+  field-version seed derive from that create ID. A projection carries no template
+  content, so apply binds it to the referenced create's coordinates, seed and
+  schedule context.
+
+A task can therefore have several accepted generations. The first in accepted
+order supplies untouched defaults; explicit edits based on another generation's
+seed follow ordinary conflict rules, and every replica identifies the accepted
+defaults in such a conflict by their field-version seed. Projection and outcome apply compare only the
+series lattice and timezone with the current series, because available time and
+due policy are the author's historical context.
+
+An occurrence outcome owns its task's terminal status. A completion or skip that
+races an explicit non-terminal status edit applies the terminal status and keeps
+the edit as an ordinary status conflict on every replica; such a conflict resolves
+only to the terminal status. When an outcome finds its task still open, it sets
+the terminal status only if its `task_status_change_id` names an existing status
+change of the same task with that terminal value. Outcomes for an already
+terminal task, and outcome conflict resolutions (whose reference may be empty),
+do not use the reference. Terminal-versus-terminal races remain outcome
+conflicts without a duplicate status conflict.
+
+#### Device label records
+
+`publish_device_label` is encrypted display metadata in the ordinary tail, not
+membership or authorization data. It has `entity_type=device`, a lowercase
+64-character device ID as `entity_id`, no field or base version, and exactly one
+payload key: `{"label":"..."}`. The label is 1–64 Unicode scalar values, at
+most 256 UTF-8 bytes, and contains no control characters. Its server projection
+is empty, so the server stores and orders the encrypted record without learning
+the label.
+
+A desktop publishes one record for its own device ID before its first ordinary
+tail drain after setup or join. An already-enrolled desktop does the same on its
+next sync if its record is absent. The value comes from the macOS Computer Name
+or Linux hostname, is automatic, and is not edited or republished. iOS uses the
+same record with `iPhone` or `iPad` after enrollment. Missing records remain
+valid for older devices.
+
+Effective labels are read from retained encrypted history and paired only with
+the currently verified membership. Removing a device therefore removes its
+label from every device-management view as soon as membership refreshes; the
+historical encrypted record remains for deterministic replay. Labels never
+select a device or affect admission, removal, credentials, or key rotation.
 
 ### Persisted replica behavior
 
@@ -155,20 +272,20 @@ an explicit policy decision; do not silently relax baseline import validation.
    Decide how any new shared data interacts with baseline-only JSON import and
    local-only databases before shipping it. Do not invent implicit promotion,
    down-conversion, or selective upload.
-5. **Advance the active version and release metadata.** Keep the literal
-   `SYNC_PROTOCOL_VERSION` declaration compatible with release-workflow
-   extraction. The `sync-protocol-N` asset identifies the active server protocol;
-   `sync-client-baseline-N` identifies cumulative client support. Releases without
-   a baseline marker retain exact-protocol meaning. Keep CLI/TUI update checks,
-   pairing, typed errors, and status behavior aligned with those meanings.
+5. **Advance the active version.** Keep typed errors and status behavior aligned
+   with the new meaning, and update the encrypted tail's accepted operation set
+   in `encrypted_tail/domain.rs` deliberately.
 6. **Prove the actual feature in both modes.** Use the checks below, including a
    real released-server process. Test-only future operation names demonstrate the
    mechanism, not compatibility of a newly implemented production feature.
-7. **Coordinate publication.** Before publishing the protocol-changing server,
-   compatible readers must be publicly available on every supported platform.
-   Warn operators that the server cutover can pause older clients' sync while
-   retaining their local work. External mobile-store availability must be checked
-   separately from this workspace's builds.
+7. **Coordinate publication.** The encrypted server cannot see or gate
+   operations, and a client stops syncing at the first record it cannot
+   interpret. Ship in two releases: first a release on every supported platform
+   that reads the new operation or field but does not produce it, then a later
+   release that produces it. External mobile-store availability of the reading
+   release must be checked separately from this workspace's builds. Warn users
+   that devices left on older releases pause sync, retaining their local work,
+   until updated.
 
 The baseline vocabulary test currently compares all production operation names
 and domain values with the frozen protocol-18 contract. At the first extension,
@@ -197,13 +314,12 @@ For a protocol addition, retain evidence for:
   it; acknowledgements and local application remain transactional.
 - Historical replay preserving materialized state, conflict behavior, and
   deterministic identities across the supported contracts.
-- Import, standalone behavior, release-marker interpretation, and host surfaces
-  affected by the new contract.
+- Import, standalone behavior, and host surfaces that use the changed operations.
 
-Start with `cargo test -p aven-core --lib sync::`, then choose focused CLI sync,
-conflict, status, updater, recurrence, and consumer tests for the affected paths.
-Follow the validation guidance in `ARCHITECTURE.md`; automated tests do not replace
-an unchanged released-server interoperability exercise.
+Start with `just test-lib aven-core sync::`, then choose focused CLI sync,
+conflict, recurrence, encrypted tail, and consumer tests for the affected paths.
+Follow the validation tiers in [TESTING.md](TESTING.md); automated tests do not
+replace an interoperability exercise against a released server.
 
 `crates/aven-core/tests/fixtures/sync-protocol-18.json` is a frozen historical
 oracle from unchanged `v0.1.40`, revision

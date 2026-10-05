@@ -1,270 +1,378 @@
 ---
 title: Sync across devices
-description: Synchronize Aven data, resolve conflicts, and diagnose sync state.
+description: Synchronize Aven data with end-to-end encryption, resolve conflicts, and diagnose sync state.
 ---
 
-Sync keeps the same aven tasks available across laptops, agents, and other devices. Each client writes to its own local SQLite database first, so task capture and updates stay fast and offline-friendly.
+Sync keeps the same aven tasks available across laptops, agents, and other devices. Each client writes to its own local SQLite database first, so task capture and updates stay fast and work offline.
 
-When you run `aven sync`, local changes are pushed to a self-hosted server and changes from other clients are pulled back down. The server stores the shared operation log; each local database applies that log to its own task store.
+Sync is end-to-end encrypted. Devices encrypt tasks, history, and images before
+upload, so the self-hosted server cannot read your tasks or images. One
+device starts the sync from its database, and each other device joins with an
+invitation from a device that already syncs.
 
-Use [Configuration](/configuration/) for `sync.*` and `daemon.*` settings. See
-[Back up and restore](/backups/) when you need to preserve, move, or recover
-local data.
-
-## App and server compatibility
-
-Updating an app keeps it working with your existing server while that server
-remains within Aven's maintained support baseline. Some new shared features may
-require updating the server first. Updating the server can require updating
-other apps.
-
-Aven checks compatibility before sending changes or transferring attachments.
-Each database remembers its established server behavior, including while
-offline. App updates and temporarily disabling sync do not change that behavior.
-Ordinary offline edits stay available; a shared feature that needs a newer server
-is rejected without saving a partial change. Local-only search and interface
-features do not require a server update.
-
-### Local-only databases
-
-Databases that have never connected to a server use the maintained baseline,
-even if you intend to keep them permanently local-only. They do not automatically
-enable newer shared behavior merely because sync is unconfigured or disabled.
-All currently shipped shared features are available at the baseline. This policy
-keeps later server attachment safe without a separate standalone-mode switch.
-
-### Updating a server
-
-Before updating your server, check the release notes and update the apps on your
-other devices. A server exposes one active protocol, not a choice of older
-protocols. A compatibility-changing server update is a deliberate cutover:
-unsupported apps pause sync and retain their local work until updated. Compatible
-apps select the new server protocol automatically, preserving pending changes.
-
-Protocol 18 is the maintained baseline. Aven does not automatically retire it
-when another client generation ships. A support-policy change requires an
-announced migration path.
-
-Sync compatibility does not make a database downgrade safe. Keep backups before
-updating. Aven also cannot reliably detect a server database replaced or restored
-behind a client's cursor; restoring server history requires separate recovery
-planning.
+The sync server is not a backup. Only your devices hold the decryption keys, so
+if every device is lost, the server cannot restore your data. Keep regular
+[backups](/backups/). See [what encryption protects](#what-encryption-protects)
+for what the server can still see.
 
 ## Start a server
 
+The sync server is a single `aven server` process that you host yourself on a
+machine all your devices can reach. The recommended setup is a private network
+such as Tailscale or WireGuard: devices connect to the server's VPN address,
+and nothing is exposed to the internet. To reach the server over the public
+internet instead, put it behind a TLS reverse proxy and use its HTTPS URL.
+
+Prepare server storage once, giving the URL devices will use to reach it, then
+serve it:
+
 ```sh
-aven server --bind 127.0.0.1:0 --data /tmp/aven-server.sqlite
+aven server setup --url http://100.100.20.30:3746
+aven server --bind 100.100.20.30:3746
 ```
 
-The server stores sync data in the SQLite file passed with `--data` and prints a listening URL:
+Storage goes in `~/.local/state/aven/server/sync-server.sqlite`, or in the
+directory systemd provides when the service declares `StateDirectory=`. Setup
+prints the path it used. To keep it elsewhere, pass the same `--data <path>` to
+both commands.
 
-```txt
-listening url=http://127.0.0.1:<port> scope=loopback
+`server setup` prints a setup invitation for the next step. Anyone with it can
+claim the server, so use it only on the device whose data should start the
+sync. It expires after one hour; run `server setup` again for a new one.
+
+See [`aven server`](/command-reference/#aven-server) for URL rules and bind
+options.
+
+### Use a public TLS proxy
+
+The server does not terminate TLS. Give `server setup` the public HTTPS origin
+with no path prefix, then route that origin to the server's loopback address.
+Anyone can send requests to a public server and keep it busy, so prefer a VPN;
+if you do expose it, rate-limit at the proxy. A Caddy proxy needs only the
+upstream:
+
+```caddyfile
+sync.example.com {
+    reverse_proxy 127.0.0.1:3746
+}
 ```
 
-Network requirements depend on the bind address:
+For nginx, allow encrypted image chunks and bootstrap batches up to 4 MiB plus
+framing. Keep send and read
+timeouts longer than Aven's 35-second request deadline; the connection timeout
+can stay shorter:
 
-| Scope | Use | Requirements |
-| --- | --- | --- |
-| Loopback | Local testing | Authentication optional |
-| Private address | LAN, VPN, or another private network | `sync.auth_token` on the server and matching client tokens |
-| Public address | Internet-facing service | `--unsafe-public-bind`, `sync.auth_token`, and TLS or a reverse proxy |
+```nginx
+location / {
+    client_max_body_size 8m;
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 40s;
+    proxy_read_timeout 40s;
+    proxy_pass http://127.0.0.1:3746;
+}
+```
 
-:::caution[Network security]
-Plain HTTP is intended for loopback, trusted VPNs, private networks, or external TLS termination. Sync server URLs must use `http` or `https`, include a host, and omit username, password, query, and fragment parts.
+Default Caddy body and timeout settings need no changes.
+
+### Run the server as a service
+
+Once sync works, run `aven server` under your operating system's service
+manager so it starts at boot. On Linux, a systemd user service works; save this
+as `~/.config/systemd/user/aven-server.service`, adjusting the binary path and
+bind address:
+
+```ini
+[Unit]
+Description=Aven sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/aven server --bind 100.100.20.30:3746
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then enable it, and enable lingering so it keeps running after you log out:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now aven-server
+loginctl enable-linger
+journalctl --user -u aven-server -f
+```
+
+Binding to a VPN address such as a Tailscale IP requires the VPN interface to
+be up; if the server fails at boot, systemd retries it every five seconds.
+
+## Set up sync from one device
+
+On the device whose data should start the sync, copy the setup invitation and
+run:
+
+```sh
+aven sync setup
+```
+
+On macOS, interactive setup automatically uses a valid `aven-setup:` invitation
+from the clipboard. Otherwise, paste the invitation at the prompt. Setup shows
+the server and what this database will publish, then asks for confirmation.
+Every other device starts from this data.
+
+In the TUI, open the Sync dialog with `:sync`, `C s`, or a click on the sync
+indicator in the header, and choose **Set up sync**.
+
+If setup is interrupted, run the same command again, or choose **Resume
+setup**, to continue. Resume with an invitation from the same server storage.
+If that storage or its invitation is permanently gone, abandon the unfinished
+setup while keeping local data, then start again:
+
+```sh
+aven sync reset --force
+aven sync setup
+```
+
+## Add a device
+
+On a device that already syncs, create an invitation and leave the command
+running:
+
+```sh
+aven sync invite
+```
+
+It prints the invitation and shows it as a QR code. In the TUI, choose **Add
+device** in the Sync dialog.
+
+:::caution[Keep invitations private]
+Anyone with the invitation can read all synced data and manage devices. It
+expires after ten minutes. To cancel it early, press Ctrl-C or run
+`aven sync invite --cancel`.
 :::
 
-## Set up sync over a VPN
-
-Aven does not create or manage the VPN. The server and every client must already be connected to the same private network. This example uses `10.0.0.1` as the server's VPN address.
-
-First, generate a shared authentication token:
+On the new device, join from an empty database and paste the invitation:
 
 ```sh
-openssl rand -hex 32
+aven sync join
 ```
 
-Store the generated value in `~/.config/aven/config.yaml` on the server:
+Confirm the server, and your tasks download, followed by their images. In the
+TUI, choose **Join existing sync**. If joining is interrupted, run
+`aven sync join` again, or choose **Resume joining**.
 
-```yaml
-sync:
-  auth_token: "<generated-token>"
-```
-
-Start the server on its VPN address, not its loopback address:
+A database that already has tasks cannot join, because Aven cannot merge
+existing local data into sync. Join with a new database path instead, and use
+that path from then on:
 
 ```sh
-mkdir -p ~/.local/state/aven
-aven server \
-  --bind 10.0.0.1:3746 \
-  --data ~/.local/state/aven/sync-server.sqlite
+aven --db /path/to/new.sqlite sync join
 ```
-
-Run this command under your operating system's service manager after confirming that sync works. The service must start after the VPN interface is available.
-
-On each client, store the same token and use the server's VPN address:
-
-```yaml
-sync:
-  enabled: true
-  server_url: "http://10.0.0.1:3746"
-  auth_token: "<generated-token>"
-  interval_seconds: 30
-```
-
-Verify the network path before testing Aven:
-
-```sh
-ping 10.0.0.1
-nc -vz 10.0.0.1 3746
-aven sync
-```
-
-## Pair a mobile device
-
-Configure sync with a server your iPhone can reach and a shared `sync.auth_token`.
-If using a VPN, connect both devices first.
-
-On your desktop, run:
-
-```sh
-aven sync pair
-```
-
-Scan the QR code during Aven iOS onboarding. In the TUI, you can also open the
-command panel with `:` and choose `:pair-mobile`.
-
-To pair without a camera, run `aven sync pair --copy` on your local desktop,
-transfer the clipboard to your iPhone, and tap **Paste** during onboarding.
-
-If your desktop's configured server address is not reachable from your iPhone,
-override it for the invitation:
-
-```sh
-aven sync pair --server http://10.0.0.1:3746
-```
-
-Treat the QR code and copied invitation like a password: both contain your
-shared sync token.
-
-## Sync a client
-
-```sh
-aven sync --server http://127.0.0.1:<port>
-```
-
-When `sync.server_url` is configured, `aven sync` can omit `--server`:
-
-```sh
-aven sync
-```
-
-Check local health and remaining work without contacting the server:
-
-```sh
-aven sync status
-aven sync status --json
-```
-
-The status report shows whether sync is disabled, unconfigured, healthy,
-degraded, blocked, or failed. It also shows server pinning, pending changes and
-images, conflicts, cursor progress, and last attempt and success times. JSON is
-a versioned report intended for scripts and omits authentication values, task
-content, sync payloads, and raw server responses.
-
-### Image attachments during sync
-
-Images sync automatically but may arrive after their tasks. If an image shows
-`pending download` or sync reports `complete=false`, run `aven sync` again or
-let the running daemon finish in the background.
-
-If sync reports `attachment-quota-exceeded`, increase the relevant
-[storage limit](/configuration/#retention-and-storage-limits): `quota_bytes`
-on the device or `server_workspace_quota_bytes` on the server.
-
-:::note[Server pinning]
-A local database pins the sync server it has used. Use a fresh database for a different server.
-:::
 
 ## Automate sync with the daemon
 
-The daemon performs background sync for the configured local SQLite database.
+The daemon syncs in the background: after local edits, periodically, and with
+retries after failures. Enable automatic sync and install it as a service:
 
 ```sh
-aven daemon
-```
-
-Daemon sync requires `sync.enabled = true` and `sync.server_url`. The wake address must be loopback.
-
-The daemon wakes after successful local mutations when possible, syncs periodically, reschedules incomplete sync quickly, and backs off after failures. Local edits do not bypass a pending retry delay. When sync is blocked by protocol compatibility, the daemon checks again at the configured sync interval. You can run `aven sync` to retry immediately.
-
-Inspect service installation, configuration, executable consistency, runtime,
-and log paths without changing the service:
-
-```sh
-aven daemon status
-aven daemon status --json
-```
-
-On macOS, install it as a user LaunchAgent:
-
-```sh
+aven config set sync.enabled true
 aven daemon install
-aven daemon restart
-aven daemon uninstall
 ```
 
-Package scripts can refresh an installed LaunchAgent after replacing the binary:
+On macOS this installs a user LaunchAgent; on Linux, a systemd user service.
+On Linux, run `loginctl enable-linger` so it keeps running after you log out.
+`aven daemon status` shows whether the service is installed and running. See
+[`aven daemon`](/command-reference/#aven-daemon) for the other subcommands.
+
+## Sync manually
 
 ```sh
-aven daemon repair --if-installed --program /path/to/aven
+aven sync
 ```
 
-The repair command succeeds without changes when the LaunchAgent is absent.
+The output lists the changes sent and received and any new conflicts. In the
+TUI, press `S`, or choose **Sync now** in the Sync dialog.
 
-## Back up and move data
+### Image attachments during sync
 
-Backup, restore, export, and import guidance lives in
-[Back up and restore](/backups/).
+Images sync after their tasks. If sync reports that images are still
+transferring, run `aven sync` again or let the daemon finish in the background.
+
+## Check sync status
+
+```sh
+aven sync status
+```
+
+Status reads local state without contacting the server. It shows the server,
+local changes waiting to sync, open conflicts, and pending image transfers. The
+Sync dialog in the TUI shows the same overview and whether automatic sync is
+on.
+
+If the server refuses this device, status says so. This does not prove the
+device was removed; check from another device. Local tasks stay available.
+
+## Manage devices
+
+List the devices in the sync:
+
+```sh
+aven sync device list
+```
+
+Each device shows its name (the macOS Computer Name or Linux hostname) and a
+short ID. Names live in the encrypted data, so the server never sees them.
+
+Remove a device by its ID or a unique prefix of it:
+
+```sh
+aven sync device remove 3f9a
+```
+
+Removal stops that device from syncing and changes the encryption keys, so it
+cannot read changes made after your other devices sync and pick up the new
+keys. It keeps whatever it already downloaded. To bring it back, add it again
+with a new invitation, as in [Add a device](#add-a-device).
+
+Run removal from another device; Aven does not let a device remove itself. In
+the TUI, choose **Manage devices** in the Sync dialog.
+
+To stop syncing this database but keep its data locally, use
+[`aven sync reset`](/command-reference/#aven-sync-reset). Reset does not remove
+the device from the sync; do that from another device.
+
+A sync allows a limited number of device additions and removals over its
+lifetime. When the limit is reached, Aven says so; start a new sync as in
+[Recover from device loss](#recover-from-device-loss).
 
 ## Resolve conflicts
 
-Conflicts happen when multiple clients edit the same task field between syncs. They are explicit and field based. Inspect conflicts before resolving them.
+Conflicts happen when two devices edit the same field of the same task between
+syncs. Aven keeps both values and asks you to choose. `conflict show` prints
+each value with a token such as `v7CQBAP`; pass the token of the value to keep:
 
 ```sh
 aven conflict list
-aven conflict show APP-7KQ9 --field description
-aven conflict diff APP-7KQ9 description
-aven conflict export APP-7KQ9 description --dir conflicts
-aven conflict resolve APP-7KQ9 description --use local
+aven conflict show APP-7KQ9
+aven conflict resolve APP-7KQ9 description --use v7CQBAP
 ```
 
-Use `--value`, `--value-file`, or `--value-stdin` when neither variant is the desired final value.
-
-The TUI also has a conflicts view and conflict actions for human review.
+See [`aven conflict`](/command-reference/#aven-conflict) for exporting both
+versions or resolving with a custom value. In the TUI, press `v c` to review
+tasks with conflicts.
 
 ## Diagnose sync state
 
+`aven doctor` reports whether the database is set up, pending changes,
+conflicts, and daemon configuration. Sync errors explain what went wrong and
+the next step, with a stable code in square brackets.
+
+## Recover from device loss
+
+If one device is lost or broken, add a replacement as in
+[Add a device](#add-a-device), inviting it from a device that still syncs. No
+backup is needed. Then remove the lost device from the sync.
+
+If every syncing device is lost, restore a backup to a fresh database path and
+start a new sync from it:
+
 ```sh
-aven doctor
-aven doctor --integrity
-aven doctor --json
+aven --db /path/to/recovered.sqlite backup restore backup.aven-backup.tar.zst --yes
+aven server setup --data /path/to/new-sync-server.sqlite --url http://100.100.20.30:3746
+aven server --data /path/to/new-sync-server.sqlite --bind 100.100.20.30:3746
+aven --db /path/to/recovered.sqlite sync setup
 ```
 
-For sync specifically, doctor reports the configured server, sync cursor, pending changes, conflicts, daemon wake validity, and integrity status when requested. A missing current recurring task is repairable by running `aven recur list`. Other recurring-task integrity failures require preserving the database and recovering from a known-good backup.
+Do not reuse the old sync's server storage. Join every other device to the new
+sync from an empty database. Changes made after the backup that never synced
+are not included; check any old database you can still access before
+discarding it.
 
-## Task source compatibility
+A syncing database cannot be restored over or imported into, so always restore
+to a new path. See [Back up and restore](/backups/) for backup contents.
 
-Task origins are `cli`, `tui`, `api`, `ios`, `android`, and `unknown`. New iOS queue
-captures use `ios`; generic API creation uses `api`. The `android` value is
-reserved as a known client origin, not an indication that an Android app ships.
-Existing sources stay unchanged because their original client cannot be reliably
-inferred. Missing source values in older sync records and exports default to
-`unknown`. Unrecognized values are rejected.
+## Rebuilding sync
 
-Sync protocol 18 requires an upgraded server and all participating clients to
-understand `android`. Older protocol versions are rejected before changes are
-exchanged. Upgrade clients before opening an upgraded database or importing an
-export with an unsupported source. Keep a backup before upgrading if you need to
-return to an older release. Source is immutable, not an editable field or a
-dedicated list filter. Metadata named `source` is independent of task origin.
+Sync stops on a device when it receives a change it can't apply. If Aven on
+that device is out of date, update it. If the change itself is damaged, sync
+stops at the same place every time; `aven sync` says which case applies. Local
+tasks stay safe and editable.
+
+To keep syncing after a damaged change, start a new sync on new server storage
+from the device with the best data:
+
+1. Prepare new server storage and serve it, as in
+   [Start a server](#start-a-server). Do not reuse the old storage.
+2. On the device with the best data, reset sync and set it up again:
+
+   ```sh
+   aven sync reset
+   aven sync setup
+   ```
+
+3. On each other device, check `aven sync status` for local changes that never
+   synced. Preserve its database and create a backup with `aven backup` before
+   replacing it; JSON exports do not include image files. Changes unique to
+   that device are not merged into the new sync. Then reset and join the new
+   sync from a new database path:
+
+   ```sh
+   aven sync reset
+   aven --db /path/to/new.sqlite sync join
+   ```
+
+## What encryption protects
+
+Encryption covers synced content. It does not cover:
+
+- **Your devices.** Databases, images and backups on each device are readable.
+  Rely on your operating system's account and disk protection.
+- **Metadata.** The server sees device identities, record counts and sizes,
+  timing, connection details, the random IDs of tasks, workspaces and images,
+  which records belong together, and the exact size of each encrypted image.
+  Recurring task IDs derive from the recurrence, so someone who knows most of
+  one can confirm a guess.
+- **Availability.** A malicious server can withhold data or show devices stale
+  or different views.
+- **Device trust.** Every paired device can add and remove devices, including
+  all the others. Pair only devices you control.
+- **Credentials.** Each device stores its sync credential on disk: owner-only
+  files on Linux, Keychain-protected files on macOS. Aven backups leave it out,
+  but home-directory backups such as Time Machine may copy it. A credential
+  cannot decrypt anything, but its holder can upload records that stop other
+  devices from syncing or mark records deleted. Use HTTPS or a trusted VPN, and
+  remove a lost device promptly.
+
+## Upgrade from unencrypted sync
+
+Earlier releases synced without end-to-end encryption. Encrypted sync can't
+use that server storage, so every device moves to a new sync:
+
+1. Before upgrading, run `aven sync` with the old release on every available
+   device, then sync the device whose data will start the new sync again to
+   receive their changes and images. Check that sync is complete and
+   `aven sync status` shows no pending changes or image transfers. Create a
+   backup with `aven backup`, and preserve the old server database and image
+   storage together. If a device cannot sync, preserve its database and backup;
+   its unique edits are not included, so do not erase or replace it.
+2. Upgrade Aven everywhere, including the server. Homebrew and the install
+   script upgrade normally. On a direct install with sync configured,
+   `aven update` refuses because it can't verify sync compatibility and
+   suggests updating the server first. Updating the server doesn't help here,
+   so after step 1 run `aven update --yes --allow-sync-incompatibility`.
+3. Prepare and serve new server storage, as in
+   [Start a server](#start-a-server), with a new `--data` path.
+4. On the device with the complete data, run `aven sync setup`.
+5. Join each other device from a new database path, as in
+   [Add a device](#add-a-device).
+
+The new sync carries current images and extra image files available on the
+starting device. Deleted images held only by the old server are not transferred.
+Keep the old server storage and backups for as long as you need that recovery
+option; they still hold your data unencrypted.
+
+Old storage protects the pre-upgrade checkpoint, not edits made after cutover.
+Before rolling back, preserve each device's new work and images with a backup.
+Aven does not merge changes between the old and new sync.

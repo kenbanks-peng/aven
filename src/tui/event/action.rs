@@ -153,13 +153,13 @@ pub(crate) enum Action {
     AcceptConflictLocal,
     AcceptConflictRemote,
     BeginManualConflictMerge,
-    ShowConfigStatus,
+    ShowSync,
     ShowConfigInfo,
     ShowConfigPaths,
     ShowDatabaseStats,
     BeginUpdate,
     ShowChangelog,
-    PairMobile,
+    AddDevice,
     BeginConfigInit,
     BeginAddDependency,
     BeginRemoveDependency,
@@ -180,6 +180,21 @@ pub(crate) const SINGLE_TASK_COPY_ACTIONS: [Action; 4] = [
 ];
 
 impl Action {
+    /// Actions that can change an empty database, which joining requires
+    /// to stay empty until synced tasks are installed.
+    pub(crate) const fn creates_local_data(self) -> bool {
+        matches!(
+            self,
+            Self::BeginAddTask
+                | Self::BeginAddProject
+                | Self::BeginAddProjectPath
+                | Self::BeginAddLabel
+                | Self::BeginAddWorkspace
+                | Self::BeginRenameWorkspace
+                | Self::Undo
+        )
+    }
+
     pub(crate) const fn copy_requires_single_task(self) -> bool {
         matches!(
             self,
@@ -234,7 +249,7 @@ impl Action {
                 | Self::ToggleMarkSelected
                 | Self::ToggleMarkAllInView
                 | Self::ClearMarks
-                | Self::PairMobile
+                | Self::AddDevice
         ) {
             CommandScopePolicy::ListOnly
         } else {

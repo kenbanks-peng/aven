@@ -22,6 +22,15 @@ pub(crate) use editors::{
     PickerState, TagComboboxIntent, TagComboboxState, TextInputState, TextIntent,
 };
 
+/// The Sync › Add device page: the invitation is created behind a loading
+/// state, then its QR code replaces it in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PairingOverlay {
+    Creating { started_at: std::time::Instant },
+    Failed(String),
+    Ready(std::sync::Arc<crate::pairing::PairingPresentation>),
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverlayState {
@@ -54,20 +63,14 @@ pub(crate) enum OverlayState {
     Confirm(ConfirmState),
     TextPanel(TextPanelState),
     Changelog(ChangelogState),
-    Pairing(std::sync::Arc<crate::pairing::PairingPresentation>),
+    Pairing(PairingOverlay),
     RecurrenceHistory(Box<RecurrenceHistoryState>),
-    SyncStatus(SyncStatusState),
+    Sync(super::sync_dialog::SyncDialogState),
     DatabaseStats {
         stats: Box<TuiDatabaseStats>,
         scroll: u16,
     },
     Update(UpdateOverlayState),
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct SyncStatusState {
-    pub(crate) details: bool,
-    pub(crate) scroll: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,15 +198,6 @@ pub(crate) enum UpdateOverlayState {
         scroll: u16,
         focus: UpdateActionFocus,
         cached: bool,
-    },
-    CheckingCompatibility {
-        version: String,
-    },
-    CompatibilityWarning {
-        plan: crate::update::InstallPlan,
-        result: crate::update::CompatibilityResult,
-        server_origin: Option<String>,
-        focus: UpdateActionFocus,
     },
     Progress {
         version: String,
@@ -361,12 +355,6 @@ impl TextPanelState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SyncStatusAction {
-    SyncNow,
-    ShowConflicts,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OverlaySubmit {
     MetadataSave {
@@ -406,10 +394,6 @@ pub(crate) enum OverlaySubmit {
     },
     Order {
         order: TaskOrder,
-    },
-    SyncStatus {
-        state: SyncStatusState,
-        action: SyncStatusAction,
     },
     Confirm {
         intent: ConfirmIntent,

@@ -9,7 +9,7 @@ use crate::ids::{ProjectId, TaskId, WorkspaceId};
 use crate::recurrence::RecurrenceSeriesId;
 
 use super::AvenExport;
-use super::export_types::{EXPORT_FORMAT, EXPORT_VERSION};
+use super::export_types::{EXPORT_FORMAT, EXPORT_VERSION, RELATED_LINKS_EXPORT_VERSION};
 
 pub(super) mod recurrence;
 
@@ -20,7 +20,10 @@ pub(super) async fn ensure_supported_export(
     if export.format != EXPORT_FORMAT {
         bail!("error export-format-unsupported format={}", export.format);
     }
-    if !matches!(export.version, 1 | 2 | EXPORT_VERSION) {
+    if !matches!(
+        export.version,
+        1 | 2 | RELATED_LINKS_EXPORT_VERSION | EXPORT_VERSION
+    ) {
         bail!(
             "error export-version-unsupported version={}",
             export.version
@@ -58,9 +61,98 @@ pub(super) fn accepted_history_server(export: &AvenExport) -> Result<Option<Stri
     Ok(Some(server.trim_end_matches('/').to_string()))
 }
 
+pub(super) fn portable_history_server(export: &AvenExport) -> Result<Option<String>> {
+    let has_accepted_history = export
+        .tables
+        .changes
+        .iter()
+        .any(|change| change.server_seq.is_some());
+    if !has_accepted_history {
+        return Ok(None);
+    }
+    if export
+        .tables
+        .meta
+        .iter()
+        .any(|row| row.key == "sync_server_url")
+    {
+        return accepted_history_server(export);
+    }
+    let accepted_ids = export
+        .tables
+        .changes
+        .iter()
+        .filter(|change| change.server_seq.is_some())
+        .map(|change| change.change_id.as_str())
+        .collect::<HashSet<_>>();
+    let provenance_ids = export
+        .tables
+        .shared_history_provenance
+        .iter()
+        .map(|row| row.change_id.as_str())
+        .collect::<HashSet<_>>();
+    ensure!(
+        export.version == EXPORT_VERSION && accepted_ids.is_subset(&provenance_ids),
+        "error invalid-export-snapshot accepted sync history is missing its server identity or complete shared-history provenance"
+    );
+    Ok(None)
+}
+
 pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
+    ensure!(
+        !export
+            .tables
+            .meta
+            .iter()
+            .any(|m| m.key == "e2ee_data_only" || m.key == "e2ee_association"),
+        "error e2ee-data-only-import-unavailable"
+    );
+    portable_history_server(export)?;
+    validate_shared_snapshot(export)
+}
+
+fn validate_shared_history_provenance(export: &AvenExport) -> Result<()> {
+    let rows = &export.tables.shared_history_provenance;
+    ensure!(
+        rows.is_empty() || export.version == EXPORT_VERSION,
+        "error invalid-export-snapshot shared-history provenance requires version {EXPORT_VERSION}"
+    );
+    ensure!(
+        export.version != EXPORT_VERSION || !rows.is_empty(),
+        "error invalid-export-snapshot version {EXPORT_VERSION} requires shared-history provenance"
+    );
+    let changes = export
+        .tables
+        .changes
+        .iter()
+        .map(|change| (change.change_id.as_str(), change))
+        .collect::<HashMap<_, _>>();
+    let mut ids = HashSet::new();
+    for row in rows {
+        ensure!(
+            ids.insert(row.change_id.as_str()),
+            "error invalid-export-snapshot shared-history provenance identity is duplicated"
+        );
+        let change = changes
+            .get(row.change_id.as_str())
+            .context("error invalid-export-snapshot shared-history provenance change is missing")?;
+        ensure!(
+            change.server_seq.is_some(),
+            "error invalid-export-snapshot shared-history provenance change is not in the effective prefix"
+        );
+        ensure!(
+            matches!(
+                (row.source_server_seq, row.source_pending_rank),
+                (Some(1..), None) | (None, Some(1..))
+            ),
+            "error invalid-export-snapshot shared-history provenance order is invalid"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_shared_snapshot(export: &AvenExport) -> Result<()> {
     use crate::sync::protocol::{MAINTAINED_PROTOCOL_BASELINE, validate_operation};
-    accepted_history_server(export)?;
     for row in &export.tables.tasks {
         validate_operation(
             MAINTAINED_PROTOCOL_BASELINE,
@@ -94,14 +186,15 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
         )?;
     }
     ensure!(
-        export.version == EXPORT_VERSION
+        export.version >= RELATED_LINKS_EXPORT_VERSION
             || (export.tables.task_related_links.is_empty()
                 && !export.tables.changes.iter().any(|change| matches!(
                     change.op_type.as_str(),
                     "related_add" | "related_remove"
                 ))),
-        "error invalid-export-snapshot related links require version {EXPORT_VERSION}; related changes are not supported in older versions"
+        "error invalid-export-snapshot related links require version {RELATED_LINKS_EXPORT_VERSION}; related changes are not supported in older versions"
     );
+    validate_shared_history_provenance(export)?;
     let mut workspace_ids = HashSet::new();
     for workspace in &export.tables.workspaces {
         if workspace_ids.contains(&workspace.id) {
@@ -267,6 +360,17 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
         .iter()
         .map(|change| (change.change_id.as_str(), change))
         .collect::<HashMap<_, _>>();
+    let mut placement_history = HashSet::new();
+    for row in &export.tables.changes {
+        if row.op_type != crate::change_log::op_type::MOVE_TASKS {
+            continue;
+        }
+        let payload: crate::sync::wire::MoveTasksPayload = serde_json::from_str(&row.payload)?;
+        for task in payload.tasks {
+            placement_history.insert((task.task_id.clone(), payload.source_workspace_id.clone()));
+            placement_history.insert((task.task_id, payload.target_workspace_id.clone()));
+        }
+    }
     for link in &export.tables.task_related_links {
         ensure!(
             link.task_a_id < link.task_b_id,
@@ -298,8 +402,18 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
         ensure!(
             change.entity_type == "task"
                 && change.field.as_deref() == Some("related")
-                && payload.get("workspace_id").and_then(Value::as_str)
-                    == Some(link.workspace_id.as_str())
+                && payload
+                    .get("workspace_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|workspace| {
+                        workspace == link.workspace_id.as_str()
+                            || workspace.parse::<WorkspaceId>().is_ok_and(|workspace| {
+                                placement_history
+                                    .contains(&(link.task_a_id.clone(), workspace.clone()))
+                                    && placement_history
+                                        .contains(&(link.task_b_id.clone(), workspace))
+                            })
+                    })
                 && change_a == &link.task_a_id
                 && change_b == &link.task_b_id
                 && ((link.linked == 1 && change.op_type == "related_add")
@@ -413,7 +527,6 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
         );
     }
     let mut task_metadata_keys = HashSet::new();
-    let mut task_metadata_usage: HashMap<(WorkspaceId, TaskId), (usize, usize)> = HashMap::new();
     for value in &export.tables.task_metadata {
         ensure!(
             task_ids
@@ -437,19 +550,7 @@ pub(super) fn validate_export_snapshot(export: &AvenExport) -> Result<()> {
             )),
             "error invalid-export-snapshot task metadata identity is duplicated"
         );
-        let usage = task_metadata_usage
-            .entry((value.workspace_id.clone(), value.task_id.clone()))
-            .or_default();
-        usage.0 += 1;
-        usage.1 += value.value.len();
     }
-    ensure!(
-        task_metadata_usage.values().all(|(count, bytes)| {
-            *count <= crate::metadata::MAX_METADATA_VALUES
-                && *bytes <= crate::metadata::MAX_METADATA_TOTAL_BYTES
-        }),
-        "error invalid-export-snapshot task metadata limits exceeded"
-    );
 
     let series_ids = export
         .tables

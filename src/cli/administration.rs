@@ -13,8 +13,8 @@ commands."#;
 
 pub(super) const CONFIG_SET_HELP: &str = r#"Accepted values:
   sync.enabled, update.automatic_checks       true | false
-  sync.server_url                             HTTP or HTTPS URL | null
   sync.interval_seconds                       positive integer
+  sync.qr_glyphs                              auto | sextant | half-block
   local.db_path                               nonempty path | null
   local.image_optimization                    off | paste | on
 
@@ -51,12 +51,6 @@ pub(crate) enum CodingAgentArg {
 pub(crate) struct SelfUpdateArgs {
     #[arg(long, help = "Install an available direct update")]
     pub(crate) yes: bool,
-    #[arg(
-        long,
-        requires = "yes",
-        help = "Install even when sync compatibility cannot be confirmed"
-    )]
-    pub(crate) allow_sync_incompatibility: bool,
 }
 
 #[derive(Args)]
@@ -264,10 +258,10 @@ pub(crate) struct ConfigSetArgs {
 pub(crate) enum ConfigKey {
     #[value(name = "sync.enabled")]
     SyncEnabled,
-    #[value(name = "sync.server_url")]
-    SyncServerUrl,
     #[value(name = "sync.interval_seconds")]
     SyncIntervalSeconds,
+    #[value(name = "sync.qr_glyphs")]
+    SyncQrGlyphs,
     #[value(name = "update.automatic_checks")]
     UpdateAutomaticChecks,
     #[value(name = "local.db_path")]

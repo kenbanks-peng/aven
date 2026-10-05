@@ -130,6 +130,13 @@ Inside a group, queue order is stable and favors important statuses, higher prio
 
 Deleted tasks are soft-deleted. They are hidden from normal task views and stay available through explicit deleted-task list and search options.
 
+## Task source
+
+Every task records the client that created it: `cli`, `tui`, `api`, `ios`,
+`android`, or `unknown`. Source is set once and cannot be edited. Tasks from
+older releases use `unknown`. Metadata named `source` is unrelated to task
+source.
+
 ## Sync conflicts
 
 When sync is enabled, the same task can be edited in more than one place before changes sync. aven records conflicts by field instead of overwriting either side.

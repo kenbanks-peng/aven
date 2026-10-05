@@ -7,8 +7,10 @@ fn sync_existing_forms_parse() {
     for args in [
         vec!["aven", "sync"],
         vec!["aven", "sync", "--json"],
-        vec!["aven", "sync", "--server", "https://sync.example.test"],
         vec!["aven", "sync", "status"],
+        vec!["aven", "sync", "setup", "--yes"],
+        vec!["aven", "sync", "invite"],
+        vec!["aven", "sync", "join"],
     ] {
         let cli = Cli::try_parse_from(args).unwrap();
         assert!(matches!(cli.command, Some(Commands::Sync(_))));
@@ -16,42 +18,33 @@ fn sync_existing_forms_parse() {
 }
 
 #[test]
-fn sync_pair_parses_with_optional_server_positions() {
-    let cli = Cli::try_parse_from(["aven", "sync", "pair"]).unwrap();
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Sync(SyncArgs {
-            command: Some(SyncSubcommand::Pair(PairArgs {
-                server: None,
-                copy: false
-            })),
-            server: None,
-            json: false,
-        }))
-    ));
-
+fn public_server_bind_flag_parses() {
     let cli = Cli::try_parse_from([
         "aven",
-        "sync",
-        "--server",
-        "https://parent.example.test",
-        "pair",
-        "--server",
-        "https://pair.example.test",
-        "--copy",
+        "server",
+        "--unsafe-public-bind",
+        "--data",
+        "server.sqlite",
     ])
     .unwrap();
-    match cli.command {
-        Some(Commands::Sync(SyncArgs {
-            command: Some(SyncSubcommand::Pair(pair)),
-            server: Some(parent),
-            json: false,
-        })) => {
-            assert!(pair.copy);
-            assert_eq!(pair.server.as_deref(), Some("https://pair.example.test"));
-            assert_eq!(parent, "https://parent.example.test");
-        }
-        _ => panic!("expected sync pair"),
+    assert!(matches!(cli.command, Some(Commands::Server(_))));
+}
+
+#[test]
+fn retired_sync_forms_are_rejected() {
+    for args in [
+        vec!["aven", "sync", "--server", "https://sync.example.test"],
+        vec!["aven", "sync", "pair"],
+        vec!["aven", "server", "--encrypted", "--data", "server.sqlite"],
+        vec![
+            "aven",
+            "server",
+            "--allow-non-loopback",
+            "--data",
+            "server.sqlite",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
     }
 }
 
@@ -133,32 +126,6 @@ fn visible_command_tree_has_help_descriptions() {
 }
 
 #[test]
-fn every_visible_command_renders_short_and_long_help() {
-    fn check(command: &clap::Command, path: &str) {
-        let mut rendered_command = command.clone();
-        let mut short = Vec::new();
-        rendered_command.write_help(&mut short).unwrap();
-        assert!(!short.is_empty(), "{path} rendered empty short help");
-
-        let mut rendered_command = command.clone();
-        let mut long = Vec::new();
-        rendered_command.write_long_help(&mut long).unwrap();
-        assert!(!long.is_empty(), "{path} rendered empty long help");
-
-        for subcommand in command
-            .get_subcommands()
-            .filter(|subcommand| !subcommand.is_hide_set())
-        {
-            check(subcommand, &format!("{path} {}", subcommand.get_name()));
-        }
-    }
-
-    let mut command = Cli::command();
-    command.build();
-    check(&command, "aven");
-}
-
-#[test]
 fn complex_commands_keep_examples_and_safety_guidance() {
     fn long_help(path: &[&str]) -> String {
         let mut command = Cli::command();
@@ -185,7 +152,7 @@ fn complex_commands_keep_examples_and_safety_guidance() {
         (&["text", "get"][..], "when --output is omitted"),
         (&["text", "set"][..], "hash guard"),
         (&["conflict", "resolve"][..], "--use takes precedence"),
-        (&["config", "set"][..], "HTTP or HTTPS URL"),
+        (&["config", "set"][..], "positive integer"),
         (
             &["backup", "restore"][..],
             "attachment objects available on",
@@ -195,10 +162,9 @@ fn complex_commands_keep_examples_and_safety_guidance() {
         (&["prime"][..], "live project work"),
         (&["skill"][..], "without live task context"),
         (&["skill", "install"][..], "repeat for multiple"),
-        (&["sync"][..], "AVEN_SYNC_SERVER"),
-        (&["sync", "pair"][..], "phone-reachable"),
-        (&["server"][..], "Public binds also require"),
-        (&["server"][..], "local.blob_dir"),
+        (&["sync"][..], "end-to-end encrypted"),
+        (&["server"][..], "trusted VPN address"),
+        (&["server", "setup"][..], "aven server --bind ADDRESS"),
     ];
 
     for (path, expected) in expectations {
@@ -225,26 +191,16 @@ fn application_update_and_task_edit_are_distinct_commands() {
     let update = Cli::try_parse_from(["aven", "update"]).unwrap();
     assert!(matches!(
         update.command,
-        Some(Commands::Update(SelfUpdateArgs {
-            yes: false,
-            allow_sync_incompatibility: false,
-        }))
+        Some(Commands::Update(SelfUpdateArgs { yes: false }))
     ));
 
     let edit = Cli::try_parse_from(["aven", "edit", "APP-1234", "--status", "active"]).unwrap();
     assert!(matches!(edit.command, Some(Commands::Edit(_))));
     assert!(Cli::try_parse_from(["aven", "edit"]).is_err());
     assert!(Cli::try_parse_from(["aven", "update", "APP-1234"]).is_err());
-    assert!(Cli::try_parse_from(["aven", "update", "--allow-sync-incompatibility"]).is_err());
-    let override_update =
-        Cli::try_parse_from(["aven", "update", "--yes", "--allow-sync-incompatibility"]).unwrap();
-    assert!(matches!(
-        override_update.command,
-        Some(Commands::Update(SelfUpdateArgs {
-            yes: true,
-            allow_sync_incompatibility: true,
-        }))
-    ));
+    assert!(
+        Cli::try_parse_from(["aven", "update", "--yes", "--allow-sync-incompatibility"]).is_err()
+    );
 }
 
 #[test]

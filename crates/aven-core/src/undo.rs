@@ -1,6 +1,6 @@
 use crate::ids::{ProjectId, WorkspaceId};
 use crate::operations::{RecurrenceStructuralMutation, RecurrenceTaskMutation};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use anyhow::{Result, bail, ensure};
 use sqlx::{Row, SqliteConnection};
@@ -51,44 +51,12 @@ impl PendingUndoPresentation {
 pub enum UndoContext {
     #[default]
     None,
-    Tui {
-        summary: String,
-    },
-    TuiTaskMutation {
-        single_summary: Option<String>,
-        batch_action: String,
-    },
+    Tui,
 }
 
 impl UndoContext {
-    pub fn tui(summary: impl Into<String>) -> Self {
-        Self::Tui {
-            summary: summary.into(),
-        }
-    }
-
-    pub fn tui_task_mutation(
-        single_summary: Option<String>,
-        batch_action: impl Into<String>,
-    ) -> Self {
-        Self::TuiTaskMutation {
-            single_summary,
-            batch_action: batch_action.into(),
-        }
-    }
-
-    pub(crate) fn task_mutation_summary(self, changed_count: usize) -> Option<String> {
-        match self {
-            Self::None => None,
-            Self::Tui { summary } => Some(summary),
-            Self::TuiTaskMutation {
-                single_summary,
-                batch_action,
-            } => single_summary.filter(|_| changed_count == 1).or_else(|| {
-                let noun = if changed_count == 1 { "task" } else { "tasks" };
-                Some(format!("{batch_action} {changed_count} {noun}"))
-            }),
-        }
+    pub fn tui() -> Self {
+        Self::Tui
     }
 }
 
@@ -420,7 +388,6 @@ pub(crate) async fn conflict_row_id(
 pub(crate) async fn record_tui_undo(
     conn: &mut SqliteConnection,
     workspace_id: &WorkspaceId,
-    summary: &str,
     payload: UndoPayload,
 ) -> Result<()> {
     if is_applying_undo() || !undo_payload_has_effect(&payload) {
@@ -428,6 +395,7 @@ pub(crate) async fn record_tui_undo(
     }
     let id = new_id();
     let created_at = now();
+    let summary = undo_operation(&payload.commands);
     let seq: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM tui_undo_entries WHERE workspace_id = ?",
     )
@@ -511,7 +479,15 @@ fn classify_undo_commands(id: String, commands: &[UndoCommand]) -> PendingUndoPr
         }
     }
 
-    let operation = if commands
+    PendingUndoPresentation {
+        id,
+        operation: undo_operation(commands).to_string(),
+        task_ids: task_ids.into_iter().collect(),
+    }
+}
+
+fn undo_operation(commands: &[UndoCommand]) -> &'static str {
+    if commands
         .iter()
         .any(|command| matches!(command, UndoCommand::DeleteCreatedTask { .. }))
     {
@@ -537,12 +513,6 @@ fn classify_undo_commands(id: String, commands: &[UndoCommand]) -> PendingUndoPr
             .iter()
             .find_map(undo_command_operation)
             .unwrap_or("last TUI mutation")
-    };
-
-    PendingUndoPresentation {
-        id,
-        operation: operation.to_string(),
-        task_ids: task_ids.into_iter().collect(),
     }
 }
 
@@ -621,6 +591,64 @@ pub(crate) async fn clear_pending_tui_undo_entries(conn: &mut SqliteConnection) 
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn discard_pending_tui_undo_for_tasks(
+    conn: &mut SqliteConnection,
+    task_ids: &HashSet<crate::ids::TaskId>,
+) -> Result<()> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, payload FROM tui_undo_entries WHERE undone_at IS NULL")
+            .fetch_all(&mut *conn)
+            .await?;
+    for (id, payload) in rows {
+        let payload: UndoPayload = serde_json::from_str(&payload)?;
+        if payload
+            .commands
+            .iter()
+            .flat_map(undo_command_task_ids)
+            .any(|task_id| task_ids.contains(task_id))
+        {
+            sqlx::query("DELETE FROM tui_undo_entries WHERE id = ?")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+fn undo_command_task_ids(command: &UndoCommand) -> Vec<&crate::ids::TaskId> {
+    match command {
+        UndoCommand::SetTaskField { task_id, .. }
+        | UndoCommand::SetTaskLabels { task_id, .. }
+        | UndoCommand::SetTaskMetadata { task_id, .. }
+        | UndoCommand::DeleteCreatedTask { task_id, .. }
+        | UndoCommand::SetNoteBody { task_id, .. }
+        | UndoCommand::RestoreDeletedNote { task_id, .. }
+        | UndoCommand::DeleteCreatedNote { task_id, .. }
+        | UndoCommand::RestoreConflictResolution { task_id, .. } => vec![task_id],
+        UndoCommand::AddTaskDependency {
+            task_id,
+            depends_on_task_id,
+        }
+        | UndoCommand::RemoveTaskDependency {
+            task_id,
+            depends_on_task_id,
+        } => vec![task_id, depends_on_task_id],
+        UndoCommand::SetTaskRelatedLink {
+            task_id,
+            related_task_id,
+            ..
+        } => vec![task_id, related_task_id],
+        UndoCommand::AddEpicChild { epic_id, child_id }
+        | UndoCommand::RemoveEpicChild { epic_id, child_id } => vec![epic_id, child_id],
+        UndoCommand::DeleteCreatedProject { .. }
+        | UndoCommand::SetProjectMetadata { .. }
+        | UndoCommand::DeleteCreatedLabel { .. }
+        | UndoCommand::SetLabelName { .. }
+        | UndoCommand::RestoreDeletedLabel { .. } => Vec::new(),
+    }
 }
 
 pub(crate) async fn latest_tui_undo_presentation(
@@ -1663,6 +1691,11 @@ async fn hard_delete_created_task(
     attachment_change_ids: &[String],
     affected_attachment_hashes: &mut BTreeSet<String>,
 ) -> Result<()> {
+    let mut protected_ids = Vec::with_capacity(attachment_change_ids.len() + 1);
+    protected_ids.push(create_change_id);
+    protected_ids.extend(attachment_change_ids.iter().map(String::as_str));
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(conn, &protected_ids)
+        .await?;
     collect_task_attachment_hashes(conn, workspace_id, task_id, affected_attachment_hashes).await?;
     sqlx::query("DELETE FROM task_attachments WHERE workspace_id = ? AND task_id = ?")
         .bind(workspace_id)
@@ -1776,13 +1809,15 @@ async fn delete_created_note(
     if stored_change_id != expected_change_id {
         bail!("error undo-state-changed task_id={task_id} field=note");
     }
-    for change_id in
-        std::iter::once(note_add_change_id).chain(restoration_change_ids.iter().map(String::as_str))
-    {
+    let lineage = std::iter::once(note_add_change_id)
+        .chain(restoration_change_ids.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    for change_id in &lineage {
         if !change_is_unsynced(conn, change_id).await? {
             bail!("error undo-state-changed task_id={task_id} field=note");
         }
     }
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(conn, &lineage).await?;
     sqlx::query("DELETE FROM notes WHERE workspace_id = ? AND id = ? AND task_id = ?")
         .bind(workspace_id)
         .bind(note_id)
@@ -1842,6 +1877,11 @@ async fn delete_created_project(
     if path_refs > 0 {
         bail!("error undo-state-changed project_key={project_key}");
     }
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(
+        conn,
+        &[create_change_id],
+    )
+    .await?;
     sqlx::query("DELETE FROM projects WHERE workspace_id = ? AND key = ?")
         .bind(workspace_id)
         .bind(project_key)
@@ -1940,6 +1980,11 @@ async fn delete_created_label(
     if task_refs > 0 || series_refs > 0 {
         bail!("error undo-state-changed label={label}");
     }
+    crate::sync::shared_state::ensure_changes_not_local_capture_protected(
+        conn,
+        &[create_change_id],
+    )
+    .await?;
     sqlx::query("DELETE FROM labels WHERE workspace_id = ? AND name = ?")
         .bind(workspace_id)
         .bind(label)

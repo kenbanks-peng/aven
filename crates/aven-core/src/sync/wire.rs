@@ -9,11 +9,10 @@ use crate::attachments::validation::{
     validate_media_type,
 };
 use crate::change_log::op_type;
-use crate::ids::{BASE32, MetadataFieldId, ProjectId, WorkspaceId};
+use crate::ids::{BASE32, MetadataFieldId, ProjectId, TaskId, WorkspaceId};
 use crate::task_fields::TaskField;
 
 mod changes;
-mod envelope;
 mod recurrence;
 #[cfg(test)]
 mod test_support;
@@ -40,7 +39,7 @@ pub fn sync_server_url_is_valid(server: &str) -> bool {
         .is_ok_and(sync_server_url_is_valid_url)
 }
 
-pub(crate) fn sync_server_url_is_valid_url(url: &url::Url) -> bool {
+fn sync_server_url_is_valid_url(url: &url::Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
         && url.username().is_empty()
@@ -48,15 +47,6 @@ pub(crate) fn sync_server_url_is_valid_url(url: &url::Url) -> bool {
         && url.query().is_none()
         && url.fragment().is_none()
 }
-pub const MAX_PUSH_BATCH: usize = 256;
-/// Full decoded JSON metadata request allowance, shared by page selection and HTTP extraction.
-/// Compatible with the 2 MiB default body allowance in Axum 0.8.
-pub const MAX_SYNC_REQUEST_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_PULL_BATCH: u32 = 512;
-pub const MAX_BLOB_TRANSFER_OBJECTS: usize = 16;
-pub const MAX_BLOB_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
-pub const DAEMON_SYNC_PAGE_BUDGET: usize = 8;
-pub const DAEMON_INCOMPLETE_RESCHEDULE_MS: u64 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChangeWire {
@@ -71,6 +61,71 @@ pub struct ChangeWire {
     pub base_version: Option<String>,
     pub created_at: String,
     pub server_seq: Option<i64>,
+}
+
+pub const MAX_MOVE_TASKS: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTaskMetadataSnapshot {
+    pub(crate) field_id: MetadataFieldId,
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTaskSnapshot {
+    pub(crate) task_id: TaskId,
+    pub(crate) labels: Vec<String>,
+    pub(crate) metadata: Vec<MoveTaskMetadataSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveDependencySnapshot {
+    pub(crate) task_id: TaskId,
+    pub(crate) depends_on_task_id: TaskId,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveRelatedSnapshot {
+    pub(crate) task_a_id: TaskId,
+    pub(crate) task_b_id: TaskId,
+    pub(crate) linked: bool,
+    pub(crate) last_change_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveEpicSnapshot {
+    pub(crate) child_task_id: TaskId,
+    pub(crate) epic_task_id: TaskId,
+    pub(crate) created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MoveTasksPayload {
+    pub(crate) source_workspace_id: WorkspaceId,
+    pub(crate) target_workspace_id: WorkspaceId,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project_key: String,
+    pub(crate) project_name: String,
+    pub(crate) project_prefix: String,
+    pub(crate) tasks: Vec<MoveTaskSnapshot>,
+    pub(crate) dependencies: Vec<MoveDependencySnapshot>,
+    pub(crate) related: Vec<MoveRelatedSnapshot>,
+    pub(crate) epics: Vec<MoveEpicSnapshot>,
+}
+
+impl MoveTasksPayload {
+    pub(crate) fn from_change(change: &ChangeWire) -> Result<Self> {
+        changes::validate_move_tasks(change)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,186 +210,40 @@ fn validate_attachment_change_envelope(change: &ChangeWire, expected_op_type: &s
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PushAck {
-    pub change_id: String,
-    pub server_seq: i64,
-}
-
-pub fn validate_blob_contracts(blobs: &[BlobUploadContract]) -> Result<()> {
-    envelope::validate_blob_contracts(blobs)
-}
-
-pub fn validate_blob_hashes(hashes: &[String]) -> Result<()> {
-    envelope::validate_blob_hashes(hashes)
-}
-
-pub fn validate_sync_protocol_version(client: u32, server: u32) -> Result<()> {
-    envelope::validate_sync_protocol_version(client, server)
-}
-
-pub fn validate_sync_request_protocol_version(client: Option<u32>) -> Result<()> {
-    envelope::validate_sync_request_protocol_version(client)
-}
-
-pub fn request_pull_limit(requested: Option<u32>) -> Result<u32> {
-    envelope::request_pull_limit(requested)
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ValidatedSyncRequestEnvelope {
-    pub after: i64,
-    pub pull_limit: u32,
-    pub push_count: usize,
-}
-
-pub fn validate_sync_request_envelope(
-    request: &SyncRequest,
-) -> Result<ValidatedSyncRequestEnvelope> {
-    envelope::validate_sync_request_envelope(request)
-}
-
-pub(crate) fn validate_request_at_protocol(
-    request: &SyncRequest,
-    protocol: u32,
-) -> Result<ValidatedSyncRequestEnvelope> {
-    envelope::validate_request_at_protocol(request, protocol)
-}
-
-pub fn validate_sync_response_for_request(
-    after: i64,
-    pull_limit: u32,
-    request_change_ids: &[String],
-    response: &SyncResponse,
-) -> Result<()> {
-    envelope::validate_sync_response_for_request(after, pull_limit, request_change_ids, response)
-}
-
-pub(crate) fn validate_response_at_protocol(
-    protocol: u32,
-    after: i64,
-    pull_limit: u32,
-    request_change_ids: &[String],
-    response: &SyncResponse,
-) -> Result<()> {
-    envelope::validate_response_at_protocol(
-        protocol,
-        after,
-        pull_limit,
-        request_change_ids,
-        response,
-    )
-}
-
-#[derive(Debug)]
-pub struct ChangeRow {
-    pub change_id: String,
-    pub client_id: String,
-    pub local_seq: i64,
-    pub entity_type: String,
-    pub entity_id: String,
-    pub field: Option<String>,
-    pub op_type: String,
-    pub payload: String,
-    pub base_version: Option<String>,
-    pub created_at: String,
-    pub server_seq: Option<i64>,
-}
-
-impl ChangeRow {
-    pub fn into_wire(self) -> ChangeWire {
-        ChangeWire {
-            change_id: self.change_id,
-            client_id: self.client_id,
-            local_seq: self.local_seq,
-            entity_type: self.entity_type,
-            entity_id: self.entity_id,
-            field: self.field,
-            op_type: self.op_type,
-            payload: serde_json::from_str(&self.payload).unwrap_or(Value::Null),
-            base_version: self.base_version,
-            created_at: self.created_at,
-            server_seq: self.server_seq,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SyncRequest {
-    #[serde(default)]
-    pub protocol_version: Option<u32>,
-    pub client_id: String,
-    pub after: i64,
-    #[serde(default)]
-    pub pull_limit: Option<u32>,
-    pub changes: Vec<ChangeWire>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SyncResponse {
-    pub protocol_version: u32,
-    pub cursor: i64,
-    pub has_more: bool,
-    #[serde(default)]
-    pub push_acks: Vec<PushAck>,
-    pub changes: Vec<ChangeWire>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BlobUploadContract {
-    pub workspace_id: String,
-    pub sha256: String,
-    pub byte_size: i64,
-    pub media_type: String,
-    pub width: i64,
-    pub height: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MissingBlobsRequest {
-    pub blobs: Vec<BlobUploadContract>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct MissingBlobsResponse {
-    pub missing: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChangeDirection {
-    Pushed,
-    Pulled,
-}
-
+#[cfg(any(test, feature = "test-support"))]
 pub fn validate_pushed_change(change: &ChangeWire) -> Result<()> {
     validate_local_change_shape(change)?;
     super::protocol::validate_change(SYNC_PROTOCOL_VERSION, change)
 }
 
+/// Largest local sequence a change may carry. Installations number their own
+/// writes upward from one and adopt the largest applied remote value, so the
+/// bound keeps every replica's next local sequence far from overflow.
+pub(crate) const MAX_LOCAL_SEQ: i64 = 1 << 53;
+
 pub(crate) fn validate_local_change_shape(change: &ChangeWire) -> Result<()> {
-    validate_change_shape(change, ChangeDirection::Pushed)
-}
-
-fn validate_pulled_change(change: &ChangeWire) -> Result<()> {
-    validate_change_shape(change, ChangeDirection::Pulled)
-}
-
-fn validate_change_shape(change: &ChangeWire, direction: ChangeDirection) -> Result<()> {
     ensure_non_empty("change_id", &change.change_id)?;
     ensure_non_empty("client_id", &change.client_id)?;
     ensure_non_empty("entity_id", &change.entity_id)?;
     ensure_non_empty("op_type", &change.op_type)?;
     ensure_non_empty("entity_type", &change.entity_type)?;
-    if direction == ChangeDirection::Pushed {
-        ensure_sync_id("change_id", &change.change_id)?;
+    ensure_sync_id("change_id", &change.change_id)?;
+    if change.server_seq.is_some() {
+        bail!("error invalid-sync-change server_seq client-supplied");
     }
-    validate_change_server_seq(change, direction)?;
+    if !(0..=MAX_LOCAL_SEQ).contains(&change.local_seq) {
+        bail!("error invalid-sync-change local_seq out-of-range");
+    }
     if !change.payload.is_object() {
         bail!("error invalid-sync-change payload expected-object");
     }
     serialize_change_payload(&change.payload)?;
 
     match change.op_type.as_str() {
+        op_type::MOVE_TASKS => {
+            changes::validate_move_tasks(change)?;
+        }
+        op_type::PUBLISH_DEVICE_LABEL => changes::validate_publish_device_label(change)?,
         op_type::CREATE_WORKSPACE => changes::validate_create_workspace(change)?,
         op_type::SET_WORKSPACE_FIELD => changes::validate_set_workspace_field(change)?,
         op_type::CREATE_PROJECT => changes::validate_create_project(change)?,
@@ -411,23 +320,6 @@ fn validate_blob_size_for_sync(byte_size: i64) -> Result<()> {
 
 fn map_attachment_validation(result: Result<()>) -> Result<()> {
     result.map_err(|err| anyhow::anyhow!("error invalid-sync-change {err}"))
-}
-
-fn validate_change_server_seq(change: &ChangeWire, direction: ChangeDirection) -> Result<()> {
-    match direction {
-        ChangeDirection::Pushed if change.server_seq.is_some() => {
-            bail!("error invalid-sync-change server_seq client-supplied");
-        }
-        ChangeDirection::Pulled => match change.server_seq {
-            Some(server_seq) if server_seq > 0 => {}
-            Some(server_seq) => {
-                bail!("error invalid-sync-change server_seq={server_seq}");
-            }
-            None => bail!("error invalid-sync-change server_seq missing"),
-        },
-        ChangeDirection::Pushed => {}
-    }
-    Ok(())
 }
 
 fn validate_sync_task_field_value(field: TaskField, value: &str) -> Result<()> {
