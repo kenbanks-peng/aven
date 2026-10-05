@@ -3,6 +3,10 @@ title: Changelog
 description: Release notes for aven.
 ---
 
+## v0.1.46 (2026-10-05)
+
+- A sync-server Docker image is now available at `ghcr.io/raine/aven` for Linux amd64 and arm64. Run it with [Docker or Docker Compose](https://aventasks.dev/sync/#run-with-docker), or build from source. ([#32](https://github.com/raine/aven/issues/32))
+
 ## v0.1.45 (2026-10-04)
 
 - Sync is now [end-to-end encrypted](https://aventasks.dev/sync/). Devices encrypt tasks, history and images before upload, so the sync server cannot read your tasks or images. It still sees [some metadata](https://aventasks.dev/sync/#what-encryption-protects), such as IDs, sizes and timing.
