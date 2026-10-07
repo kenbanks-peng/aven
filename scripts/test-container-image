@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# != 2 ]]; then
+  echo 'usage: scripts/test-container-image IMAGE linux/amd64|linux/arm64' >&2
+  exit 2
+fi
+image="$1"
+platform="$2"
+case "$platform" in linux/amd64 | linux/arm64) ;; *) echo 'unsupported platform' >&2; exit 2 ;; esac
+umask 077
+scratch="$(mktemp -d)"
+name="aven-image-test-$(basename "$scratch" | tr '[:upper:].' '[:lower:]-')"
+volume="$name-data"
+cleanup() {
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker volume rm "$volume" >/dev/null 2>&1 || true
+  rm -rf "$scratch"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+docker volume create "$volume" >/dev/null
+docker create --name "$name" --platform "$platform" -v "$volume:/data" "$image" >/dev/null
+# Inspect the selected image ID, not the host-default platform of a manifest tag.
+image_id="$(docker inspect --format '{{.Image}}' "$name")"
+[[ "$(docker image inspect --format '{{.Config.User}}' "$image_id")" == '65532:65532' ]]
+[[ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image_id")" == "$platform" ]]
+docker start "$name" >/dev/null
+for ((attempt = 0; attempt < 30; attempt++)); do
+  [[ "$(docker inspect --format '{{.State.Running}}' "$name")" == true ]] || break
+  sleep 1
+done
+if [[ "$(docker inspect --format '{{.State.Running}}' "$name")" == true ||
+      "$(docker inspect --format '{{.State.ExitCode}}' "$name")" == 0 ]]; then
+  echo 'unprepared storage did not fail promptly' >&2
+  exit 1
+fi
+docker logs "$name" >"$scratch/unprepared" 2>&1
+grep -q 'server-storage-unprepared' "$scratch/unprepared"
+docker rm "$name" >/dev/null
+echo "$platform: unprepared storage refused"
+
+# Setup output grants authority over the server; never print or retain it.
+docker run --rm --name "$name" --platform "$platform" -v "$volume:/data" "$image" \
+  setup --url https://sync.example.com --invitation-only >"$scratch/invitation" 2>"$scratch/setup-error"
+grep -q '^aven-setup:' "$scratch/invitation"
+rm "$scratch/invitation" "$scratch/setup-error"
+echo "$platform: explicit setup as non-root succeeded"
+
+start() {
+  docker run -d --name "$name" --platform "$platform" --stop-timeout 15 \
+    -v "$volume:/data" -p 127.0.0.1::3746 "$image" >/dev/null
+}
+reachable() {
+  local port status attempt
+  port="$(docker port "$name" 3746/tcp)"
+  port="${port##*:}"
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    status="$(curl --silent --output "$scratch/response" --write-out '%{http_code}' \
+      --max-time 2 "http://127.0.0.1:$port/" || true)"
+    if [[ "$status" == 404 && "$(cat "$scratch/response")" == '{"error":"not-found"}' ]]; then
+      echo "$platform: HTTP router reachable"
+      return
+    fi
+    if [[ "$(docker inspect --format '{{.State.Running}}' "$name")" != true ]]; then
+      docker logs "$name" >&2
+      echo 'server exited before HTTP became reachable' >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo 'timed out waiting for HTTP router' >&2
+  return 1
+}
+stop() {
+  docker stop "$name" >/dev/null
+  [[ "$(docker inspect --format '{{.State.ExitCode}}' "$name")" == 0 ]]
+  echo "$platform: SIGTERM exited cleanly"
+}
+start
+reachable
+stop
+docker start "$name" >/dev/null
+reachable
+stop
+docker rm "$name" >/dev/null
+start
+reachable
+stop
+echo "$platform: restart and replacement preserved prepared storage"

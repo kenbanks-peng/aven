@@ -1,0 +1,47 @@
+name: Container
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-image:
+    name: Source image (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+      - name: Build checked-out source
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: .
+          load: true
+          platforms: linux/${{ matrix.arch }}
+          tags: aven:source
+          cache-from: type=gha,scope=aven-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=aven-${{ matrix.arch }}
+      - name: Check container configuration and script
+        env:
+          AVEN_IMAGE: aven:source
+        run: |
+          shellcheck scripts/test-container-image
+          docker compose config --quiet
+      - name: Smoke test source image
+        run: scripts/test-container-image aven:source linux/${{ matrix.arch }}

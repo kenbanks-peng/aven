@@ -54,7 +54,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install bash jq ruby shellcheck
       - name: Check public shell scripts
-        run: shellcheck scripts/process-lock scripts/test-process-lock scripts/test-pre-commit scripts/test-workmux-environment hooks/pre-commit
+        run: shellcheck scripts/process-lock scripts/test-process-lock scripts/test-pre-commit scripts/test-workmux-environment scripts/test-container-image hooks/pre-commit
       - name: Run public shell fixtures
         run: |
           scripts/test-process-lock
